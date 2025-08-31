@@ -59,6 +59,11 @@ class Trainer():
         self.val_loss_history = []
         self.train_steps = []
         self.val_steps = []
+        
+        # Setup loss logging file
+        self.loss_log_path = os.path.join(self.run_path, "loss_log.txt")
+        with open(self.loss_log_path, 'w') as f:
+            f.write("step,train_loss,ema_train_loss,val_loss,ema_val_loss\n")
 
     def step(self, batch, is_training=True):
         """
@@ -124,20 +129,41 @@ class Trainer():
             fold = nn.Fold(output_size=(H, W), kernel_size=patch_size, stride=patch_size)
             return fold(pred_patches.transpose(1, 2))
         
+        # Create overlay: unmasked original + masked predictions
+        def create_overlay(x_patches, pred_patches, bool_mask):
+            # x_patches: (B, T, P), pred_patches: (B, T, P), bool_mask: (B, T)
+            overlay_patches = x_patches.clone()
+            overlay_patches[bool_mask] = pred_patches[bool_mask]
+            return overlay_patches
+        
+        # Convert input to patches for overlay
+        unfold = nn.Unfold(kernel_size=self.config["patch_size"], stride=self.config["patch_size"])
+        x_patches = unfold(x).transpose(1, 2)  # (B, T, P)
+        
+        # Create overlay patches
+        overlay_patches = create_overlay(x_patches, pred, bool_mask)
+        
         # Save reconstruction comparison
         x_img = x[0, 0].detach().cpu().numpy()  # First sample, first channel
         r_img = depatchify(pred)[0, 0].detach().cpu().numpy()
+        overlay_img = depatchify(overlay_patches)[0, 0].detach().cpu().numpy()
         
-        fig = plt.figure(figsize=(12, 3))  # Wide rectangular figure for time dimension
-        ax1 = plt.subplot(2, 1, 1)
+        fig = plt.figure(figsize=(12, 4.5))  # Taller figure for 3 rows
+        
+        ax1 = plt.subplot(3, 1, 1)
         ax1.imshow(x_img, origin="lower", aspect="auto")
         ax1.set_title("Input Spectrogram")
         ax1.axis("off")
         
-        ax2 = plt.subplot(2, 1, 2)
+        ax2 = plt.subplot(3, 1, 2)
         ax2.imshow(r_img, origin="lower", aspect="auto")
         ax2.set_title("Reconstructed Spectrogram")
         ax2.axis("off")
+        
+        ax3 = plt.subplot(3, 1, 3)
+        ax3.imshow(overlay_img, origin="lower", aspect="auto")
+        ax3.set_title("Overlay: Unmasked Original + Masked Predictions")
+        ax3.axis("off")
         
         fig.tight_layout()
         recon_path = os.path.join(self.imgs_path, f"recon_step_{step_num:06d}.png")
@@ -217,6 +243,10 @@ class Trainer():
                       f"Val Loss = {val_loss:.6f}, "
                       f"EMA Val = {self.ema_val_loss:.6f}")
                 
+                # Log losses to file
+                with open(self.loss_log_path, 'a') as f:
+                    f.write(f"{step_num},{train_loss:.6f},{self.ema_train_loss:.6f},{val_loss:.6f},{self.ema_val_loss:.6f}\n")
+                
                 # Save model weights
                 weight_path = os.path.join(self.weights_path, f"model_step_{step_num:06d}.pth")
                 torch.save(self.tinybird.state_dict(), weight_path)
@@ -228,24 +258,58 @@ class Trainer():
         self.end_of_train_viz()
 
     def end_of_train_viz(self):
-        """Generate and save loss plot showing training and validation curves."""
-        plt.figure(figsize=(12, 8))
+        """Generate and save loss plots showing training and validation curves."""
+        # Create figure with two subplots
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
         
-        # Plot training loss (more data points)
-        plt.plot(self.train_steps, self.train_loss_history, 
+        # First panel: All losses
+        ax1.plot(self.train_steps, self.train_loss_history, 
                 label='Training Loss', alpha=0.7, linewidth=1, color='blue')
-        
-        # Plot validation loss (fewer data points)
-        plt.plot(self.val_steps, self.val_loss_history, 
+        ax1.plot(self.val_steps, self.val_loss_history, 
                 label='Validation Loss', marker='o', markersize=3, 
                 linewidth=2, color='red')
+        ax1.set_xlabel('Training Steps')
+        ax1.set_ylabel('Loss')
+        ax1.set_title('Training and Validation Loss')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        ax1.set_yscale('log')  # Log scale for loss values
         
-        plt.xlabel('Training Steps')
-        plt.ylabel('Loss')
-        plt.title('Training and Validation Loss')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.yscale('log')  # Log scale for loss values
+        # Second panel: EMA losses only
+        # Calculate EMA train loss history for plotting
+        ema_train_history = []
+        ema_alpha = self.ema_alpha
+        ema_val = None
+        for loss in self.train_loss_history:
+            if ema_val is None:
+                ema_val = loss
+            else:
+                ema_val = ema_alpha * ema_val + (1 - ema_alpha) * loss
+            ema_train_history.append(ema_val)
+        
+        # Calculate EMA val loss history
+        ema_val_history = []
+        ema_val = None
+        for i, loss in enumerate(self.val_loss_history):
+            if ema_val is None:
+                ema_val = loss
+            else:
+                ema_val = ema_alpha * ema_val + (1 - ema_alpha) * loss
+            ema_val_history.append(ema_val)
+        
+        ax2.plot(self.train_steps, ema_train_history, 
+                label='EMA Training Loss', linewidth=2, color='darkblue')
+        ax2.plot(self.val_steps, ema_val_history, 
+                label='EMA Validation Loss', marker='o', markersize=3, 
+                linewidth=2, color='darkred')
+        ax2.set_xlabel('Training Steps')
+        ax2.set_ylabel('EMA Loss')
+        ax2.set_title('Exponential Moving Average Loss')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        ax2.set_yscale('log')  # Log scale for loss values
+        
+        plt.tight_layout()
         
         # Save the plot
         plot_path = os.path.join(self.imgs_path, 'loss_plot.png')
@@ -253,6 +317,7 @@ class Trainer():
         plt.close()
         
         print(f"Loss plot saved to: {plot_path}")
+        print(f"Loss log saved to: {self.loss_log_path}")
 
 
 if __name__ == "__main__":
@@ -264,7 +329,7 @@ if __name__ == "__main__":
     parser.add_argument("--run_name", type=str, required=True, help="directory name inside /runs to store train run details")
 
     # Defaults 
-    parser.add_argument("--steps", type=int, default=100000, help="number of training steps")
+    parser.add_argument("--steps", type=int, default=100, help="number of training steps")
     parser.add_argument("--lr", type=float, default=1e-4, help="learning rate")
     parser.add_argument("--batch_size", type=int, default=128, help="batch size")
     parser.add_argument("--patch_height", type=int, default=32, help="patch height")
@@ -272,7 +337,7 @@ if __name__ == "__main__":
     parser.add_argument("--mels", type=int, default=128, help="number of mel bins")
     parser.add_argument("--num_timebins", type=int, default=512, help="number of time bins")
     parser.add_argument("--dropout", type=float, default=0.1, help="dropout rate")
-    parser.add_argument("--mask_p", type=float, default=0.5, help="mask probability")
+    parser.add_argument("--mask_p", type=float, default=0.1, help="mask probability")
     parser.add_argument("--eval_every", type=int, default=50, help="evaluate every N steps")
 
     # Encoder Model
