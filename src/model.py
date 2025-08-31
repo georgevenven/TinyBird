@@ -1,6 +1,5 @@
 import torch, math 
 from torch import nn
-from transformers import BertModel
 
 class TinyBird(nn.Module):
     def __init__(self, config):

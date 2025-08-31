@@ -129,6 +129,16 @@ class Trainer():
             fold = nn.Fold(output_size=(H, W), kernel_size=patch_size, stride=patch_size)
             return fold(pred_patches.transpose(1, 2))
         
+        # Denormalize predictions to match original patch scale
+        def denormalize_predictions(x_patches, pred_patches):
+            # x_patches: (B, T, P), pred_patches: (B, T, P)
+            # Apply same normalization as loss function, then reverse it on predictions
+            target_mean = x_patches.mean(dim=-1, keepdim=True)
+            target_std = x_patches.std(dim=-1, keepdim=True)
+            # Denormalize: pred_denorm = pred * std + mean
+            pred_denorm = pred_patches * (target_std + 1e-6) + target_mean
+            return pred_denorm
+        
         # Create overlay: unmasked original + masked predictions
         def create_overlay(x_patches, pred_patches, bool_mask):
             # x_patches: (B, T, P), pred_patches: (B, T, P), bool_mask: (B, T)
@@ -140,12 +150,15 @@ class Trainer():
         unfold = nn.Unfold(kernel_size=self.config["patch_size"], stride=self.config["patch_size"])
         x_patches = unfold(x).transpose(1, 2)  # (B, T, P)
         
+        # Denormalize predictions to original scale
+        pred_denorm = denormalize_predictions(x_patches, pred)
+        
         # Create overlay patches
-        overlay_patches = create_overlay(x_patches, pred, bool_mask)
+        overlay_patches = create_overlay(x_patches, pred_denorm, bool_mask)
         
         # Save reconstruction comparison
         x_img = x[0, 0].detach().cpu().numpy()  # First sample, first channel
-        r_img = depatchify(pred)[0, 0].detach().cpu().numpy()
+        r_img = depatchify(pred_denorm)[0, 0].detach().cpu().numpy()  # Use denormalized predictions
         overlay_img = depatchify(overlay_patches)[0, 0].detach().cpu().numpy()
         
         fig = plt.figure(figsize=(12, 4.5))  # Taller figure for 3 rows
@@ -329,7 +342,7 @@ if __name__ == "__main__":
     parser.add_argument("--run_name", type=str, required=True, help="directory name inside /runs to store train run details")
 
     # Defaults 
-    parser.add_argument("--steps", type=int, default=100, help="number of training steps")
+    parser.add_argument("--steps", type=int, default=100_000, help="number of training steps")
     parser.add_argument("--lr", type=float, default=1e-4, help="learning rate")
     parser.add_argument("--batch_size", type=int, default=128, help="batch size")
     parser.add_argument("--patch_height", type=int, default=32, help="patch height")
@@ -337,8 +350,8 @@ if __name__ == "__main__":
     parser.add_argument("--mels", type=int, default=128, help="number of mel bins")
     parser.add_argument("--num_timebins", type=int, default=512, help="number of time bins")
     parser.add_argument("--dropout", type=float, default=0.1, help="dropout rate")
-    parser.add_argument("--mask_p", type=float, default=0.1, help="mask probability")
-    parser.add_argument("--eval_every", type=int, default=50, help="evaluate every N steps")
+    parser.add_argument("--mask_p", type=float, default=0.25, help="mask probability")
+    parser.add_argument("--eval_every", type=int, default=500, help="evaluate every N steps")
 
     # Encoder Model
     parser.add_argument("--enc_hidden_d", type=int, default=192, help="encoder hidden dimension")
