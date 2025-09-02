@@ -56,6 +56,17 @@ class Trainer():
             config_path = os.path.join(self.run_path, "config.json")
             with open(config_path, 'w') as f:
                 json.dump(config, f, indent=2)
+            
+            # Save audio processing parameters
+            audio_params = {
+                "sr": 32000,  # sample rate
+                "mels": config["mels"],  # number of mel bins
+                "hop_size": 160,  # hop length 
+                "n_fft": 1024  # FFT size
+            }
+            audio_params_path = os.path.join(self.run_path, "audio_params.json")
+            with open(audio_params_path, 'w') as f:
+                json.dump(audio_params, f, indent=2)
 
         # Setup device
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -480,7 +491,6 @@ if __name__ == "__main__":
     parser.add_argument("--train_dir", type=str, help="training directory")
     parser.add_argument("--val_dir", type=str, help="validation directory")
     parser.add_argument("--run_name", type=str, help="directory name inside /runs to store train run details")
-    parser.add_argument("--continue_from", type=str, help="continue training from existing run directory (path to run dir)")
 
     # Defaults 
     parser.add_argument("--steps", type=int, default=50_000, help="number of training steps")
@@ -495,6 +505,8 @@ if __name__ == "__main__":
     parser.add_argument("--eval_every", type=int, default=500, help="evaluate every N steps")
     parser.add_argument("--amp", action="store_true", help="enable automatic mixed precision training")
     parser.add_argument("--weight_decay", type=float, default=1e-4, help="weight decay")
+    parser.add_argument("--continue_from", type=str, help="continue training from existing run directory (path to run dir)")
+
 
     # Encoder Model
     parser.add_argument("--enc_hidden_d", type=int, default=192, help="encoder hidden dimension")

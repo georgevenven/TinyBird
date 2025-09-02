@@ -253,6 +253,9 @@ class WavToSpec:
         # Remove unpicklable Manager().Value - will create in run() if needed
 
         self.audio_files = self._gather_files()
+        
+        # Save audio parameters to destination directory
+        self._save_audio_params()
 
         # Build label map if json_path is provided
         if json_path is not None:
@@ -294,6 +297,19 @@ class WavToSpec:
             level=logging.ERROR,
             format="%(asctime)s - %(levelname)s - %(message)s"
         )
+
+    def _save_audio_params(self) -> None:
+        """Save audio processing parameters to JSON file in destination directory."""
+        params = {
+            "sr": self.sr,
+            "mels": self.n_mels,
+            "hop_size": self.step,
+            "fft": self.n_fft
+        }
+        
+        params_file = self.dst_dir / "audio_params.json"
+        with open(params_file, 'w') as f:
+            json.dump(params, f, indent=2)
 
     def _gather_files(self) -> list[Path]:
         if self.file_list:
@@ -529,7 +545,7 @@ def cli() -> None:
 
     p.add_argument("--sr", type=int, default=32_000,
                    help="Sample rate in Hz (default: 32000).")
-    p.add_argument("--step_size", type=int, default=625,
+    p.add_argument("--step_size", type=int, default=64,
                    help="STFT hop length (samples at target sample rate).")
     p.add_argument("--nfft",      type=int, default=1024,
                    help="FFT size.")
