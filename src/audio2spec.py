@@ -232,6 +232,7 @@ class WavToSpec:
         mel: bool = True,
         n_mels: int = 128,
         json_path: str | None = None,
+        max_workers: int | None = None,
     ) -> None:
         self.src_dir = Path(src_dir) if src_dir is not None else None
         self.dst_dir = Path(dst_dir)
@@ -248,6 +249,7 @@ class WavToSpec:
         self.fmt = fmt
         self.use_mel = mel
         self.n_mels = n_mels
+        self.max_workers = max_workers
 
         self._setup_logging()
         # Remove unpicklable Manager().Value - will create in run() if needed
@@ -356,8 +358,13 @@ class WavToSpec:
 
             else:
                 # ───── multi‑process pool with memory-aware workers ─────
-                num_workers = calculate_optimal_workers(len(self.audio_files))
-                print(f"Using {num_workers} workers (CPU cores: {mp.cpu_count()}, Available RAM: {psutil.virtual_memory().available // (1024**3):.1f}GB)")
+                optimal_workers = calculate_optimal_workers(len(self.audio_files))
+                if self.max_workers is not None:
+                    num_workers = min(self.max_workers, optimal_workers)
+                    print(f"Using {num_workers} workers (limited by max_workers={self.max_workers}, optimal would be {optimal_workers})")
+                else:
+                    num_workers = optimal_workers
+                print(f"Workers: {num_workers} (CPU cores: {mp.cpu_count()}, Available RAM: {psutil.virtual_memory().available // (1024**3):.1f}GB)")
                 
                 ctx = mp.get_context('spawn')  # Use spawn for better isolation
                 mgr = ctx.Manager()
@@ -564,6 +571,8 @@ def cli() -> None:
                    help="Number of mel bands (default: 128)")
     p.add_argument("--json_path", type=str, default=None,
                    help="Directory containing label JSON files (optional)")
+    p.add_argument("--max_workers", type=int, default=None,
+                   help="Maximum number of worker processes (default: auto-detect)")
     args = p.parse_args()
 
     single = args.single_threaded.lower() in {"true", "1", "yes"}
@@ -581,6 +590,7 @@ def cli() -> None:
         mel=not args.linear,
         n_mels=args.n_mels,
         json_path=args.json_path,
+        max_workers=args.max_workers,
     )
     converter.run()
 
