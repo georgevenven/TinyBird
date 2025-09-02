@@ -91,6 +91,22 @@ class TinyBird(nn.Module):
         z_keep, idx_restore, bool_mask = self.mask(z)  # mask uniformly across batch
         h = self.encoder(z_keep)                       # (B, keep, D_enc)
         return h, idx_restore, bool_mask, T
+    
+    def forward_encoder_inference(self, x: torch.Tensor):
+        """
+        Patchify → add pos enc → mask → Transformer encoder.
+        Returns:
+          h: (B, keep, D_enc), idx_restore, bool_mask, T
+        """
+        z = self.patch_projection(x)                   # (B, D_enc, H', W')
+        z = z.flatten(2, 3).transpose(1, 2)            # (B, T, D_enc)
+        B, T, D = z.shape
+        if T > self.pos_enc.size(1):
+            raise ValueError(f"T={T} exceeds max_seq={self.pos_enc.size(1)}")
+        z = z + self.pos_enc[:, :T, :]                 # (B, T, D_enc)
+
+        h = self.encoder(z)                       # (B, keep, D_enc)
+        return h
 
     def forward_decoder(self, h: torch.Tensor, idx_restore: torch.Tensor, T: int):
         """

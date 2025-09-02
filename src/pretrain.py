@@ -70,7 +70,7 @@ class Trainer():
         Perform one forward pass and optionally backward pass.
         
         Args:
-            batch: Input batch (spectrograms, labels)
+            batch: Input batch (spectrograms, filenames)
             is_training: If True, perform gradient update. If False, no gradients.
             
         Returns:
@@ -156,9 +156,16 @@ class Trainer():
         # Create overlay patches
         overlay_patches = create_overlay(x_patches, pred_denorm, bool_mask)
         
+        # Create masked original: original with black (zero) where masked
+        def create_masked_original(x_patches, bool_mask):
+            # x_patches: (B, T, P), bool_mask: (B, T)
+            masked_patches = x_patches.clone()
+            masked_patches[bool_mask] = 0  # Set masked patches to black
+            return masked_patches
+        
         # Save reconstruction comparison
         x_img = x[0, 0].detach().cpu().numpy()  # First sample, first channel
-        r_img = depatchify(pred_denorm)[0, 0].detach().cpu().numpy()  # Use denormalized predictions
+        masked_img = depatchify(create_masked_original(x_patches, bool_mask))[0, 0].detach().cpu().numpy()
         overlay_img = depatchify(overlay_patches)[0, 0].detach().cpu().numpy()
         
         fig = plt.figure(figsize=(12, 4.5))  # Taller figure for 3 rows
@@ -169,8 +176,8 @@ class Trainer():
         ax1.axis("off")
         
         ax2 = plt.subplot(3, 1, 2)
-        ax2.imshow(r_img, origin="lower", aspect="auto")
-        ax2.set_title("Reconstructed Spectrogram")
+        ax2.imshow(masked_img, origin="lower", aspect="auto")
+        ax2.set_title("Original with Mask (black = masked patches)")
         ax2.axis("off")
         
         ax3 = plt.subplot(3, 1, 3)
@@ -267,6 +274,10 @@ class Trainer():
                 # Save reconstruction visualization
                 self.save_reconstruction(val_batch, step_num)
         
+        # Save final model weights
+        final_weight_path = os.path.join(self.weights_path, f"model_step_{self.config['steps']:06d}.pth")
+        torch.save(self.tinybird.state_dict(), final_weight_path)
+        
         # Generate loss plot at the end of training
         self.end_of_train_viz()
 
@@ -342,15 +353,15 @@ if __name__ == "__main__":
     parser.add_argument("--run_name", type=str, required=True, help="directory name inside /runs to store train run details")
 
     # Defaults 
-    parser.add_argument("--steps", type=int, default=100_000, help="number of training steps")
+    parser.add_argument("--steps", type=int, default=50_000, help="number of training steps")
     parser.add_argument("--lr", type=float, default=1e-4, help="learning rate")
     parser.add_argument("--batch_size", type=int, default=128, help="batch size")
     parser.add_argument("--patch_height", type=int, default=32, help="patch height")
-    parser.add_argument("--patch_width", type=int, default=8, help="patch width")
+    parser.add_argument("--patch_width", type=int, default=4, help="patch width")
     parser.add_argument("--mels", type=int, default=128, help="number of mel bins")
-    parser.add_argument("--num_timebins", type=int, default=512, help="number of time bins")
+    parser.add_argument("--num_timebins", type=int, default=1024, help="n number of time bins")
     parser.add_argument("--dropout", type=float, default=0.1, help="dropout rate")
-    parser.add_argument("--mask_p", type=float, default=0.25, help="mask probability")
+    parser.add_argument("--mask_p", type=float, default=0.75, help="mask probability")
     parser.add_argument("--eval_every", type=int, default=500, help="evaluate every N steps")
 
     # Encoder Model

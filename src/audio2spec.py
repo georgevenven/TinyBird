@@ -223,7 +223,7 @@ class WavToSpec:
         file_list: str | None = None,
         step_size: int = 160,
         n_fft: int = 1024,
-        sr: int = 44_100,
+        sr: int = 32_000,
         take_n_random: int | None = None,
         single_threaded: bool = True,
         min_len_ms: int = 25,
@@ -527,8 +527,10 @@ def cli() -> None:
     p.add_argument("--format", choices=["pt","npz"], default="pt",
                    help="output format (default: pt, fp32)")
 
+    p.add_argument("--sr", type=int, default=32_000,
+                   help="Sample rate in Hz (default: 32000).")
     p.add_argument("--step_size", type=int, default=625,
-                   help="STFT hop length (samples at 32 kHz).")
+                   help="STFT hop length (samples at target sample rate).")
     p.add_argument("--nfft",      type=int, default=1024,
                    help="FFT size.")
     p.add_argument("--take_n_random", type=int, default=None,
@@ -556,6 +558,7 @@ def cli() -> None:
         file_list=args.file_list,
         step_size=args.step_size,
         n_fft=args.nfft,
+        sr=args.sr,
         take_n_random=args.take_n_random,
         single_threaded=single,
         fmt=args.format,
