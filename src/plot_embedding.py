@@ -39,8 +39,7 @@ def main(args):
 
         spec = spec.unsqueeze(0) # add a batch dimension
         
-        # TODO: temp conversion to float32, should be removed later
-        spec = spec.float()
+        # Using original spec dtype
         z = model.forward_encoder_inference(spec)
         B, S, D = z.shape
 

@@ -52,7 +52,12 @@ class SpectogramDataset(Dataset):
     def __getitem__(self, index):
         path = self.file_dirs[index]   # pick actual .pt path
 
-        f=torch.load(path, map_location="cpu",weights_only=False)
+        try:
+            f=torch.load(path, map_location="cpu",weights_only=False)
+        except:
+            index = random.randint(0, len(self.file_dirs)-1)
+            path = self.file_dirs[index]
+            f=torch.load(path, map_location="cpu",weights_only=False)
         spec = f['s']
         filename = path.stem
 

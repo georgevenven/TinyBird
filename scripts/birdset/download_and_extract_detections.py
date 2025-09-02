@@ -18,6 +18,7 @@
 
 import os, sys, argparse, shutil, time, json, signal, subprocess
 from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 REPO = "DBD-research-group/BirdSet"
 REV  = "b0c14a03571a7d73d56b12c4b1db81952c4f7e64"  # known-stable
@@ -44,7 +45,15 @@ def parse_args():
     ap.add_argument("--skip-coverage", action="store_true", help="Skip event-coverage computation.")
     ap.add_argument("--skip-snippets", action="store_true", help="Skip detected-event cutting step.")
     ap.add_argument("--qscale", type=int, default=5, help="libvorbis qscale if available (0..10).")
-    ap.add_argument("--retries", type=int, default=4, help="ffmpeg retry attempts per cut.")
+    ap.add_argument("--retries", type=int, default=2, help="ffmpeg retry attempts per cut.")
+    ap.add_argument("--workers", type=int, default=min(16, (os.cpu_count() or 8)),
+                    help="Parallel ffmpeg workers for cutting.")
+    ap.add_argument("--no-validate", action="store_true",
+                    help="Skip ffprobe validation of outputs (faster).")
+    ap.add_argument("--fast-flac", action="store_true",
+                    help="Use FLAC -compression_level 0 when falling back (fast).")
+    ap.add_argument("--prefer-copy-first", action="store_true",
+                    help="Try stream copy before re-encode (fast if sources permit).")
     return ap.parse_args()
 
 # ------------------------ env + utils ------------------------
@@ -230,40 +239,52 @@ def step_coverage(configs, revision, ds_cache: Path):
     if total_n:
         print(f"\nOverall  {total_k}/{total_n}  {100.0*total_k/total_n:5.1f}%")
 
-def ffmpeg_cut(src: str, start: float, end: float, dst_base: Path, qscale: int, retries: int) -> Path | None:
+def ffmpeg_cut(src: str, start: float, end: float, dst_base: Path,
+               qscale: int, retries: int, validate: bool,
+               fast_flac: bool, prefer_copy_first: bool) -> Path | None:
     dur = max(0.02, float(end) - float(start))
     dst_base.parent.mkdir(parents=True, exist_ok=True)
 
-    # Prefer Vorbis at 32 kHz if available
+    # Optionally try stream copy first (very fast if compatible)
+    if prefer_copy_first:
+        dst = dst_base.with_suffix(".ogg")
+        cmd = ["ffmpeg","-hide_banner","-loglevel","error",
+               "-ss", f"{start:.3f}","-t", f"{dur:.3f}",
+               "-i", src, "-vn", "-c","copy", "-y", str(dst)]
+        if run_with_retries(cmd, retries) and dst.exists() and dst.stat().st_size > 0 and (True if not validate else validate_audio(dst)):
+            return dst
+
+    # Vorbis at 32 kHz if available
     if have_encoder("libvorbis"):
         dst = dst_base.with_suffix(".ogg")
         cmd = ["ffmpeg","-hide_banner","-loglevel","error",
                "-ss", f"{start:.3f}","-t", f"{dur:.3f}",
                "-i", src, "-vn", "-c:a","libvorbis","-qscale:a", str(qscale),
                "-ar", str(SR), "-y", str(dst)]
-        if run_with_retries(cmd, retries) and dst.exists() and dst.stat().st_size > 0 and validate_audio(dst):
+        if run_with_retries(cmd, retries) and dst.exists() and dst.stat().st_size > 0 and (True if not validate else validate_audio(dst)):
             return dst
-
-    # Fallback: stream copy (same container/codec) may fail on Ogg page edges
-    dst = dst_base.with_suffix(".ogg")
-    cmd = ["ffmpeg","-hide_banner","-loglevel","error",
-           "-ss", f"{start:.3f}","-t", f"{dur:.3f}",
-           "-i", src, "-vn", "-c","copy", "-y", str(dst)]
-    if run_with_retries(cmd, retries) and dst.exists() and dst.stat().st_size > 0 and validate_audio(dst):
-        return dst
 
     # Fallback: FLAC at 32 kHz (lossless)
     dst = dst_base.with_suffix(".flac")
     cmd = ["ffmpeg","-hide_banner","-loglevel","error",
            "-ss", f"{start:.3f}","-t", f"{dur:.3f}",
-           "-i", src, "-vn", "-c:a","flac","-compression_level","5",
+           "-i", src, "-vn", "-c:a","flac","-compression_level","0" if fast_flac else "5",
            "-ar", str(SR), "-y", str(dst)]
-    if run_with_retries(cmd, retries) and dst.exists() and dst.stat().st_size > 0 and validate_audio(dst):
+    if run_with_retries(cmd, retries) and dst.exists() and dst.stat().st_size > 0 and (True if not validate else validate_audio(dst)):
         return dst
 
     return None
 
-def step_snippets(configs, revision, ds_cache: Path, out_dir: Path, flat: bool, qscale: int, retries: int):
+def _cut_one(task):
+    # task tuple: (src, st, en, out_base, qscale, retries, validate, fast_flac, prefer_copy_first, cfg, sp)
+    (src, st, en, out_base, qscale, retries, validate, fast_flac, prefer_copy_first, cfg, sp) = task
+    dst = ffmpeg_cut(src, st, en, Path(out_base), qscale, retries, validate, fast_flac, prefer_copy_first)
+    if dst:
+        return {"config": cfg, "species": sp, "src": src, "start": float(st), "end": float(en), "dst": str(dst)}
+    return None
+
+def step_snippets(configs, revision, ds_cache: Path, out_dir: Path, flat: bool, qscale: int, retries: int,
+                  workers: int, validate: bool, fast_flac: bool, prefer_copy_first: bool):
     ensure_ffmpeg()
     from datasets import load_dataset, DownloadConfig
     dcfg = DownloadConfig(cache_dir=str(ds_cache), resume_download=True)
@@ -273,65 +294,71 @@ def step_snippets(configs, revision, ds_cache: Path, out_dir: Path, flat: bool, 
     fails_path = out_dir / "snippets_failures.log"
 
     total_src = kept = written = 0
+    max_outstanding = workers * 4
 
     with open(manifest_path, "a", encoding="utf-8") as man, open(fails_path, "a", encoding="utf-8") as flog:
-        for cfg in configs:
-            print(f"\n== snippets {cfg} ==")
-            try:
-                ds = load_dataset(
-                    REPO, cfg, split="train",
-                    trust_remote_code=True,
-                    revision=revision,
-                    cache_dir=str(ds_cache),
-                    download_config=dcfg,
-                    download_mode="reuse_dataset_if_exists",
-                )
-            except Exception as e:
-                print(f"{cfg}: load failed -> {e}")
-                continue
-
-            to_label = ds.features["ebird_code"].int2str if "ebird_code" in ds.features else (lambda i: "unknown")
-
-            for ex in ds:
-                total_src += 1
-                events = ex.get("detected_events") or []
-                if not events:
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            for cfg in configs:
+                print(f"\n== snippets {cfg} ==")
+                try:
+                    ds = load_dataset(
+                        REPO, cfg, split="train",
+                        trust_remote_code=True,
+                        revision=revision,
+                        cache_dir=str(ds_cache),
+                        download_config=dcfg,
+                        download_mode="reuse_dataset_if_exists",
+                    )
+                except Exception as e:
+                    print(f"{cfg}: load failed -> {e}")
                     continue
-                kept += 1
 
-                src_path = ex["audio"]["path"] if "audio" in ex and isinstance(ex["audio"], dict) else None
-                if not src_path or not Path(src_path).exists():
-                    flog.write(f"missing_audio\t{src_path}\n"); continue
+                to_label = ds.features["ebird_code"].int2str if "ebird_code" in ds.features else (lambda i: "unknown")
 
-                sp = sanitize(to_label(ex.get("ebird_code", 0)))
-                base = sanitize(Path(src_path).stem)
-
-                for j, span in enumerate(events):
-                    try:
-                        st, en = float(span[0]), float(span[1])
-                    except Exception:
-                        flog.write(f"bad_event\t{src_path}\t{span}\n"); continue
-
-                    if flat:
-                        # Single folder. Keep names globally unique.
-                        out_base = out_dir / f"{cfg}_{sp}_{base}_ev{j:03d}"
-                    else:
-                        out_base = out_dir / cfg / sp / f"{base}_ev{j:03d}"
-
-                    if out_base.with_suffix(".ogg").exists() or out_base.with_suffix(".flac").exists():
+                futures = []
+                for ex in ds:
+                    total_src += 1
+                    events = ex.get("detected_events") or []
+                    if not events:
                         continue
+                    kept += 1
 
-                    dst = ffmpeg_cut(src_path, st, en, out_base, qscale=qscale, retries=retries)
-                    if dst:
-                        rec = {
-                            "config": cfg, "species": sp, "src": src_path,
-                            "start": float(st), "end": float(en),
-                            "dst": str(dst)
-                        }
-                        man.write(json.dumps(rec) + "\n")
-                        written += 1
-                    else:
-                        flog.write(f"cut_failed\t{src_path}\t{st}\t{en}\n")
+                    src_path = ex["audio"]["path"] if "audio" in ex and isinstance(ex["audio"], dict) else None
+                    if not src_path or not Path(src_path).exists():
+                        flog.write(f"missing_audio\t{src_path}\n"); continue
+
+                    sp = sanitize(to_label(ex.get("ebird_code", 0)))
+                    base = sanitize(Path(src_path).stem)
+
+                    for j, span in enumerate(events):
+                        try:
+                            st, en = float(span[0]), float(span[1])
+                        except Exception:
+                            flog.write(f"bad_event\t{src_path}\t{span}\n"); continue
+
+                        if flat:
+                            # Single folder. Keep names globally unique.
+                            out_base = out_dir / f"{cfg}_{sp}_{base}_ev{j:03d}"
+                        else:
+                            out_base = out_dir / cfg / sp / f"{base}_ev{j:03d}"
+
+                        if out_base.with_suffix(".ogg").exists() or out_base.with_suffix(".flac").exists():
+                            continue
+                        task = (src_path, st, en, str(out_base), qscale, retries, validate, fast_flac, prefer_copy_first, cfg, sp)
+                        futures.append(executor.submit(_cut_one, task))
+                        if len(futures) >= max_outstanding:
+                            for f in as_completed(futures[:workers]):
+                                rec = f.result()
+                                if rec:
+                                    man.write(json.dumps(rec) + "\n"); written += 1
+                                else:
+                                    pass
+                            del futures[:workers]
+                # drain remaining
+                for f in as_completed(futures):
+                    rec = f.result()
+                    if rec:
+                        man.write(json.dumps(rec) + "\n"); written += 1
 
     print(f"\nDone. source items: {total_src}  with_events: {kept}  snippets_written: {written}")
     print(f"Manifest: {manifest_path}")
@@ -378,7 +405,10 @@ def main():
         print("skip-coverage: enabled")
 
     if not args.skip_snippets:
-        step_snippets(configs, args.revision, ds_cache, out_dir, args.flat, args.qscale, args.retries)
+        step_snippets(configs, args.revision, ds_cache, out_dir, args.flat,
+                      args.qscale, args.retries, args.workers,
+                      validate=(not args.no_validate), fast_flac=args.fast_flac,
+                      prefer_copy_first=args.prefer_copy_first)
     else:
         print("skip-snippets: enabled")
 

@@ -6,27 +6,44 @@ from datetime import datetime
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR
 import matplotlib.pyplot as plt
 from model import TinyBird
 
 class Trainer():
-    def __init__(self, config):
+    def __init__(self, config, pretrained_model=None):
         self.config = config
         
-        # Setup run directory - move existing to archive if it exists
-        runs_base = os.path.join("..", "runs")
-        os.makedirs(runs_base, exist_ok=True)
-        
-        self.run_path = os.path.join(runs_base, config["run_name"])
-        if os.path.exists(self.run_path):
-            archive_dir = os.path.join(runs_base, "archive")
-            os.makedirs(archive_dir, exist_ok=True)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            archived_path = os.path.join(archive_dir, f"{config['run_name']}_{timestamp}")
-            shutil.move(self.run_path, archived_path)
-            print(f"Moved existing run directory to: {archived_path}")
-        
-        os.makedirs(self.run_path, exist_ok=True)
+        # Handle continue mode vs new training
+        if config.get('is_continuing', False):
+            # Continue training mode - use existing run directory
+            continue_from = config['continue_from']
+            if os.path.isabs(continue_from):
+                self.run_path = continue_from
+            else:
+                runs_base = os.path.join("..", "runs")
+                self.run_path = os.path.join(runs_base, continue_from)
+            
+            if not os.path.exists(self.run_path):
+                raise FileNotFoundError(f"Continue directory not found: {self.run_path}")
+            
+            print(f"Continuing training from: {self.run_path}")
+            
+        else:
+            # New training mode - setup run directory
+            runs_base = os.path.join("..", "runs")
+            os.makedirs(runs_base, exist_ok=True)
+            
+            self.run_path = os.path.join(runs_base, config["run_name"])
+            if os.path.exists(self.run_path):
+                archive_dir = os.path.join(runs_base, "archive")
+                os.makedirs(archive_dir, exist_ok=True)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                archived_path = os.path.join(archive_dir, f"{config['run_name']}_{timestamp}")
+                shutil.move(self.run_path, archived_path)
+                print(f"Moved existing run directory to: {archived_path}")
+            
+            os.makedirs(self.run_path, exist_ok=True)
         
         # Create subdirectories
         self.weights_path = os.path.join(self.run_path, "weights")
@@ -34,20 +51,35 @@ class Trainer():
         os.makedirs(self.weights_path, exist_ok=True)
         os.makedirs(self.imgs_path, exist_ok=True)
         
-        # Save config as JSON
-        config_path = os.path.join(self.run_path, "config.json")
-        with open(config_path, 'w') as f:
-            json.dump(config, f, indent=2)
+        # Save config as JSON (only for new runs)
+        if not config.get('is_continuing', False):
+            config_path = os.path.join(self.run_path, "config.json")
+            with open(config_path, 'w') as f:
+                json.dump(config, f, indent=2)
 
         # Setup device
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Using device: {self.device}")
         
         # Initialize model
-        self.tinybird = TinyBird(config).to(self.device)
+        if pretrained_model is not None:
+            # Use the loaded model from continue mode
+            self.tinybird = pretrained_model.to(self.device)
+            print("Using loaded model from checkpoint")
+        else:
+            # Initialize new model
+            self.tinybird = TinyBird(config).to(self.device)
+            print("Initialized new model")
         
         # Initialize optimizer
-        self.optimizer = AdamW(self.tinybird.parameters(), lr=config["lr"], weight_decay=0.0)
+        self.optimizer = AdamW(self.tinybird.parameters(), lr=config["lr"], weight_decay=config["weight_decay"])
+        
+        # Initialize cosine annealing scheduler
+        self.scheduler = CosineAnnealingLR(self.optimizer, T_max=config["steps"])
+        
+        # Initialize AMP scaler if AMP is enabled
+        self.use_amp = config.get("amp", False)
+        self.scaler = torch.cuda.amp.GradScaler() if self.use_amp else None
         
         # Loss tracking
         self.ema_train_loss = None
@@ -60,10 +92,79 @@ class Trainer():
         self.train_steps = []
         self.val_steps = []
         
+        # Initialize step tracking
+        self.starting_step = 0
+        if config.get('is_continuing', False):
+            # Load existing step count and loss history
+            self._load_training_state()
+        
         # Setup loss logging file
         self.loss_log_path = os.path.join(self.run_path, "loss_log.txt")
-        with open(self.loss_log_path, 'w') as f:
-            f.write("step,train_loss,ema_train_loss,val_loss,ema_val_loss\n")
+        if not config.get('is_continuing', False):
+            # Create new loss log for new training
+            with open(self.loss_log_path, 'w') as f:
+                f.write("step,train_loss,ema_train_loss,val_loss,ema_val_loss\n")
+        else:
+            # Verify loss log exists for continuing training
+            if not os.path.exists(self.loss_log_path):
+                print(f"Warning: Loss log not found at {self.loss_log_path}, starting fresh")
+
+    def _load_training_state(self):
+        """Load training state from existing run for continuing training."""
+        # Load loss history from loss log
+        if os.path.exists(self.loss_log_path):
+            try:
+                # Read CSV manually to avoid pandas dependency
+                with open(self.loss_log_path, 'r') as f:
+                    lines = f.readlines()[1:]  # Skip header
+                
+                if lines:
+                    # Parse the last line to get the last step
+                    last_line = lines[-1].strip().split(',')
+                    last_step = int(last_line[0])
+                    self.starting_step = last_step + self.config.get('eval_every', 500)
+                    
+                    # Load all loss history
+                    steps = []
+                    train_losses = []
+                    val_losses = []
+                    ema_train_losses = []
+                    ema_val_losses = []
+                    
+                    for line in lines:
+                        parts = line.strip().split(',')
+                        if len(parts) >= 5:
+                            steps.append(int(parts[0]))
+                            train_losses.append(float(parts[1]))
+                            ema_train_losses.append(float(parts[2]))
+                            val_losses.append(float(parts[3]))
+                            ema_val_losses.append(float(parts[4]))
+                    
+                    # Store loss history
+                    self.train_steps = steps
+                    self.train_loss_history = train_losses
+                    self.val_steps = steps
+                    self.val_loss_history = val_losses
+                    
+                    # Set EMA losses to last values
+                    if ema_train_losses and ema_val_losses:
+                        self.ema_train_loss = ema_train_losses[-1]
+                        self.ema_val_loss = ema_val_losses[-1]
+                    
+                    print(f"Loaded training state. Continuing from step {self.starting_step}")
+                    print(f"Previous EMA train loss: {self.ema_train_loss:.6f}")
+                    print(f"Previous EMA val loss: {self.ema_val_loss:.6f}")
+                    
+                    # Advance scheduler to correct step
+                    for _ in range(self.starting_step):
+                        self.scheduler.step()
+                else:
+                    print("Loss log file is empty, starting from step 0")
+            except Exception as e:
+                print(f"Error loading training state: {e}")
+                print("Starting from step 0")
+        else:
+            print("No loss log found, starting from step 0")
 
     def step(self, batch, is_training=True):
         """
@@ -77,7 +178,7 @@ class Trainer():
             loss: Scalar loss value
         """
         spectrograms, _ = batch
-        x = spectrograms.float().to(self.device, non_blocking=True)  # (B, 1, H, W)
+        x = spectrograms.to(self.device, non_blocking=True)  # (B, 1, H, W)
         
         if is_training:
             self.tinybird.train()
@@ -87,14 +188,28 @@ class Trainer():
         
         # Forward pass through encoder-decoder
         with torch.set_grad_enabled(is_training):
-            h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x)
-            pred = self.tinybird.forward_decoder(h, idx_restore, T)
-            loss = self.tinybird.loss_mse(x, pred, bool_mask)
+            if self.use_amp:
+                with torch.cuda.amp.autocast():
+                    h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x)
+                    pred = self.tinybird.forward_decoder(h, idx_restore, T)
+                    loss = self.tinybird.loss_mse(x, pred, bool_mask)
+            else:
+                h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x)
+                pred = self.tinybird.forward_decoder(h, idx_restore, T)
+                loss = self.tinybird.loss_mse(x, pred, bool_mask)
         
         # Backward pass only for training
         if is_training:
-            loss.backward()
-            self.optimizer.step()
+            if self.use_amp:
+                self.scaler.scale(loss).backward()
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                loss.backward()
+                self.optimizer.step()
+            
+            # Update learning rate scheduler
+            self.scheduler.step()
             
             # Update EMA train loss
             if self.ema_train_loss is None:
@@ -113,13 +228,18 @@ class Trainer():
     def save_reconstruction(self, batch, step_num):
         """Save reconstruction visualization comparing input and output spectrograms."""
         spectrograms, _ = batch
-        x = spectrograms.float().to(self.device, non_blocking=True)  # (B, 1, H, W)
+        x = spectrograms.to(self.device, non_blocking=True)  # (B, 1, H, W)
         
         # Get model prediction
         self.tinybird.eval()
         with torch.no_grad():
-            h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x)
-            pred = self.tinybird.forward_decoder(h, idx_restore, T)
+            if self.use_amp:
+                with torch.cuda.amp.autocast():
+                    h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x)
+                    pred = self.tinybird.forward_decoder(h, idx_restore, T)
+            else:
+                h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x)
+                pred = self.tinybird.forward_decoder(h, idx_restore, T)
         
         # Depatchify prediction to get back (B, 1, H, W) format
         def depatchify(pred_patches):
@@ -228,7 +348,13 @@ class Trainer():
         train_iter = iter(train_loader)
         val_iter = iter(val_loader)
         
-        for step_num in range(self.config["steps"]):
+        # Calculate total steps and range
+        total_steps = self.config["steps"]
+        end_step = self.starting_step + total_steps
+        
+        print(f"Training from step {self.starting_step} to {end_step}")
+        
+        for step_num in range(self.starting_step, end_step):
             try:
                 train_batch = next(train_iter)
             except StopIteration:
@@ -258,10 +384,12 @@ class Trainer():
                 self.val_steps.append(step_num)
                 
                 # Print progress
+                current_lr = self.scheduler.get_last_lr()[0]
                 print(f"Step {step_num}: Train Loss = {train_loss:.6f}, "
                       f"EMA Train = {self.ema_train_loss:.6f}, "
                       f"Val Loss = {val_loss:.6f}, "
-                      f"EMA Val = {self.ema_val_loss:.6f}")
+                      f"EMA Val = {self.ema_val_loss:.6f}, "
+                      f"LR = {current_lr:.2e}")
                 
                 # Log losses to file
                 with open(self.loss_log_path, 'a') as f:
@@ -275,7 +403,8 @@ class Trainer():
                 self.save_reconstruction(val_batch, step_num)
         
         # Save final model weights
-        final_weight_path = os.path.join(self.weights_path, f"model_step_{self.config['steps']:06d}.pth")
+        final_step = self.starting_step + self.config['steps'] - 1
+        final_weight_path = os.path.join(self.weights_path, f"model_step_{final_step:06d}.pth")
         torch.save(self.tinybird.state_dict(), final_weight_path)
         
         # Generate loss plot at the end of training
@@ -348,13 +477,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="pretrain args")
 
     # Required argparse
-    parser.add_argument("--train_dir", type=str, required=True, help="training directory")
-    parser.add_argument("--val_dir", type=str, required=True, help="validation directory")
-    parser.add_argument("--run_name", type=str, required=True, help="directory name inside /runs to store train run details")
+    parser.add_argument("--train_dir", type=str, help="training directory")
+    parser.add_argument("--val_dir", type=str, help="validation directory")
+    parser.add_argument("--run_name", type=str, help="directory name inside /runs to store train run details")
+    parser.add_argument("--continue_from", type=str, help="continue training from existing run directory (path to run dir)")
 
     # Defaults 
     parser.add_argument("--steps", type=int, default=50_000, help="number of training steps")
-    parser.add_argument("--lr", type=float, default=1e-4, help="learning rate")
+    parser.add_argument("--lr", type=float, default=2e-4, help="learning rate")
     parser.add_argument("--batch_size", type=int, default=128, help="batch size")
     parser.add_argument("--patch_height", type=int, default=32, help="patch height")
     parser.add_argument("--patch_width", type=int, default=4, help="patch width")
@@ -363,6 +493,8 @@ if __name__ == "__main__":
     parser.add_argument("--dropout", type=float, default=0.1, help="dropout rate")
     parser.add_argument("--mask_p", type=float, default=0.75, help="mask probability")
     parser.add_argument("--eval_every", type=int, default=500, help="evaluate every N steps")
+    parser.add_argument("--amp", action="store_true", help="enable automatic mixed precision training")
+    parser.add_argument("--weight_decay", type=float, default=1e-4, help="weight decay")
 
     # Encoder Model
     parser.add_argument("--enc_hidden_d", type=int, default=192, help="encoder hidden dimension")
@@ -377,7 +509,30 @@ if __name__ == "__main__":
     parser.add_argument("--dec_dim_ff", type=int, default=768, help="decoder feed-forward dimension")
 
     args = parser.parse_args()
-    config = vars(args)
+    
+    # Handle continue mode vs new training
+    if args.continue_from:
+        # Continue training mode - load config from existing run
+        from utils import load_model_from_checkpoint
+        
+        # Load existing config and model
+        model, config = load_model_from_checkpoint(args.continue_from)
+        
+        # Override with any command line args that were provided
+        for key, value in vars(args).items():
+            if value is not None and key not in ['continue_from']:
+                config[key] = value
+                
+        config['continue_from'] = args.continue_from
+        config['is_continuing'] = True
+        
+    else:
+        # New training mode - validate required args
+        if not args.train_dir or not args.val_dir or not args.run_name:
+            parser.error("--train_dir, --val_dir, and --run_name are required when not using --continue_from")
+        
+        config = vars(args)
+        config['is_continuing'] = False
 
     # Calculate seq_len from num_timebins and patch dimensions  
     assert config["num_timebins"] % config["patch_width"] == 0, f"num_timebins ({config['num_timebins']}) must be divisible by patch_width ({config['patch_width']})"
@@ -387,5 +542,10 @@ if __name__ == "__main__":
     config["patch_size"] = (config["patch_height"], config["patch_width"])
     config["max_seq"] = (config["num_timebins"] // config["patch_width"]) * (config["mels"] // config["patch_height"])
     
-    trainer = Trainer(config)
+    # Create trainer with loaded model if continuing
+    if config.get('is_continuing', False):
+        trainer = Trainer(config, pretrained_model=model)
+    else:
+        trainer = Trainer(config)
+    
     trainer.train()

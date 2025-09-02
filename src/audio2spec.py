@@ -30,7 +30,7 @@ def compute_spectrogram(
     
     Optimized version with minimal dtype conversions and efficient power calculation.
     """
-    # wav is already float32 from the loader, no need to convert
+    # wav uses default dtype from the loader
     if mel:
         # melspectrogram already computes power spectrum internally
         S = librosa.feature.melspectrogram(
@@ -42,7 +42,7 @@ def compute_spectrogram(
             n_mels=n_mels,
             fmin=20,
             fmax=sr // 2,
-            dtype=np.float32   # ensure output is float32
+            # Using default dtype
         )
     else:
         # More efficient power calculation for linear STFT
@@ -55,12 +55,12 @@ def compute_spectrogram(
         )
         # Efficient power calculation using real and imaginary parts
         S = stft_complex.real**2 + stft_complex.imag**2
-        S = S.astype(np.float32)  # convert once to final dtype
+        # Using default dtype
         del stft_complex  # free complex array memory immediately
 
     # Convert to dB with efficient reference calculation
     S_db = librosa.power_to_db(S, ref=np.max(S), top_db=None)
-    return S_db.astype(np.float32)
+    return S_db
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -116,10 +116,10 @@ def process_audio_file(
 
         # Load audio with optimal settings
         if needs_resampling:
-            wav, actual_sr = librosa.load(fp, sr=sr, mono=True, dtype=np.float32)
+            wav, actual_sr = librosa.load(fp, sr=sr, mono=True)
         else:
             # Load at native rate, avoid unnecessary resampling
-            wav, actual_sr = librosa.load(fp, sr=None, mono=True, dtype=np.float32)
+            wav, actual_sr = librosa.load(fp, sr=None, mono=True)
             if actual_sr != sr:
                 # Resample only if detection was wrong
                 wav = librosa.resample(wav, orig_sr=actual_sr, target_sr=sr)
@@ -147,12 +147,12 @@ def process_audio_file(
         if fmt == "pt":
             import torch
             out = dst_dir / (fp.stem + ".pt")
-            # S is already float32, avoid unnecessary conversion
+            # S uses default dtype, avoid unnecessary conversion
             torch.save({"s": torch.from_numpy(S),
                         "labels": torch.from_numpy(labels)}, out)
         else:  # npz (uncompressed)
             out = dst_dir / (fp.stem + ".npz")
-            # S is already float32 from compute_spectrogram
+            # S uses default dtype from compute_spectrogram
             np.savez(out, s=S, labels=labels)
 
         # free memory fast in workers
@@ -211,7 +211,7 @@ class WavToSpec:
     """
     Convert a directory (or explicit list) of audio files to .npz spectrograms.
     Keys inside the .npz **match what BirdSpectrogramDataset expects**:
-        s       -> float32 (F,T)   log spectrogram
+        s       -> (F,T)   log spectrogram
         labels  -> int32   (T,)    all zeros (placeholder)
     """
 
@@ -299,7 +299,7 @@ class WavToSpec:
         if self.file_list:
             files = [Path(line.strip()) for line in self.file_list.read_text().splitlines() if line.strip()]
         else:
-            exts = (".wav", ".mp3", ".ogg")
+            exts = (".wav", ".mp3", ".ogg", ".flac")
             files = [
                 Path(root) / f
                 for root, _, fs in os.walk(self.src_dir)
@@ -465,10 +465,10 @@ class WavToSpec:
 
             # Load audio with optimal settings
             if needs_resampling:
-                wav, actual_sr = librosa.load(fp, sr=self.sr, mono=True, dtype=np.float32)
+                wav, actual_sr = librosa.load(fp, sr=self.sr, mono=True)
             else:
                 # Load at native rate, avoid unnecessary resampling
-                wav, actual_sr = librosa.load(fp, sr=None, mono=True, dtype=np.float32)
+                wav, actual_sr = librosa.load(fp, sr=None, mono=True)
                 if actual_sr != self.sr:
                     # Resample only if detection was wrong
                     wav = librosa.resample(wav, orig_sr=actual_sr, target_sr=self.sr)
@@ -494,12 +494,12 @@ class WavToSpec:
             if self.fmt == "pt":
                 import torch
                 out = self.dst_dir / (fp.stem + ".pt")
-                # S is already float32, avoid unnecessary conversion
+                # S uses default dtype, avoid unnecessary conversion
                 torch.save({"s": torch.from_numpy(S),
                             "labels": torch.from_numpy(labels)}, out)
             else:  # npz (uncompressed)
                 out = self.dst_dir / (fp.stem + ".npz")
-                # S is already float32 from compute_spectrogram
+                # S uses default dtype from compute_spectrogram
                 np.savez(out, s=S, labels=labels)
 
             # free memory fast

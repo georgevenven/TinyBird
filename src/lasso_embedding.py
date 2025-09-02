@@ -55,7 +55,7 @@ def build_embeddings(model, dataset, config, max_timebins, subtract_pos):
             spec_id = len(specs_cache) - 1
 
             # encode
-            spec_b = spec.unsqueeze(0).unsqueeze(0).float().to(device)   # [1,1,mels,time]
+            spec_b = spec.unsqueeze(0).unsqueeze(0).to(device)   # [1,1,mels,time]
             z = model.forward_encoder_inference(spec_b)                  # [1, S, D]
             z = z.squeeze(0).cpu()                                       # [S, D]
             S, D = z.shape
