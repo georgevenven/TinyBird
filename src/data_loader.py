@@ -18,61 +18,50 @@ class SpectogramDataset(Dataset):
         # Compute dataset statistics
         self.mean, self.std = self._compute_stats()
 
-    def _load_file(self, path):
-        """Helper function to load a single file"""
+    def _stats_worker(self, path):
+        """Worker function for computing per-mel statistics"""
         try:
-            f = torch.load(path, map_location="cpu", weights_only=False)
-            return f['s'].flatten()
-        except Exception as e:
-            print(f"Error loading {path}: {e}")
+            x = torch.load(path, map_location="cpu", weights_only=False)["s"].to(torch.float32)  # [mels, time]
+            s1 = x.sum(dim=1).to(torch.float64)           # per-mel sum
+            s2 = (x * x).sum(dim=1).to(torch.float64)     # per-mel sum of squares
+            n  = x.shape[1]                                # timebins per mel
+            return s1, s2, n
+        except Exception:
             return None
 
     # GPT Generated function  
     def _compute_stats(self):
-        """Compute mean and std across the entire dataset for z-score normalization"""
-        print(f"Computing dataset statistics across {len(self.file_dirs)} files...")
+        """Compute per-mel mean and std across the entire dataset for z-score normalization"""
+        print(f"Computing per-mel dataset statistics across {len(self.file_dirs)} files...")
         
-        # Initialize running statistics
-        running_sum = 0.0
-        running_sum_sq = 0.0
-        total_elements = 0
+        workers = min(os.cpu_count() or 1, 8)
+        sum1 = torch.zeros(self.n_mels, dtype=torch.float64)
+        sum2 = torch.zeros(self.n_mels, dtype=torch.float64)
+        count_timebins = 0
         
-        # Use multiprocessing for parallel file loading
-        num_workers = min(os.cpu_count(), 8)  # Don't use too many cores
+        with Pool(processes=workers) as pool:
+            for res in pool.imap_unordered(self._stats_worker, self.file_dirs, chunksize=self.stats_batch_size):
+                if res is None:
+                    continue
+                s1, s2, n = res
+                # allow variable time length; all mels must match n_mels
+                if s1.numel() != self.n_mels:
+                    continue
+                sum1 += s1
+                sum2 += s2
+                count_timebins += n
         
-        # Process files in actual batches to be fast AND memory efficient
-        for i in range(0, len(self.file_dirs), self.stats_batch_size):
-            batch_paths = self.file_dirs[i:i+self.stats_batch_size]
-            
-            # Load batch of files in parallel
-            with Pool(num_workers) as pool:
-                batch_specs = pool.map(self._load_file, batch_paths)
-            
-            # Filter out None values (failed loads)
-            batch_specs = [spec for spec in batch_specs if spec is not None]
-            
-            # Process entire batch at once (vectorized operations)
-            if batch_specs:
-                batch_tensor = torch.cat(batch_specs)
-                running_sum += batch_tensor.sum().item()
-                running_sum_sq += (batch_tensor ** 2).sum().item()
-                total_elements += batch_tensor.numel()
-                
-                # Clear batch memory
-                del batch_specs, batch_tensor
-            
-            # Progress update
-            if (i // self.stats_batch_size) % 10 == 0:
-                progress = min(i + self.stats_batch_size, len(self.file_dirs))
-                print(f"Processed {progress}/{len(self.file_dirs)} files...")
+        if count_timebins == 0:
+            raise RuntimeError("No readable tensors to compute stats")
         
-        # Compute final statistics
-        mean = running_sum / total_elements
-        variance = (running_sum_sq / total_elements) - (mean ** 2)
-        std = variance ** 0.5
+        mean = (sum1 / count_timebins).to(torch.float32)                    # [mels]
+        var  = (sum2 / count_timebins - (sum1 / count_timebins) ** 2)       # [mels], float64
+        var.clamp_(min=0.0)
+        std  = var.sqrt().to(torch.float32)
+        std = torch.maximum(std, torch.tensor(1e-8, dtype=torch.float32))
         
-        print(f"Dataset statistics - Mean: {mean:.4f}, Std: {std:.4f}")
-        return torch.tensor(mean), torch.tensor(std)
+        print(f"Dataset statistics computed - Mean shape: {mean.shape}, Std shape: {std.shape}")
+        return mean, std
 
     # time only crop / pads, if mels are wrong assert will catch
     def crop_or_pad(self, spec):
@@ -101,8 +90,8 @@ class SpectogramDataset(Dataset):
         spec = f['s']
         filename = path.stem
 
-        # Apply z-score normalization
-        spec = (spec - self.mean) / self.std
+        # Apply per-mel z-score normalization
+        spec = (spec - self.mean.unsqueeze(1)) / self.std.unsqueeze(1)
 
         if self.pad_crop:
             spec = self.crop_or_pad(spec)
