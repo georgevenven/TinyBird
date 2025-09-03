@@ -5,11 +5,12 @@ import torch
 import random
 
 class SpectogramDataset(Dataset):
-    def __init__(self, dir, n_mels=128, n_timebins=1024, pad_crop=True):
+    def __init__(self, dir, n_mels=128, n_timebins=1024, pad_crop=True, batch_size=2048):
         self.file_dirs = list(Path(dir).glob("*.pt"))
         self.n_mels = n_mels
         self.n_timebins = n_timebins
         self.pad_crop = pad_crop
+        self.batch_size = batch_size
         if len(self.file_dirs) == 0: raise("no files!!")
         
         # Compute dataset statistics
@@ -18,21 +19,47 @@ class SpectogramDataset(Dataset):
     # GPT Generated function  
     def _compute_stats(self):
         """Compute mean and std across the entire dataset for z-score normalization"""
-        all_values = []
-        
         print(f"Computing dataset statistics across {len(self.file_dirs)} files...")
-        for path in self.file_dirs:
-            f = torch.load(path, map_location="cpu", weights_only=False)
-            spec = f['s']
-            all_values.append(spec.flatten())
         
-        # Concatenate all values and compute statistics
-        all_values = torch.cat(all_values)
-        mean = all_values.mean()
-        std = all_values.std()
+        # Initialize running statistics
+        running_sum = 0.0
+        running_sum_sq = 0.0
+        total_elements = 0
+        
+        # Process files in batches to avoid memory issues
+        for i in range(0, len(self.file_dirs), self.batch_size):
+            batch_paths = self.file_dirs[i:i+self.batch_size]
+            
+            for j, path in enumerate(batch_paths):
+                try:
+                    f = torch.load(path, map_location="cpu", weights_only=False)
+                    spec = f['s']
+                    
+                    # Update running statistics
+                    spec_flat = spec.flatten()
+                    running_sum += spec_flat.sum().item()
+                    running_sum_sq += (spec_flat ** 2).sum().item()
+                    total_elements += spec_flat.numel()
+                    
+                    # Clear memory
+                    del f, spec, spec_flat
+                    
+                except Exception as e:
+                    print(f"Error loading {path}: {e}")
+                    continue
+            
+            # Progress update
+            if (i // self.batch_size) % 10 == 0:
+                progress = min(i + self.batch_size, len(self.file_dirs))
+                print(f"Processed {progress}/{len(self.file_dirs)} files...")
+        
+        # Compute final statistics
+        mean = running_sum / total_elements
+        variance = (running_sum_sq / total_elements) - (mean ** 2)
+        std = variance ** 0.5
         
         print(f"Dataset statistics - Mean: {mean:.4f}, Std: {std:.4f}")
-        return mean, std
+        return torch.tensor(mean), torch.tensor(std)
 
     # time only crop / pads, if mels are wrong assert will catch
     def crop_or_pad(self, spec):
