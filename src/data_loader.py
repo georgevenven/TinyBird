@@ -17,14 +17,14 @@ class SpectogramDataset(Dataset):
 
     # GPT Generated function  
     def _compute_stats(self):
-        """Compute mean and std across 5% of the dataset for z-score normalization"""
+        """Compute mean and std across 2.5% of the dataset for z-score normalization"""
         all_values = []
         
-        # Select 5% of files randomly for statistics computation
-        subset_size = max(1, int(len(self.file_dirs) * 0.05))
+        # Select 2.5% of files randomly for statistics computation
+        subset_size = max(1, int(len(self.file_dirs) * 0.025))
         subset_files = random.sample(self.file_dirs, subset_size)
         
-        print(f"Computing dataset statistics on {subset_size} files (5% of {len(self.file_dirs)} total files)...")
+        print(f"Computing dataset statistics on {subset_size} files (2.5% of {len(self.file_dirs)} total files)...")
         for path in subset_files:
             f = torch.load(path, map_location="cpu", weights_only=False)
             spec = f['s']
@@ -35,7 +35,7 @@ class SpectogramDataset(Dataset):
         mean = all_values.mean()
         std = all_values.std()
         
-        print(f"Dataset statistics (from 5% subset) - Mean: {mean:.4f}, Std: {std:.4f}")
+        print(f"Dataset statistics (from 2.5% subset) - Mean: {mean:.4f}, Std: {std:.4f}")
         return mean, std
 
     # time only crop / pads, if mels are wrong assert will catch
