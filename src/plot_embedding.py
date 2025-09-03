@@ -54,21 +54,31 @@ def main(args):
         z_freq_stack = z_freq_stack.squeeze(0)
 
         # shape is W, H*D
-        # Remove positional encoding bias by subtracting mean across positions
-        if args["subtract_pos"]:
-            z_mean = z_freq_stack.mean(dim=0, keepdim=True)  # mean across time dimension
-            z_centered = z_freq_stack - z_mean
-        else:
-            z_centered = z_freq_stack
-
-        latent_list.append(z_centered)
+        # Store raw features for later whitening across full dataset
+        latent_list.append(z_freq_stack.detach().cpu())
 
         total_timebins += spec_timebins
         i += 1
 
     Z = torch.cat(latent_list, dim=0)
-    reducer_enc = umap.UMAP(n_components=2, metric='cosine', n_jobs=-1, low_memory=True)
-    emb_enc = reducer_enc.fit_transform(Z.detach().cpu().numpy())
+    print(f"shape of dim reduction op {Z.shape}")
+    
+    # Apply whitening + L2 normalization (new style)
+    import numpy as np
+    Z_np = Z.numpy()
+    Z_whitened = (Z_np - Z_np.mean(0)) / (Z_np.std(0) + 1e-6)
+    Z_whitened /= np.linalg.norm(Z_whitened, axis=1, keepdims=True) + 1e-9
+    print(f"shape after whitening {Z_whitened.shape}")
+    
+    # First apply PCA to reduce to 64 dimensions
+    from sklearn.decomposition import PCA
+    pca = PCA(n_components=12)
+    Z_pca = pca.fit_transform(Z_whitened)
+    print(f"shape after PCA {Z_pca.shape}")
+    
+    # Then apply UMAP to the PCA-reduced data
+    reducer_enc = umap.UMAP(n_components=2, n_neighbors=50,  metric='cosine', low_memory=True)
+    emb_enc = reducer_enc.fit_transform(Z_pca)
 
     # Plot the embedding
     import matplotlib.pyplot as plt
@@ -87,6 +97,6 @@ if __name__ == "__main__":
     parser.add_argument("--run_dir", type=str, required=True, help="Run directory path")
     parser.add_argument("--checkpoint", type=str, default=None, help="Checkpoint file (optional)")
     parser.add_argument("--spec_dir", type=str, required=True, help="Directory of specs to plot the embedding of")
-    parser.add_argument("--subtract_pos", action="store_true", help="Subtract positional encoding bias")
+
     args = parser.parse_args()
     main(vars(args))

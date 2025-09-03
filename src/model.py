@@ -34,7 +34,7 @@ class TinyBird(nn.Module):
         self.encoder_to_decoder = nn.Linear(config["enc_hidden_d"], config["dec_hidden_d"])
         self.decoder_to_pixel = nn.Linear(config["dec_hidden_d"], self.patch_size[0] * self.patch_size[1])
 
-        self.mask_token = nn.Parameter(torch.zeros(config["dec_hidden_d"]))
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, config["dec_hidden_d"]))
 
         self.pos_enc = nn.Parameter(torch.zeros(1, config["max_seq"], config["enc_hidden_d"]))
 

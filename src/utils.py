@@ -4,7 +4,7 @@ import glob
 import torch
 from model import TinyBird
 
-def load_model_from_checkpoint(run_dir="", checkpoint_file=None):
+def load_model_from_checkpoint(run_dir="", checkpoint_file=None, fallback_to_random=True):
     """
     Load a TinyBird model from a checkpoint directory.
     
@@ -17,9 +17,11 @@ def load_model_from_checkpoint(run_dir="", checkpoint_file=None):
             If None, loads the latest checkpoint. Can be either:
             - Just the filename (e.g., "model_step_005000.pth")
             - Full path to the checkpoint file
+        fallback_to_random (bool, optional): If True, initialize with random weights
+            when checkpoint is not found instead of raising an error. Default: False
     
     Returns:
-        TinyBird: Loaded model with weights from the specified checkpoint
+        TinyBird: Loaded model with weights from the specified checkpoint, or random weights if fallback enabled
     """
     if not run_dir:
         raise ValueError("run_dir cannot be empty. Provide either absolute path or relative path to runs/")
@@ -35,11 +37,15 @@ def load_model_from_checkpoint(run_dir="", checkpoint_file=None):
     
     # Check if run directory exists
     if not os.path.exists(run_path):
+        if fallback_to_random:
+            raise ValueError(f"Cannot fallback to random weights: run directory not found and config unavailable: {run_path}")
         raise FileNotFoundError(f"Run directory not found: {run_path}")
     
     # Load config.json
     config_path = os.path.join(run_path, "config.json")
     if not os.path.exists(config_path):
+        if fallback_to_random:
+            raise ValueError(f"Cannot fallback to random weights: config file not found: {config_path}")
         raise FileNotFoundError(f"Config file not found: {config_path}")
     
     with open(config_path, 'r') as f:
@@ -51,8 +57,13 @@ def load_model_from_checkpoint(run_dir="", checkpoint_file=None):
     # Determine which checkpoint to load
     weights_dir = os.path.join(run_path, "weights")
     if not os.path.exists(weights_dir):
+        if fallback_to_random:
+            print(f"Weights directory not found: {weights_dir}")
+            print("Initializing model with random weights")
+            return tinybird, config
         raise FileNotFoundError(f"Weights directory not found: {weights_dir}")
     
+    checkpoint_path = None
     if checkpoint_file is not None:
         # Manual checkpoint specified
         if os.path.isabs(checkpoint_file):
@@ -63,6 +74,10 @@ def load_model_from_checkpoint(run_dir="", checkpoint_file=None):
             checkpoint_path = os.path.join(weights_dir, checkpoint_file)
         
         if not os.path.exists(checkpoint_path):
+            if fallback_to_random:
+                print(f"Specified checkpoint file not found: {checkpoint_path}")
+                print("Initializing model with random weights")
+                return tinybird, config
             raise FileNotFoundError(f"Specified checkpoint file not found: {checkpoint_path}")
         
         print(f"Loading specified checkpoint: {checkpoint_path}")
@@ -72,6 +87,10 @@ def load_model_from_checkpoint(run_dir="", checkpoint_file=None):
         checkpoint_files = glob.glob(checkpoint_pattern)
         
         if not checkpoint_files:
+            if fallback_to_random:
+                print(f"No checkpoint files found in: {weights_dir}")
+                print("Initializing model with random weights")
+                return tinybird, config
             raise FileNotFoundError(f"No checkpoint files found in: {weights_dir}")
         
         # Find the latest checkpoint (highest step number)
