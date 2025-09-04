@@ -108,7 +108,7 @@ def main(args):
     print(f"shape after whitening {Z_whitened.shape}")
     
     # Apply UMAP to the whitened data
-    reducer_enc = umap.UMAP(n_components=2, n_neighbors=50, metric='cosine', n_jobs=-1, low_memory=True)
+    reducer_enc = umap.UMAP(n_components=2, n_neighbors=50, metric='cosine')
     emb_enc = reducer_enc.fit_transform(Z_whitened)
     print("umap done")
     
