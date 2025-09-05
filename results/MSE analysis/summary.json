@@ -1,0 +1,10 @@
+{
+  "evaluated_samples": 10,
+  "pixels_per_patch": 32,
+  "SSE_all": 67095.5302734375,
+  "N_all": 1310720,
+  "MSE_all_dataset_mean": 0.05118982717394829,
+  "SSE_masked": 29216.523193359375,
+  "N_masked": 983040,
+  "MSE_masked_dataset_mean": 0.02972058430314064
+}

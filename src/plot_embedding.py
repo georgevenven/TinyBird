@@ -171,6 +171,7 @@ def main(args):
     )
     
     latent_list = []
+    spec_batches_all = []
     pos_ids = []          # absolute time index per patch within its clip (0..W-1)
     rel_bins = []         # optional: relative-position bins (0..K-1)
     syllable_labels = []  # syllable labels for each patch
@@ -241,6 +242,7 @@ def main(args):
             continue
 
         batch = torch.cat(batch_chunks, dim=0)               # [B,1,mels,CHUNK]
+        spec_batches_all.append(batch.cpu())
         with torch.no_grad():
             z = model.forward_encoder_inference(batch)       # [B,S,D]
         B, S, D = z.shape
@@ -303,46 +305,62 @@ def main(args):
     reducer_enc = umap.UMAP(n_components=2, n_neighbors=100, metric='cosine')
     emb_enc = reducer_enc.fit_transform(Z_pca)
     print("UMAP done")
+
+    # --- save arrays to NPZ (labels, spec, embeddings, pos_ids) ---
+    if args.get("npz_out"):
+        spec_arr = (
+            torch.cat(spec_batches_all, dim=0).numpy()
+            if spec_batches_all else
+            np.empty((0, 1, config["mels"], config["num_timebins"]), dtype=np.float32)
+        )
+        np.savez(
+            args["npz_out"],
+            labels=syllable_labels,     # shape: (N_patches,)
+            spec=spec_arr,              # shape: (total_chunks, 1, mels, CHUNK)
+            embeddings=Z_np,            # shape: (N_patches, H*D), freq-stacked
+            pos_ids=pos_ids             # shape: (N_patches,)
+        )
+        print(f"NPZ saved to {args['npz_out']}")
     
     # Create scatter plot colored by syllable types
-    plt.figure(figsize=(10, 10))
+    plt.figure(figsize=(8, 8), dpi=300)
     if args.get("json_path") and len(song_data_dict) > 0:
         # Define colors for different syllable types
         import matplotlib.cm as cm
         mask_labeled = syllable_labels != None
         labeled_vals = syllable_labels[mask_labeled]
         unique_syllables = np.unique(labeled_vals) if labeled_vals.size > 0 else np.array([], dtype=object)
-        colors = cm.tab10(np.linspace(0, 1, len(unique_syllables))) if len(unique_syllables) > 0 else []
+        colors = cm.tab20(np.linspace(0, 1, len(unique_syllables))) if len(unique_syllables) > 0 else []
         color_map = dict(zip(unique_syllables, colors))
 
         # Plot unlabeled song patches first (in background)
         unlabeled_indices = ~mask_labeled
         if unlabeled_indices.any():
             plt.scatter(emb_enc[unlabeled_indices, 0], emb_enc[unlabeled_indices, 1], 
-                       alpha=0.1, s=20, color='lightgray')
+                       alpha=0.1, s=10, color='lightgray', edgecolors='none')
         
         # Plot each syllable type with different colors
         for syllable_type in unique_syllables:
             syllable_indices = syllable_labels == syllable_type
             if syllable_indices.any():
                 plt.scatter(emb_enc[syllable_indices, 0], emb_enc[syllable_indices, 1], 
-                           alpha=0.1, s=30, color=color_map[syllable_type])
+                           alpha=0.1, s=10, color=color_map[syllable_type], edgecolors='none')
         title = 'UMAP Embedding of Song Patches by Syllable Type' if len(unique_syllables) > 0 \
                 else 'UMAP Embedding of Song Patches (No Syllable Labels Found)'
-        plt.title(title, fontsize=16)
+        plt.title(title, fontsize=32)
     else:
         # Fallback to original single-color plot if no JSON provided
-        plt.scatter(emb_enc[:, 0], emb_enc[:, 1], alpha=0.1, s=20)
-        plt.title('UMAP Embedding of Spectrogram Patches', fontsize=14)
+        plt.scatter(emb_enc[:, 0], emb_enc[:, 1], alpha=0.1, s=10, edgecolors='none')
+        plt.title('UMAP Embedding of Spectrogram Patches', fontsize=32)
     
-    plt.xlabel('UMAP 1', fontsize=14)
-    plt.ylabel('UMAP 2', fontsize=14)
-    plt.grid(True, alpha=0.3)
-    plt.gca().set_aspect('equal', adjustable='box')
+    plt.xlabel('UMAP 1', fontsize=24)
+    plt.ylabel('UMAP 2', fontsize=24)
+    plt.xticks([])  # Remove tick marks but keep axis
+    plt.yticks([])  # Remove tick marks but keep axis
     
     # Save figure if specified
     if args.get("save_path"):
-        plt.savefig(args["save_path"], dpi=300, bbox_inches='tight')
+        plt.savefig(args["save_path"], bbox_inches='tight', dpi=300)
         print(f"Figure saved to {args['save_path']}")
     
     plt.show()
@@ -354,6 +372,7 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint", type=str, default=None, help="Checkpoint file (optional)")
     parser.add_argument("--spec_dir", type=str, required=True, help="Directory of specs to plot the embedding of")
     parser.add_argument("--save_path", type=str, default=None, help="Path to save the figure (optional)")
+    parser.add_argument("--npz_out", type=str, default=None, help="Save arrays to this .npz path")
     parser.add_argument("--json_path", type=str, default=None, help="to provide song snippets + syllable labels")
     parser.add_argument("--max_gap", type=int, default=100, help="max patch-length of unlabeled gap to infill")
     parser.add_argument("--max_context", type=int, default=None, help="max timebins to load per clip before chunking; defaults to 64×context")
