@@ -8,6 +8,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import json
 from pathlib import Path
+import torch.nn.functional as F
 
 def fill_between_equals(labels, song_mask=None, max_gap=80):
     """Fill None runs bounded by the SAME label on both sides (<= max_gap)."""
@@ -44,7 +45,7 @@ def _to_tb(v, ref_ms=None):
     tb = int(round(ms / 2.0))
     return tb
 
-def get_syllable_labels_for_patches(filename, song_data_dict, W, patch_width, spec_timebins):
+def get_syllable_labels_for_patches(filename, song_data_dict, W, patch_width, spec_timebins, start_timebin=0):
     """
     Determine syllable labels for patches and which patches contain song segments.
     
@@ -79,13 +80,14 @@ def get_syllable_labels_for_patches(filename, song_data_dict, W, patch_width, sp
                 seg_on_tb = _to_tb(segment.get("onset_ms", 0))
                 seg_off_tb = _to_tb(segment.get("offset_ms", max(1, segment.get("onset_ms", 0)+1)))
 
-            # Intersect with cropped portion [0, spec_timebins)
-            segment_start = max(0, seg_on_tb)
-            segment_end   = min(spec_timebins, seg_off_tb)
-            
-            # Skip if segment is entirely outside the cropped region
-            if segment_start >= spec_timebins or segment_end <= 0:
+            # Intersect with current chunk [start_timebin, start_timebin+spec_timebins)
+            chunk_start = start_timebin
+            chunk_end   = start_timebin + spec_timebins
+            if seg_off_tb <= chunk_start or seg_on_tb >= chunk_end:
                 continue
+            # chunk-relative tb
+            segment_start = max(0, seg_on_tb - chunk_start)
+            segment_end   = min(spec_timebins, seg_off_tb - chunk_start)
             
             # Convert timebin indices to patch indices within the cropped spectrogram
             onset_patch = max(0, segment_start // patch_width)
@@ -112,11 +114,11 @@ def get_syllable_labels_for_patches(filename, song_data_dict, W, patch_width, sp
                         rel_off = max(rel_on + 1, _to_tb(off_v + seg_on_ms, ref_ms=seg_on_ms))
                         candidates.append((rel_on, rel_off))
 
-                # choose candidate with max overlap with [0, spec_timebins)
+                # choose candidate with max overlap with current chunk window
                 best = None
                 best_ov = 0
                 for a, b in candidates:
-                    s = max(0, a); e = min(spec_timebins, b)
+                    s = max(0, a - start_timebin); e = min(spec_timebins, b - start_timebin)
                     ov = max(0, e - s)
                     if ov > best_ov:
                         best = (s, e); best_ov = ov
@@ -158,13 +160,13 @@ def main(args):
         run_dir=args["run_dir"],
         checkpoint_file=args["checkpoint"]
     )
+    model.eval()
     
-    # Create embedding dataset using config parameters
-    # Note: SpectogramDataset has max context length of 1024 timebins and uses 2ms per timebin
+    # Create embedding dataset using a large max_context, then batch-chunk per file
     embedding_dataset = SpectogramDataset(
         dir=args["spec_dir"],
         n_mels=config["mels"],
-        n_timebins=config["num_timebins"],
+        n_timebins=args.get("max_context", config["num_timebins"] * 64),
         pad_crop=False
     )
     
@@ -180,7 +182,8 @@ def main(args):
         spec, file_name = embedding_dataset[i]
         
         patch_height, patch_width, mels, num_timebins = config["patch_height"], config["patch_width"], config["mels"], config["num_timebins"]
-        spec = spec[:,:mels,:num_timebins]
+        # keep full spectrogram up to max_context
+        spec = spec[:,:mels,:]
         
         spec_timebins = spec.shape[-1]
         spec_mels = spec.shape[-2]
@@ -191,58 +194,71 @@ def main(args):
         spec_timebins = spec.shape[-1]
         spec_mels = spec.shape[-2]
         
-        spec = spec.unsqueeze(0)  # add a batch dimension
-        
-        # Using original spec dtype
-        z = model.forward_encoder_inference(spec)
-        B, S, D = z.shape
-        
+        # --- chunk into fixed context batches and process only chunks with song ---
+        CHUNK = config["num_timebins"]                       # context length
         H = int(spec_mels / config["patch_height"])
-        W = int(spec_timebins / config["patch_width"])
-        
-        z_grid = z.reshape(B, H, W, D)
-        z_grid = z_grid.permute(0,2,1,3)
-        z_freq_stack = z_grid.reshape(B, W, H * D)
-        z_freq_stack = z_freq_stack.squeeze(0)
+        W_const = int(CHUNK / config["patch_width"])
+        batch_chunks = []            # tensors [1, mels, CHUNK]
+        batch_song_indices = []      # list[list[int]]
+        batch_labels = []            # list[list[object]]
 
-        # Get syllable labels and song mask for patches (if JSON provided)
-        if args.get("json_path") and song_data_dict:
-            patch_song_mask, patch_syllable_labels = get_syllable_labels_for_patches(
-                file_name, song_data_dict, W, patch_width, spec_timebins
-            )
-            # infill unlabeled gaps between identical syllables
-            patch_syllable_labels = fill_between_equals(
-                patch_syllable_labels, song_mask=patch_song_mask, max_gap=args.get("max_gap")
-            )
-        else:
-            # If no JSON, include all patches (backward compatibility)
-            patch_song_mask = [True] * W
-            patch_syllable_labels = [None] * W
-        
-        # Only keep patches that are from song segments (filter out non-song patches)
-        song_indices = [j for j, is_song in enumerate(patch_song_mask) if is_song]
-        
-        if song_indices:  # Only process if there are song patches
-            # Filter embeddings to only include song patches
-            song_z_freq_stack = z_freq_stack[song_indices]
-            latent_list.append(song_z_freq_stack.detach().cpu())
-            
-            # Record indices and labels for song patches only
-            pos_ids.extend([j for j in song_indices])
-            if len(song_indices) > 1:
-                rel = np.round(np.linspace(0, K-1, num=len(song_indices))).astype(int)
+        full_T = spec.shape[-1]
+        n_chunks = (full_T + CHUNK - 1) // CHUNK
+        for ci in range(n_chunks):
+            start_tb = ci * CHUNK
+            end_tb   = min(start_tb + CHUNK, full_T)
+            chunk = spec[:, :, start_tb:end_tb]              # [1, mels, Tci]
+            Tci = chunk.shape[-1]
+            if Tci < config["patch_width"]:
+                continue
+            # right-pad to CHUNK so we can batch
+            if Tci < CHUNK:
+                pad = CHUNK - Tci
+                chunk = F.pad(chunk, (0, pad, 0, 0, 0, 0))
+            # song mask + labels for this chunk (before encoder)
+            W_chunk = W_const                                  # after pad
+            if args.get("json_path") and song_data_dict:
+                mask, labs = get_syllable_labels_for_patches(
+                    file_name, song_data_dict, W_chunk, config["patch_width"], CHUNK, start_timebin=start_tb
+                )
+                labs = fill_between_equals(labs, song_mask=mask, max_gap=args.get("max_gap"))
+            else:
+                mask = [True] * W_chunk
+                labs = [None] * W_chunk
+            idxs = [j for j, m in enumerate(mask) if m]
+            if not idxs:
+                continue  # skip chunks with no song
+            batch_chunks.append(chunk.unsqueeze(0))           # -> [1,1,mels,CHUNK]
+            batch_song_indices.append(idxs)
+            batch_labels.append(labs)
+            total_timebins += (end_tb - start_tb)
+            if total_timebins >= args["num_timebins"]:
+                break
+
+        if not batch_chunks:
+            print(f"Skip {Path(file_name).stem}: no song patches")
+            i += 1
+            continue
+
+        batch = torch.cat(batch_chunks, dim=0)               # [B,1,mels,CHUNK]
+        with torch.no_grad():
+            z = model.forward_encoder_inference(batch)       # [B,S,D]
+        B, S, D = z.shape
+        z_grid = z.reshape(B, H, W_const, D).permute(0,2,1,3)      # [B,W,H,D]
+        z_freq = z_grid.reshape(B, W_const, H * D)                 # [B,W,HD]
+    
+        # defer any normalization until after concatenation
+        for b in range(B):
+            idxs = batch_song_indices[b]
+            latent_list.append(z_freq[b, idxs, :].detach().cpu())
+            pos_ids.extend(idxs)
+            if len(idxs) > 1:
+                rel = np.round(np.linspace(0, K-1, num=len(idxs))).astype(int)
             else:
                 rel = np.array([0], dtype=int)
             rel_bins.extend(rel.tolist())
-            
-            # Collect syllable labels for song patches
-            song_patch_labels = [patch_syllable_labels[j] for j in song_indices]
+            song_patch_labels = [batch_labels[b][j] for j in idxs]
             syllable_labels.extend(song_patch_labels)
-
-        else:
-            print(f"No song patches found in {file_name}")
-        
-        total_timebins += spec_timebins
         i += 1
     
     Z = torch.cat(latent_list, dim=0)  # (N_rows, H*D)
@@ -273,18 +289,23 @@ def main(args):
         Z_np = Z_np - means[rel_bins]
     Z = torch.from_numpy(Z_np)
     # Apply whitening + L2 normalization (new style)
-    Z_whitened = (Z_np - Z_np.mean(0)) / (Z_np.std(0) + 1e-6)
-    Z_whitened /= np.linalg.norm(Z_whitened, axis=1, keepdims=True) + 1e-9
-    print(f"Shape after whitening: {Z_whitened.shape}")
+    # Z_whitened = (Z_np - Z_np.mean(0)) / (Z_np.std(0) + 1e-6)
+    # Z_whitened /= np.linalg.norm(Z_whitened, axis=1, keepdims=True) + 1e-9
+    # print(f"Shape after whitening: {Z_whitened.shape}")
     
-    # Apply UMAP to the whitened data
-    reducer_enc = umap.UMAP(n_components=2, n_neighbors=50, metric='cosine')
-    emb_enc = reducer_enc.fit_transform(Z_whitened)
+    # Apply PCA to reduce to 32 dimensions before UMAP
+    from sklearn.decomposition import PCA
+    pca = PCA(n_components=32)
+    Z_pca = pca.fit_transform(Z_np)
+    print(f"Shape after PCA: {Z_pca.shape}")
+    
+    # Apply UMAP to the PCA-reduced data
+    reducer_enc = umap.UMAP(n_components=2, n_neighbors=100, metric='cosine')
+    emb_enc = reducer_enc.fit_transform(Z_pca)
     print("UMAP done")
     
     # Create scatter plot colored by syllable types
     plt.figure(figsize=(10, 10))
-    
     if args.get("json_path") and len(song_data_dict) > 0:
         # Define colors for different syllable types
         import matplotlib.cm as cm
@@ -335,6 +356,7 @@ if __name__ == "__main__":
     parser.add_argument("--save_path", type=str, default=None, help="Path to save the figure (optional)")
     parser.add_argument("--json_path", type=str, default=None, help="to provide song snippets + syllable labels")
     parser.add_argument("--max_gap", type=int, default=100, help="max patch-length of unlabeled gap to infill")
+    parser.add_argument("--max_context", type=int, default=None, help="max timebins to load per clip before chunking; defaults to 64×context")
     # removed auxiliary visualization args
 
     args = parser.parse_args()

@@ -291,7 +291,9 @@ class Trainer():
         def create_masked_original(x_patches, bool_mask):
             # x_patches: (B, T, P), bool_mask: (B, T)
             masked_patches = x_patches.clone()
-            masked_patches[bool_mask] = 0  # Set masked patches to black
+            # Set masked patches to minimum value to ensure they appear black
+            min_val = masked_patches.min()
+            masked_patches[bool_mask] = min_val - 1.0
             return masked_patches
         
         # Save reconstruction comparison
@@ -307,7 +309,7 @@ class Trainer():
         ax1.axis("off")
         
         ax2 = plt.subplot(3, 1, 2)
-        ax2.imshow(masked_img, origin="lower", aspect="auto")
+        ax2.imshow(masked_img, origin="lower", aspect="auto", cmap="viridis")
         ax2.set_title("Original with Mask (black = masked patches)")
         ax2.axis("off")
         

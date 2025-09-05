@@ -55,43 +55,54 @@ class TinyBird(nn.Module):
         # ───────────── written by GPT ─────────────
     def mask(self, z: torch.Tensor, hw=None):
         """
-        Blockwise mask: 1×Wb stripes in (H',W') token grid, shared across batch.
+        Blockwise stripes + exact target masked count via top-up/trim.
         Returns:
           z_keep: (B, keep, D)
           idx_restore: (B, T)
-          bool_mask: (B, T) True where masked
+          bool_mask: (B, T)  True where masked
         """
-        B, T, D = z.shape
         if hw is None:
             raise ValueError("mask(hw=...) requires spatial shape (H', W').")
+        B, T, D = z.shape
         H, W = hw
         assert H * W == T
         Wb = min(self.mask_block_w, W)
 
-        # target masked tokens ≈ mask_p * T
+        # target masked tokens
         n_mask = max(1, int(round(self.mask_p * T)))
+
+        # sample stripes (allows overlap = fast)
         n_blocks = max(1, math.ceil(n_mask / Wb))
+        rows   = torch.randint(H, (n_blocks,), device=z.device)               # with replacement
+        starts = torch.randint(W - Wb + 1, (n_blocks,), device=z.device)      # with replacement
+        cols   = starts.unsqueeze(1) + torch.arange(Wb, device=z.device).unsqueeze(0)  # (n_blocks, Wb)
 
-        # sample anchors once for the whole batch
-        rows = torch.randint(H, (n_blocks,), device=z.device)
-        starts = torch.randint(W - Wb + 1, (n_blocks,), device=z.device)
-        cols = starts.unsqueeze(1) + torch.arange(Wb, device=z.device).unsqueeze(0)  # (n_blocks, Wb)
-
-        rows_flat = rows.unsqueeze(1).expand_as(cols).reshape(-1)
-        cols_flat = cols.reshape(-1)
         mask2d = torch.zeros(H, W, dtype=torch.bool, device=z.device)
-        mask2d[rows_flat, cols_flat] = True
+        mask2d[rows.unsqueeze(1).expand_as(cols).reshape(-1), cols.reshape(-1)] = True
+        flat = mask2d.view(-1)                                                # (T,)
 
-        bool_mask = mask2d.view(1, T).expand(B, T).clone()
+        # enforce exact cardinality n_mask (top-up or trim)
+        cur = int(flat.sum().item())
+        if cur < n_mask:
+            need = n_mask - cur
+            cand = (~flat).nonzero(as_tuple=False).squeeze(1)
+            add  = cand[torch.randperm(cand.numel(), device=z.device)[:need]]
+            flat[add] = True
+        elif cur > n_mask:
+            drop = cur - n_mask
+            ones = flat.nonzero(as_tuple=False).squeeze(1)
+            rem  = ones[torch.randperm(ones.numel(), device=z.device)[:drop]]
+            flat[rem] = False
 
-        idx_mask = mask2d.view(-1).nonzero(as_tuple=False).squeeze(1)
-        idx_keep = (~mask2d.view(-1)).nonzero(as_tuple=False).squeeze(1)
+        bool_mask = flat.view(1, T).expand(B, T)                              # (B,T)
+        idx_mask  = flat.nonzero(as_tuple=False).squeeze(1)                   # (n_mask,)
+        idx_keep  = (~flat).nonzero(as_tuple=False).squeeze(1)                # (T-n_mask,)
         keep = idx_keep.numel()
 
         idx_keep_b = idx_keep.unsqueeze(0).expand(B, keep)
         z_keep = torch.gather(z, 1, idx_keep_b.unsqueeze(-1).expand(B, keep, D))
 
-        perm = torch.cat([idx_keep, idx_mask], dim=0)
+        perm = torch.cat([idx_keep, idx_mask], dim=0)                         # kept-first layout
         idx_restore = perm.argsort().unsqueeze(0).expand(B, T)
         return z_keep, idx_restore, bool_mask
 
