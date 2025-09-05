@@ -497,7 +497,7 @@ if __name__ == "__main__":
     # Defaults 
     parser.add_argument("--steps", type=int, default=500_000, help="number of training steps")
     parser.add_argument("--lr", type=float, default=2e-4, help="learning rate")
-    parser.add_argument("--batch_size", type=int, default=1024, help="batch size")
+    parser.add_argument("--batch_size", type=int, default=256, help="batch size")
     parser.add_argument("--patch_height", type=int, default=32, help="patch height")
     parser.add_argument("--patch_width", type=int, default=1, help="patch width")
     parser.add_argument("--mels", type=int, default=128, help="number of mel bins")
@@ -510,18 +510,17 @@ if __name__ == "__main__":
     parser.add_argument("--continue_from", type=str, help="continue training from existing run directory (path to run dir)")
     parser.add_argument("--fallback_random", action="store_true", help="if checkpoint not found when continuing, initialize with random weights instead of raising error")
 
-
-    # Encoder Model
-    parser.add_argument("--enc_hidden_d", type=int, default=192, help="encoder hidden dimension")
+    # Encoder 
+    parser.add_argument("--enc_hidden_d", type=int, default=384, help="encoder hidden dimension")
     parser.add_argument("--enc_n_head", type=int, default=6, help="encoder number of attention heads")
-    parser.add_argument("--enc_n_layer", type=int, default=3, help="encoder number of transformer layers")
-    parser.add_argument("--enc_dim_ff", type=int, default=768, help="encoder feed-forward dimension")
+    parser.add_argument("--enc_n_layer", type=int, default=6, help="encoder number of transformer layers")
+    parser.add_argument("--enc_dim_ff", type=int, default=1536, help="encoder feed-forward dimension")
 
     # Decoder Model
-    parser.add_argument("--dec_hidden_d", type=int, default=96, help="decoder hidden dimension")
-    parser.add_argument("--dec_n_head", type=int, default=3, help="decoder number of attention heads")
-    parser.add_argument("--dec_n_layer", type=int, default=2, help="decoder number of transformer layers")
-    parser.add_argument("--dec_dim_ff", type=int, default=384, help="decoder feed-forward dimension")
+    parser.add_argument("--dec_hidden_d", type=int, default=192, help="decoder hidden dimension")
+    parser.add_argument("--dec_n_head", type=int, default=6, help="decoder number of attention heads")
+    parser.add_argument("--dec_n_layer", type=int, default=3, help="decoder number of transformer layers")
+    parser.add_argument("--dec_dim_ff", type=int, default=768, help="decoder feed-forward dimension")
 
     args = parser.parse_args()
     
@@ -564,17 +563,3 @@ if __name__ == "__main__":
         trainer = Trainer(config)
     
     trainer.train()
-
-
-# Final parmetrers 
-    # # Encoder Model
-    # parser.add_argument("--enc_hidden_d", type=int, default=384, help="encoder hidden dimension")
-    # parser.add_argument("--enc_n_head", type=int, default=6, help="encoder number of attention heads")
-    # parser.add_argument("--enc_n_layer", type=int, default=6, help="encoder number of transformer layers")
-    # parser.add_argument("--enc_dim_ff", type=int, default=1536, help="encoder feed-forward dimension")
-
-    # # Decoder Model
-    # parser.add_argument("--dec_hidden_d", type=int, default=192, help="decoder hidden dimension")
-    # parser.add_argument("--dec_n_head", type=int, default=6, help="decoder number of attention heads")
-    # parser.add_argument("--dec_n_layer", type=int, default=3, help="decoder number of transformer layers")
-    # parser.add_argument("--dec_dim_ff", type=int, default=768, help="decoder feed-forward dimension")
