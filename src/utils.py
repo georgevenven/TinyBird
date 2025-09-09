@@ -4,6 +4,63 @@ import glob
 import torch
 from model import TinyBird
 
+def count_parameters(model):
+    """
+    Count and print the number of parameters in the encoder, decoder, and total model.
+    
+    Args:
+        model (TinyBird): The TinyBird model instance
+    
+    Returns:
+        dict: Dictionary containing parameter counts for encoder, decoder, and total
+    """
+    # Count encoder parameters
+    encoder_params = 0
+    encoder_components = [
+        model.patch_projection,
+        model.encoder,
+        model.pos_enc
+    ]
+    
+    for component in encoder_components:
+        if hasattr(component, 'parameters'):
+            encoder_params += sum(p.numel() for p in component.parameters())
+        else:
+            encoder_params += component.numel()  # For nn.Parameter
+    
+    # Count decoder parameters  
+    decoder_params = 0
+    decoder_components = [
+        model.decoder,
+        model.encoder_to_decoder,
+        model.decoder_to_pixel,
+        model.mask_token
+    ]
+    
+    for component in decoder_components:
+        if hasattr(component, 'parameters'):
+            decoder_params += sum(p.numel() for p in component.parameters())
+        else:
+            decoder_params += component.numel()  # For nn.Parameter
+    
+    # Count total parameters
+    total_params = sum(p.numel() for p in model.parameters())
+    
+    # Print the results
+    print("=" * 60)
+    print("MODEL PARAMETER COUNT")
+    print("=" * 60)
+    print(f"Encoder parameters:    {encoder_params:,}")
+    print(f"Decoder parameters:    {decoder_params:,}")
+    print(f"Total parameters:      {total_params:,}")
+    print("=" * 60)
+    
+    return {
+        'encoder': encoder_params,
+        'decoder': decoder_params, 
+        'total': total_params
+    }
+
 def load_model_from_checkpoint(run_dir="", checkpoint_file=None, fallback_to_random=True):
     """
     Load a TinyBird model from a checkpoint directory.

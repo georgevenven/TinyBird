@@ -82,6 +82,10 @@ class Trainer():
             self.tinybird = TinyBird(config).to(self.device)
             print("Initialized new model")
         
+        # Print parameter counts
+        from utils import count_parameters
+        count_parameters(self.tinybird)
+        
         # Initialize optimizer
         self.optimizer = AdamW(self.tinybird.parameters(), lr=config["lr"], weight_decay=config["weight_decay"])
         

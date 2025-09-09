@@ -276,7 +276,7 @@ def main(args):
     print(f"Unlabeled song patches: {unlabeled_count}")
     
     # --- remove average vector per position (choose one) ---
-    mode = "absolute"  # {"absolute", "relative", None}
+    mode = None  # {"absolute", "relative", None}
     Z_np = Z.cpu().numpy()
     if mode == "absolute":
         uniq = np.unique(pos_ids)
@@ -290,20 +290,15 @@ def main(args):
             means[b] = Z_np[rel_bins == b].mean(axis=0)
         Z_np = Z_np - means[rel_bins]
     Z = torch.from_numpy(Z_np)
-    # Apply whitening + L2 normalization (new style)
-    # Z_whitened = (Z_np - Z_np.mean(0)) / (Z_np.std(0) + 1e-6)
-    # Z_whitened /= np.linalg.norm(Z_whitened, axis=1, keepdims=True) + 1e-9
-    # print(f"Shape after whitening: {Z_whitened.shape}")
     
-    # Apply PCA to reduce to 32 dimensions before UMAP
-    from sklearn.decomposition import PCA
-    pca = PCA(n_components=32)
-    Z_pca = pca.fit_transform(Z_np)
-    print(f"Shape after PCA: {Z_pca.shape}")
+    # from sklearn.decomposition import PCA
+    # pca = PCA(n_components=512)
+    # Z_pca = pca.fit_transform(Z_np)
+    # print(f"Shape after PCA: {Z_pca.shape}")
     
     # Apply UMAP to the PCA-reduced data
     reducer_enc = umap.UMAP(n_components=2, n_neighbors=100, metric='cosine')
-    emb_enc = reducer_enc.fit_transform(Z_pca)
+    emb_enc = reducer_enc.fit_transform(Z)
     print("UMAP done")
 
     # --- save arrays to NPZ (labels, spec, embeddings, pos_ids) ---
@@ -318,12 +313,21 @@ def main(args):
             labels=syllable_labels,     # shape: (N_patches,)
             spec=spec_arr,              # shape: (total_chunks, 1, mels, CHUNK)
             embeddings=Z_np,            # shape: (N_patches, H*D), freq-stacked
+            embeddings_pca=Z_pca,       # shape: (N_patches, 32), PCA-reduced
+            embeddings_umap=emb_enc,    # shape: (N_patches, 2), UMAP 2D embedding
             pos_ids=pos_ids             # shape: (N_patches,)
         )
         print(f"NPZ saved to {args['npz_out']}")
     
     # Create scatter plot colored by syllable types
     plt.figure(figsize=(8, 8), dpi=300)
+    
+    # Determine title based on depositioning mode
+    if mode is None:
+        title = "A"
+    else:
+        title = "B "
+    
     if args.get("json_path") and len(song_data_dict) > 0:
         # Define colors for different syllable types
         import matplotlib.cm as cm
@@ -345,16 +349,13 @@ def main(args):
             if syllable_indices.any():
                 plt.scatter(emb_enc[syllable_indices, 0], emb_enc[syllable_indices, 1], 
                            alpha=0.1, s=10, color=color_map[syllable_type], edgecolors='none')
-        title = 'UMAP Embedding of Song Patches by Syllable Type' if len(unique_syllables) > 0 \
-                else 'UMAP Embedding of Song Patches (No Syllable Labels Found)'
-        plt.title(title, fontsize=32)
     else:
         # Fallback to original single-color plot if no JSON provided
         plt.scatter(emb_enc[:, 0], emb_enc[:, 1], alpha=0.1, s=10, edgecolors='none')
-        plt.title('UMAP Embedding of Spectrogram Patches', fontsize=32)
     
-    plt.xlabel('UMAP 1', fontsize=24)
-    plt.ylabel('UMAP 2', fontsize=24)
+    plt.title(title, fontsize=48, fontweight='bold', loc='left')
+    plt.xlabel('UMAP 1', fontsize=24, fontweight='bold')
+    plt.ylabel('UMAP 2', fontsize=24, fontweight='bold')
     plt.xticks([])  # Remove tick marks but keep axis
     plt.yticks([])  # Remove tick marks but keep axis
     
