@@ -1,0 +1,11 @@
+uv run python src/audio2spec.py \
+  --src_dir /mnt/birdconv/tb_conv_data \
+  --dst_dir /mnt/birdconv/tb_conv_spec_ss320_mel128 \
+  --format pt \
+  --sr 32000 \
+  --step_size 320 \
+  --nfft 1024 \
+  --mel \
+  --n_mels 128 \
+  --single_threaded no \
+  --max_workers 8
