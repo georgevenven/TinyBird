@@ -1,4 +1,35 @@
-.png
+# Model files
+*.pt
+
+# Audio files
+*.wav
+
+# Video files
+*.mp4
+
+# Image files
+*.png
+
+# NumPy array files
+*.npy
+
+# Python cache files
+*.pyc
+__pycache__/
+
+# JSON files
+*.json
+
+# macOS system files
+.DS_Store
+
+# Log files
+*.log
+
+# UV lock file
+uv.lock
+
+# Directories
 /recons
 /runs
 /imgs

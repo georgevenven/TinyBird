@@ -186,15 +186,17 @@ class Trainer():
         Perform one forward pass and optionally backward pass.
         
         Args:
-            batch: Input batch (spectrograms, filenames)
+            batch: Input batch (spectrograms, chirp_intervals, N, filenames)
             is_training: If True, perform gradient update. If False, no gradients.
             
         Returns:
             loss: Scalar loss value
         """
-        spectrograms, _ = batch
+        spectrograms, chirp_intervals, N , _ = batch
         x = spectrograms.to(self.device, non_blocking=True)  # (B, 1, H, W)
-        
+        x_i = chirp_intervals.to(self.device, non_blocking=True)  # (B, N, 2)
+        N = N.to(self.device, non_blocking=True) # (B, 1) # number of chirp intervals
+
         if is_training:
             self.tinybird.train()
             self.optimizer.zero_grad(set_to_none=True)
@@ -205,11 +207,11 @@ class Trainer():
         with torch.set_grad_enabled(is_training):
             if self.use_amp:
                 with torch.cuda.amp.autocast():
-                    h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x)
+                    h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x, chirp_intervals, N)
                     pred = self.tinybird.forward_decoder(h, idx_restore, T)
                     loss = self.tinybird.loss_mse(x, pred, bool_mask)
             else:
-                h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x)
+                h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x, chirp_intervals, N)
                 pred = self.tinybird.forward_decoder(h, idx_restore, T)
                 loss = self.tinybird.loss_mse(x, pred, bool_mask)
         
@@ -242,18 +244,21 @@ class Trainer():
 
     def save_reconstruction(self, batch, step_num):
         """Save reconstruction visualization comparing input and output spectrograms."""
-        spectrograms, _ = batch
+        spectrograms, chirp_intervals, N, _ = batch
         x = spectrograms.to(self.device, non_blocking=True)  # (B, 1, H, W)
+        x_i = chirp_intervals.to(self.device, non_blocking=True)  # (B, N, 2)
+        N = N.to(self.device, non_blocking=True) # (B, 1) # number of chirp intervals
+
         
         # Get model prediction
         self.tinybird.eval()
         with torch.no_grad():
             if self.use_amp:
                 with torch.cuda.amp.autocast():
-                    h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x)
+                    h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x, x_i, N)
                     pred = self.tinybird.forward_decoder(h, idx_restore, T)
             else:
-                h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x)
+                h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x, x_i, N)
                 pred = self.tinybird.forward_decoder(h, idx_restore, T)
         
         # Depatchify prediction to get back (B, 1, H, W) format

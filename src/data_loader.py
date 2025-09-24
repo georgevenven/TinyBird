@@ -53,6 +53,32 @@ class SpectogramDataset(Dataset):
         
         return spec
 
+    def pad_chirp_intervals(self, chirp_intervals, max_N, pad_value=-1):
+        """
+        Pad chirp_intervals (N, 2) to shape (max_N, 2) with pad_value.
+        
+        Args:
+            chirp_intervals (torch.Tensor): Tensor of shape (N, 2).
+            max_N (int): Target number of rows after padding.
+            pad_value (float or int): Value to use for padding.
+
+        Returns:
+            padded (torch.Tensor): Tensor of shape (max_N, 2).
+            length (int): Original number of intervals before padding.
+        """
+        N, dim = chirp_intervals.shape
+        assert dim == 2, f"Expected shape (N, 2), got {chirp_intervals.shape}"
+
+        # Allocate with pad_value
+        padded = torch.full((max_N, 2), pad_value, dtype=chirp_intervals.dtype)
+
+        # Copy as much as fits
+        n_copy = min(N, max_N)
+        padded[:n_copy] = chirp_intervals[:n_copy]
+
+        return padded, N
+
+
     def __getitem__(self, index):
         path = self.file_dirs[index]   # pick actual .pt path
 
@@ -63,6 +89,7 @@ class SpectogramDataset(Dataset):
             path = self.file_dirs[index]
             f=torch.load(path, map_location="cpu",weights_only=False)
         spec = f['s']
+        chirp_intervals , N  =   self.pad_chirp_intervals(f['chirp_intervals'], self.n_timebins)
         filename = path.stem
 
         # Apply z-score normalization
@@ -74,7 +101,7 @@ class SpectogramDataset(Dataset):
 
         spec = spec.unsqueeze(0) # since we are dealing with image data, conv requires channels 
 
-        return spec, filename 
+        return spec, chirp_intervals, N , filename 
 
     def __len__(self):
         return len(self.file_dirs)
