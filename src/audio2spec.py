@@ -12,6 +12,13 @@ import librosa.display                       # noqa: F401  (kept for future plot
 from tqdm import tqdm
 
 from scipy import ndimage
+import scipy.signal as ss
+
+
+def high_pass_filter(audio_signal, sample_rate=32000, cutoff=512, order=5):
+    """Apply a high-pass filter to the audio signal."""
+    sos = ss.butter(order, cutoff, btype='high', fs=sample_rate, output='sos')
+    return ss.sosfilt(sos, audio_signal, axis=-1)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # helper: STFT → log‑magnitude
@@ -66,7 +73,7 @@ def compute_spectrogram(
     chirp_intervals, _ , _ = classify_loudness(S_db, frame_ms)
     return S_db, np.asarray(chirp_intervals, dtype=np.int32).reshape(-1, 2)
 
-def classify_loudness(spec_db: np.ndarray, frame_ms: float, merge_ms: float = 30.0) -> tuple[list[tuple[int, int]], np.ndarray, float]:
+def classify_loudness(spec_db: np.ndarray, frame_ms: float, merge_ms: float = 200.0) -> tuple[list[tuple[int, int]], np.ndarray, float]:
     
     def compute_loudness(spec_db: np.ndarray) -> np.ndarray:
         spec_power = np.power(10.0, spec_db / 10.0, dtype=np.float64)
@@ -134,9 +141,11 @@ def classify_loudness(spec_db: np.ndarray, frame_ms: float, merge_ms: float = 30
     chirp_intervals = intervals_from_mask((loudness > thr))
 
     # Merge chirps that are closer than 30 ms apart
-    gap_frames = max(1, int(round(merge_ms/ max(frame_ms, 1e-9))))
+    gap_frames = max(1, int(round(merge_ms / max(frame_ms, 1e-9))))
+    # Preserve input order (already sorted); do not sort intervals
+    ints = list(chirp_intervals)
     merged_chirps: list[tuple[int, int]] = []
-    for s, e in chirp_intervals:
+    for s, e in ints:
         if not merged_chirps:
             merged_chirps.append((s, e))
             continue
@@ -398,6 +407,9 @@ def process_audio_file(
                 # Resample only if detection was wrong
                 wav = librosa.resample(wav, orig_sr=actual_sr, target_sr=sr)
                 actual_sr = sr
+
+        # Apply high-pass filter before computing spectrogram
+        wav = high_pass_filter(wav, sample_rate=actual_sr, cutoff=512, order=5)
 
         # Double-check length after loading (in case duration detection was inaccurate)
         if len(wav) / actual_sr * 1000 < min_len_ms:
@@ -786,6 +798,9 @@ class WavToSpec:
                     wav = librosa.resample(wav, orig_sr=actual_sr, target_sr=self.sr)
                     actual_sr = self.sr
 
+            # Apply high-pass filter before computing spectrogram
+            wav = high_pass_filter(wav, sample_rate=actual_sr, cutoff=512, order=5)
+
             # Double-check length after loading (in case duration detection was inaccurate)
             if len(wav) / actual_sr * 1000 < self.min_len_ms:
                 return {"file": str(fp), "skipped": True}
@@ -846,7 +861,7 @@ def cli() -> None:
 
     p.add_argument("--sr", type=int, default=32_000,
                    help="Sample rate in Hz (default: 32000).")
-    p.add_argument("--step_size", type=int, default=64,
+    p.add_argument("--step_size", type=int, default=320,
                    help="STFT hop length (samples at target sample rate).")
     p.add_argument("--nfft",      type=int, default=1024,
                    help="FFT size.")
