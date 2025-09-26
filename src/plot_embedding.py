@@ -9,6 +9,70 @@ import matplotlib.pyplot as plt
 import json
 from pathlib import Path
 import torch.nn.functional as F
+from math import floor, ceil
+from matplotlib import colors as mcolors
+import re
+
+# should be parameter, or somehow automatically calculated 
+def _ms_to_tb(ms):
+    """2 ms per timebin."""
+    return int(round(ms / 2.0))
+
+def _slug(s):
+    """Safe filename slug. GEORGE SAYS THIS IS TEMPORARY."""
+    return "".join(c if (c.isalnum() or c in ("-", "_")) else "_" for c in str(s))
+
+def load_json_events(json_path, selected_bird=None):
+    """
+    Json format 
+    {
+      "metadata": {"units":"ms"},
+      "recordings":[
+        {"recording":{"filename":...,"bird_id":...},
+         "detected_events":[
+            {"onset_ms":...,"offset_ms":...,
+             "units":[{"onset_ms":...,"offset_ms":...,"id":int}, ...]}]}]}
+    Returns: list of entries:
+      {"stem": <lower filename stem>, "bird_id": <lower bird_id>, "events": [event,...]}
+      event = {"on_tb": int, "off_tb": int, "units": [(on_tb, off_tb, id), ...]}
+
+    filename will always contain stem 
+    
+    Args:
+        json_path: Path to the JSON file
+        selected_bird: is the bird_id, must be a direct match 
+    """
+    with open(json_path, "r") as f:
+        jd = json.load(f)
+    # Build exact map keyed by (bird_num, clip_num) -> [events]
+    event_map = {}
+    for rec in jd.get("recordings", []):
+        file_name = rec.get("recording", {}).get("filename", "") or ""
+        bird_id = rec.get("recording", {}).get("bird_id", "") or ""
+
+        file_name = file_name.split(".")[:-1]
+        file_name = ".".join(file_name)
+        # print(file_name)
+        # return 
+
+        # # Filter by selected bird if specified
+        if selected_bird is not None and bird_id != selected_bird:
+            continue
+
+        # if we have selected a certain bird, that the event_map will only contain that said bird 
+        ev_list = []
+        for ev in rec.get("detected_events", []):
+            e_on = _ms_to_tb(ev["onset_ms"])
+            e_off = _ms_to_tb(ev["offset_ms"])
+            units = []
+            for u in ev.get("units", []):
+                u_on = _ms_to_tb(u["onset_ms"])
+                u_off = _ms_to_tb(u["offset_ms"])
+                units.append((u_on, u_off, int(u["id"])))
+            ev_list.append({"on_tb": e_on, "off_tb": e_off, "units": units})
+        event_map.setdefault((file_name), []).extend(ev_list)
+    
+    return event_map
 
 def fill_between_equals(labels, song_mask=None, max_gap=80):
     """Fill None runs bounded by the SAME label on both sides (<= max_gap)."""
@@ -136,24 +200,10 @@ def get_syllable_labels_for_patches(filename, song_data_dict, W, patch_width, sp
     return patch_song_mask, patch_syllable_labels
 
 def main(args):
-    # Load and process JSON file if provided
-    song_data_dict = {}
+    # Load Bengal-finch JSON with detected events
+    event_map = {}
     if args.get("json_path"):
-        print("Loading JSON file...")
-        with open(args["json_path"], 'r') as f:
-            json_data = json.load(f)
-        
-        # Filter for entries with song_present=true and build lookup dict
-        for entry in json_data:
-            if entry.get("song_present", False):
-                # Use filename stem (without extension) for matching
-                filename_stem = Path(entry["filename"]).stem
-                song_data_dict[filename_stem] = {
-                    "segments": entry["segments"],
-                    "syllable_labels": entry.get("syllable_labels", {})
-                }
-        
-        print(f"Found {len(song_data_dict)} files with songs")
+        event_map = load_json_events(args["json_path"], selected_bird=args.get("bird"))
     
     # Load model and config from checkpoint
     model, config = load_model_from_checkpoint(
@@ -178,6 +228,9 @@ def main(args):
     K = 64                # change if you want coarser/finer relative bins
     total_timebins = 0
     i = 0
+    # store full CHUNK windows and their patch labels for later visualization
+    all_chunks = []        # list of tensors [1, mels, CHUNK]
+    all_chunk_labels = []  # list of lists length W_const with unit ids or None
     
     while i < len(embedding_dataset) and total_timebins < args["num_timebins"]:
         spec, file_name = embedding_dataset[i]
@@ -195,49 +248,72 @@ def main(args):
         spec_timebins = spec.shape[-1]
         spec_mels = spec.shape[-2]
         
-        # --- chunk into fixed context batches and process only chunks with song ---
-        CHUNK = config["num_timebins"]                       # context length
+        # --- Only pass detected events; crop non-events before the model ---
+        CHUNK = config["num_timebins"]                         # context length
         H = int(spec_mels / config["patch_height"])
         W_const = int(CHUNK / config["patch_width"])
-        batch_chunks = []            # tensors [1, mels, CHUNK]
-        batch_song_indices = []      # list[list[int]]
-        batch_labels = []            # list[list[object]]
+        batch_chunks = []              # tensors [1, mels, CHUNK]
+        batch_song_indices = []        # list[list[int]]
+        batch_labels = []              # list[list[object]]; here: unit ids
 
-        full_T = spec.shape[-1]
-        n_chunks = (full_T + CHUNK - 1) // CHUNK
-        for ci in range(n_chunks):
-            start_tb = ci * CHUNK
-            end_tb   = min(start_tb + CHUNK, full_T)
-            chunk = spec[:, :, start_tb:end_tb]              # [1, mels, Tci]
-            Tci = chunk.shape[-1]
-            if Tci < config["patch_width"]:
-                continue
-            # right-pad to CHUNK so we can batch
-            if Tci < CHUNK:
-                pad = CHUNK - Tci
-                chunk = F.pad(chunk, (0, pad, 0, 0, 0, 0))
-            # song mask + labels for this chunk (before encoder)
-            W_chunk = W_const                                  # after pad
-            if args.get("json_path") and song_data_dict:
-                mask, labs = get_syllable_labels_for_patches(
-                    file_name, song_data_dict, W_chunk, config["patch_width"], CHUNK, start_timebin=start_tb
-                )
-                labs = fill_between_equals(labs, song_mask=mask, max_gap=args.get("max_gap"))
-            else:
-                mask = [True] * W_chunk
-                labs = [None] * W_chunk
-            idxs = [j for j, m in enumerate(mask) if m]
-            if not idxs:
-                continue  # skip chunks with no song
-            batch_chunks.append(chunk.unsqueeze(0))           # -> [1,1,mels,CHUNK]
-            batch_song_indices.append(idxs)
-            batch_labels.append(labs)
-            total_timebins += (end_tb - start_tb)
-            if total_timebins >= args["num_timebins"]:
-                break
+        matched_events = event_map.get(file_name, [])
+
+        # ugly 
+        if matched_events == []:
+            i+=1
+            continue
+
+        if matched_events:
+            for ev in matched_events:
+                e_on, e_off = ev["on_tb"], ev["off_tb"]
+                if e_off <= e_on:
+                    continue
+                # split long events into CHUNK-sized windows
+                win_start = e_on
+                while win_start < e_off:
+                    win_end = min(win_start + CHUNK, e_off)
+                    chunk = spec[:, :, win_start:win_end]      # [1, mels, Tci]
+                    Tci = chunk.shape[-1]
+                    if Tci < config["patch_width"]:
+                        break
+                    if Tci < CHUNK:
+                        pad = CHUNK - Tci
+                        chunk = F.pad(chunk, (0, pad, 0, 0, 0, 0))
+                    # label patches by unit id
+                    W_chunk = W_const
+                    labs = [None] * W_chunk
+                    # compute best-overlap unit per patch
+                    for (u_on, u_off, uid) in ev["units"]:
+                        # overlap with this window
+                        a = max(u_on, win_start)
+                        b = min(u_off, win_end)
+                        if b <= a:
+                            continue
+                        # window-relative timebins
+                        a_rel = a - win_start
+                        b_rel = b - win_start
+                        p0 = max(0, a_rel // config["patch_width"])
+                        p1 = min(W_chunk, ceil(b_rel / config["patch_width"]))
+                        for p in range(p0, p1):
+                            labs[p] = uid
+                    # mask is simply patches inside the event window (all True)
+                    idxs = [j for j in range(W_chunk)]
+                    batch_chunks.append(chunk.unsqueeze(0))
+                    batch_song_indices.append(idxs)
+                    batch_labels.append(labs)
+                    # keep a copy for spectrogram visualization later
+                    all_chunks.append(chunk.detach().cpu())     # [1, mels, CHUNK]
+                    all_chunk_labels.append(labs[:])            # copy
+                    total_timebins += (win_end - win_start)
+                    if total_timebins >= args["num_timebins"]:
+                        break
+                    win_start += CHUNK
+        else:
+            # No exact match -> skip this spec to avoid wrong labels
+            i += 1
+            continue
 
         if not batch_chunks:
-            print(f"Skip {Path(file_name).stem}: no song patches")
             i += 1
             continue
 
@@ -276,7 +352,7 @@ def main(args):
     print(f"Unlabeled song patches: {unlabeled_count}")
     
     # --- remove average vector per position (choose one) ---
-    mode = None  # {"absolute", "relative", None}
+    mode = "absolute"  # {"absolute", "relative", None}
     Z_np = Z.cpu().numpy()
     if mode == "absolute":
         uniq = np.unique(pos_ids)
@@ -300,6 +376,8 @@ def main(args):
     reducer_enc = umap.UMAP(n_components=2, n_neighbors=100, metric='cosine')
     emb_enc = reducer_enc.fit_transform(Z)
     print("UMAP done")
+
+    Z_pca = Z ## place holder 
 
     # --- save arrays to NPZ (labels, spec, embeddings, pos_ids) ---
     if args.get("npz_out"):
@@ -328,7 +406,7 @@ def main(args):
     else:
         title = "B "
     
-    if args.get("json_path") and len(song_data_dict) > 0:
+    if args.get("json_path") and len(event_map) > 0:
         # Define colors for different syllable types
         import matplotlib.cm as cm
         mask_labeled = syllable_labels != None
@@ -341,7 +419,7 @@ def main(args):
         unlabeled_indices = ~mask_labeled
         if unlabeled_indices.any():
             plt.scatter(emb_enc[unlabeled_indices, 0], emb_enc[unlabeled_indices, 1], 
-                       alpha=0.1, s=10, color='lightgray', edgecolors='none')
+                       alpha=0.1, s=10, color='#404040', edgecolors='none')  # light black instead of lightgray
         
         # Plot each syllable type with different colors
         for syllable_type in unique_syllables:
@@ -352,6 +430,7 @@ def main(args):
     else:
         # Fallback to original single-color plot if no JSON provided
         plt.scatter(emb_enc[:, 0], emb_enc[:, 1], alpha=0.1, s=10, edgecolors='none')
+        color_map = {}
     
     plt.title(title, fontsize=48, fontweight='bold', loc='left')
     plt.xlabel('UMAP 1', fontsize=24, fontweight='bold')
@@ -359,12 +438,54 @@ def main(args):
     plt.xticks([])  # Remove tick marks but keep axis
     plt.yticks([])  # Remove tick marks but keep axis
     
-    # Save figure if specified
-    if args.get("save_path"):
-        plt.savefig(args["save_path"], bbox_inches='tight', dpi=300)
-        print(f"Figure saved to {args['save_path']}")
-    
-    plt.show()
+    # Always save under root/imgs relative to this file. No CLI arg.
+    # GEORGE SAYS THIS IS TEMPORARY: name = spec_dir + run_dir + timebins
+    out_dir = (Path(__file__).resolve().parent.parent / "imgs")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    spec_slug = _slug(Path(args["spec_dir"]).name or "spec")
+    run_slug  = _slug(Path(args["run_dir"]).name or "run")
+    img_path  = out_dir / f"{spec_slug}__{run_slug}__tb{args['num_timebins']}.png"
+    plt.savefig(img_path, bbox_inches='tight', dpi=300)
+    plt.close()
+    print(f"Figure saved to {img_path}")
+
+    # --- Generate 5 random CHUNK-length spectrograms with aligned 1D color bars ---
+    # GEORGE SAYS THIS IS TEMPORARY: uses same color palette as UMAP points.
+    if all_chunks:
+        rnd_count = min(5, len(all_chunks))
+        sel = np.random.choice(len(all_chunks), size=rnd_count, replace=False)
+        unlabeled_rgb = np.array(mcolors.to_rgb("#404040"))  # light black for non-song portions
+        for k, idx in enumerate(sel, start=1):
+            chunk = all_chunks[idx]        # [1, mels, CHUNK]
+            labs  = all_chunk_labels[idx]  # length W_const
+            mels, T = chunk.shape[-2], chunk.shape[-1]
+            # derive patch geometry
+            patch_width = config["patch_width"]
+            W_const = int(T // patch_width) if T % patch_width == 0 else int(np.ceil(T / patch_width))
+            # build bar image [h, T, 3], repeat per-timebin color from per-patch labels
+            bar_h = 10
+            bar = np.ones((bar_h, T, 3), dtype=np.float32) * unlabeled_rgb.reshape(1, 1, 3)
+            for p in range(min(W_const, len(labs))):
+                uid = labs[p]
+                # rgba->rgb if present; else unlabeled
+                rgb = np.array(color_map.get(uid, (*unlabeled_rgb, 1.0)))[:3]
+                a = p * patch_width
+                b = min(T, (p + 1) * patch_width)
+                bar[:, a:b, :] = rgb
+            # plot spectrogram + bar
+            fig = plt.figure(figsize=(10, 6), dpi=300)
+            gs = fig.add_gridspec(2, 1, height_ratios=[4, 0.3], hspace=0.05)
+            ax1 = fig.add_subplot(gs[0, 0])
+            ax2 = fig.add_subplot(gs[1, 0])
+            ax1.imshow(chunk.squeeze(0).numpy(), aspect="auto", origin="lower", interpolation="none")
+            ax1.set_xticks([]); ax1.set_yticks([])
+            ax2.imshow(bar, aspect="auto", origin="lower", interpolation="nearest")
+            ax2.set_xticks([]); ax2.set_yticks([])
+            # save
+            sp_path = out_dir / f"{spec_slug}__{run_slug}__tb{args['num_timebins']}__spec{k}.png"
+            fig.savefig(sp_path, bbox_inches="tight", dpi=300)
+            plt.close(fig)
+            print(f"Spectrogram saved to {sp_path}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Simple UMAP embedding visualization")
@@ -372,12 +493,11 @@ if __name__ == "__main__":
     parser.add_argument("--run_dir", type=str, required=True, help="Run directory path")
     parser.add_argument("--checkpoint", type=str, default=None, help="Checkpoint file (optional)")
     parser.add_argument("--spec_dir", type=str, required=True, help="Directory of specs to plot the embedding of")
-    parser.add_argument("--save_path", type=str, default=None, help="Path to save the figure (optional)")
     parser.add_argument("--npz_out", type=str, default=None, help="Save arrays to this .npz path")
     parser.add_argument("--json_path", type=str, default=None, help="to provide song snippets + syllable labels")
+    parser.add_argument("--bird", type=str, default=None, help="select specific bird number (e.g., 1 for bird1, 2 for bird2)")
     parser.add_argument("--max_gap", type=int, default=100, help="max patch-length of unlabeled gap to infill")
     parser.add_argument("--max_context", type=int, default=None, help="max timebins to load per clip before chunking; defaults to 64×context")
-    # removed auxiliary visualization args
 
     args = parser.parse_args()
     main(vars(args))

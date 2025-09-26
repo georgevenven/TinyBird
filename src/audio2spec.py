@@ -551,7 +551,7 @@ def cli() -> None:
                    help="output format (default: pt, fp32)")
 
     p.add_argument("--sr", type=int, default=32_000,
-                   rehelp="Sample rate in Hz (default: 32000).")
+                   help="Sample rate in Hz (default: 32000).")
     p.add_argument("--step_size", type=int, default=64,
                    help="STFT hop length (samples at target sample rate).")
     p.add_argument("--nfft",      type=int, default=1024,
