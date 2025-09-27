@@ -1,15 +1,25 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # audio2spec.py  ‑  simple .wav /.mp3/.ogg ➜ spectrogram (.npz / .pt) converter
 # ──────────────────────────────────────────────────────────────────────────────
-import os, json, time, gc, argparse, logging, random, psutil, signal, sys
+import os, json, time, gc, argparse, logging, random, psutil, signal, sys, shutil
 import multiprocessing as mp
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Tuple, Dict, List, Any, Optional
 
 import numpy as np
 import librosa
 import librosa.display                       # noqa: F401  (kept for future plots)
 from tqdm import tqdm
+
+
+@dataclass(frozen=True)
+class AudioEvent:
+    path: Path
+    start: float
+    end: float
+    label: int
+    name: str
 
 # ══════════════════════════════════════════════════════════════════════════════
 # helper: STFT → log‑magnitude
@@ -67,7 +77,7 @@ def compute_spectrogram(
 # standalone worker function (picklable)
 # ══════════════════════════════════════════════════════════════════════════════
 def process_audio_file(
-    fp: Path,
+    obj: Any,
     dst_dir: Path,
     sr: int,
     n_fft: int,
@@ -85,45 +95,57 @@ def process_audio_file(
     Returns None on success, error message on failure.
     """
     try:
+        event = obj if isinstance(obj, AudioEvent) else None
+        fp = event.path if event else obj
+
+        stem = event.name if event else fp.stem
         # ─── check if output already exists ─────────────────────────
         if fmt == "pt":
-            out_path = dst_dir / (fp.stem + ".pt")
+            out_path = dst_dir / (stem + ".pt")
         else:
-            out_path = dst_dir / (fp.stem + ".npz")
+            out_path = dst_dir / (stem + ".npz")
         
         if out_path.exists():
             return None  # Skip already processed files
         
-        # ─── fast duration check before loading ─────────────────────
-        try:
-            duration_sec = librosa.get_duration(path=fp)
-            if duration_sec * 1000 < min_len_ms:
+        if event:
+            duration = max(event.end - event.start, 0.0)
+            if duration <= 0:
                 skipped_counter.value += 1
                 return None
-        except Exception:
-            # Fallback: if duration check fails, proceed with loading
-            pass
-
-        # ─── smart loading with sample rate detection ────────────────
-        # First, detect native sample rate without loading audio
-        try:
-            native_sr = librosa.get_samplerate(fp)
-            needs_resampling = (native_sr != sr)
-        except Exception:
-            # Fallback: assume resampling needed
-            needs_resampling = True
-            native_sr = None
-
-        # Load audio with optimal settings
-        if needs_resampling:
-            wav, actual_sr = librosa.load(fp, sr=sr, mono=True)
+            wav, actual_sr = librosa.load(
+                fp,
+                sr=sr,
+                mono=True,
+                offset=max(event.start, 0.0),
+                duration=duration,
+            )
         else:
-            # Load at native rate, avoid unnecessary resampling
-            wav, actual_sr = librosa.load(fp, sr=None, mono=True)
-            if actual_sr != sr:
-                # Resample only if detection was wrong
-                wav = librosa.resample(wav, orig_sr=actual_sr, target_sr=sr)
-                actual_sr = sr
+            # ─── fast duration check before loading ─────────────────
+            try:
+                duration_sec = librosa.get_duration(path=fp)
+                if duration_sec * 1000 < min_len_ms:
+                    skipped_counter.value += 1
+                    return None
+            except Exception:
+                # Fallback: if duration check fails, proceed with loading
+                pass
+
+            # ─── smart loading with sample rate detection ───────────
+            try:
+                native_sr = librosa.get_samplerate(fp)
+                needs_resampling = (native_sr != sr)
+            except Exception:
+                needs_resampling = True
+                native_sr = None
+
+            if needs_resampling:
+                wav, actual_sr = librosa.load(fp, sr=sr, mono=True)
+            else:
+                wav, actual_sr = librosa.load(fp, sr=None, mono=True)
+                if actual_sr != sr:
+                    wav = librosa.resample(wav, orig_sr=actual_sr, target_sr=sr)
+                    actual_sr = sr
 
         # Double-check length after loading (in case duration detection was inaccurate)
         if len(wav) / actual_sr * 1000 < min_len_ms:
@@ -139,19 +161,22 @@ def process_audio_file(
             skipped_counter.value += 1
             return None
 
-        labels = np.zeros(S.shape[1], dtype=np.int32)
-        for lab, tb_on, tb_off in lab_map.get(fp.stem, []):
-            labels[tb_on:tb_off] = lab
+        if event:
+            labels = np.full(S.shape[1], event.label, dtype=np.int32)
+        else:
+            labels = np.zeros(S.shape[1], dtype=np.int32)
+            for lab, tb_on, tb_off in lab_map.get(fp.stem, []):
+                labels[tb_on:tb_off] = lab
 
         # ─── optimized output with minimal conversions ───────────────
         if fmt == "pt":
             import torch
-            out = dst_dir / (fp.stem + ".pt")
+            out = dst_dir / (stem + ".pt")
             # S uses default dtype, avoid unnecessary conversion
             torch.save({"s": torch.from_numpy(S),
                         "labels": torch.from_numpy(labels)}, out)
         else:  # npz (uncompressed)
-            out = dst_dir / (fp.stem + ".npz")
+            out = dst_dir / (stem + ".npz")
             # S uses default dtype from compute_spectrogram
             np.savez(out, s=S, labels=labels)
 
@@ -162,7 +187,8 @@ def process_audio_file(
         
     except Exception as e:
         skipped_counter.value += 1
-        return f"{fp}: {e}"
+        stem = obj.name if isinstance(obj, AudioEvent) else Path(obj).stem
+        return f"{stem}: {e}"
 
 
 def calculate_optimal_workers(total_files: int, avg_file_size_mb: float = 50) -> int:
@@ -221,6 +247,8 @@ class WavToSpec:
         dst_dir: str,
         *,
         file_list: str | None = None,
+        birdset: str | None = None,
+        birdset_split: str = "train",
         step_size: int = 160,
         n_fft: int = 1024,
         sr: int = 32_000,
@@ -239,6 +267,8 @@ class WavToSpec:
         self.dst_dir.mkdir(parents=True, exist_ok=True)
 
         self.file_list = Path(file_list) if file_list else None
+        self.birdset = birdset
+        self.birdset_split = birdset_split
         self.step = step_size
         self.n_fft = n_fft
         self.sr = sr
@@ -254,6 +284,8 @@ class WavToSpec:
         self._setup_logging()
         # Remove unpicklable Manager().Value - will create in run() if needed
 
+        self.lab_map: Dict[str, List[Tuple[int, int, int]]] = {}
+        self._birdset_cache_dirs: set[Path] = set()
         self.audio_files = self._gather_files()
         
         # Save audio parameters to destination directory
@@ -261,7 +293,6 @@ class WavToSpec:
 
         # Build label map if json_path is provided
         if json_path is not None:
-            self.lab_map = {}
             p = Path(json_path)
             json_files = [p] if p.is_file() else list(p.glob("*.json"))
 
@@ -286,9 +317,8 @@ class WavToSpec:
                             tb_on  = int(round(on  * 1e3 / hop_ms))
                             tb_off = int(round(off * 1e3 / hop_ms))
                             tmp.append((int(lab), tb_on, tb_off))
-                    self.lab_map[Path(fname).stem] = tmp            # key on *stem*
-        else:
-            self.lab_map = {}
+                    if tmp:
+                        self.lab_map.setdefault(Path(fname).stem, []).extend(tmp)
 
     # ──────────────────────────────────────────────────────────────────────
     # misc
@@ -313,8 +343,10 @@ class WavToSpec:
         with open(params_file, 'w') as f:
             json.dump(params, f, indent=2)
 
-    def _gather_files(self) -> list[Path]:
-        if self.file_list:
+    def _gather_files(self) -> List[Any]:
+        if self.birdset:
+            files = self._gather_birdset_files()
+        elif self.file_list:
             files = [Path(line.strip()) for line in self.file_list.read_text().splitlines() if line.strip()]
         else:
             exts = (".wav", ".mp3", ".ogg", ".flac")
@@ -325,7 +357,10 @@ class WavToSpec:
             ]
 
         if not files:
-            print("no audio files matched ‑ nothing to do.")
+            if self.birdset:
+                print(f"no detected events found in BirdSet {self.birdset} ({self.birdset_split}) - nothing to do.")
+            else:
+                print("no audio files matched ‑ nothing to do.")
             return []
 
         if self.take_n_random and self.take_n_random < len(files):
@@ -333,11 +368,71 @@ class WavToSpec:
 
         return files
 
+    def _gather_birdset_files(self) -> List[AudioEvent]:
+        try:
+            from datasets import load_dataset  # type: ignore
+        except ImportError as exc:
+            raise RuntimeError("Install the 'datasets' package to use --birdset") from exc
+
+        ds = load_dataset("DBD-research-group/BirdSet", self.birdset, split=self.birdset_split)
+        files: List[AudioEvent] = []
+
+        for sample in ds:
+            audio_info = sample.get("audio")
+            audio_path = None
+            if isinstance(audio_info, dict):
+                audio_path = audio_info.get("path")
+            elif hasattr(audio_info, "path"):
+                audio_path = getattr(audio_info, "path")
+
+            if not audio_path:
+                audio_path = sample.get("filepath")
+
+            if not audio_path:
+                continue
+
+            events = sample.get("detected_events")
+            if not events:
+                continue
+
+            try:
+                label_idx = int(sample.get("ebird_code"))
+            except (TypeError, ValueError):
+                continue
+
+            fp = Path(audio_path)
+            for idx, event in enumerate(events):
+                if not event or len(event) != 2:
+                    continue
+                start, end = event
+                if start is None or end is None:
+                    continue
+                if end <= start:
+                    continue
+                name = f"{fp.stem}_event{idx:04d}"
+                files.append(AudioEvent(path=fp, start=float(start), end=float(end), label=label_idx, name=name))
+                self._birdset_cache_dirs.add(fp.parent)
+
+        return files
+
+    def _cleanup_birdset_cache(self) -> None:
+        if not self._birdset_cache_dirs:
+            return
+        for directory in sorted(self._birdset_cache_dirs, key=lambda p: len(str(p)), reverse=True):
+            try:
+                if directory.exists():
+                    shutil.rmtree(directory, ignore_errors=False)
+            except Exception as exc:
+                logging.error(f"failed to remove cache directory {directory}: {exc}")
+        self._birdset_cache_dirs.clear()
+
     # ──────────────────────────────────────────────────────────────────────
     # public entry
     # ──────────────────────────────────────────────────────────────────────
     def run(self) -> None:
         if not self.audio_files:
+            if self.birdset:
+                self._cleanup_birdset_cache()
             return                       # exit 0, no fuss
         
         # Set up signal handler for graceful shutdown
@@ -433,6 +528,8 @@ class WavToSpec:
             # Restore original signal handler
             signal.signal(signal.SIGINT, original_sigint_handler)
             pbar.close()
+            if self.birdset:
+                self._cleanup_birdset_cache()
             
         processed_count = len(self.audio_files) - skipped_count
         print(f"Total processed: {processed_count}")
@@ -452,50 +549,59 @@ class WavToSpec:
     # ──────────────────────────────────────────────────────────────────────
     # helpers
     # ──────────────────────────────────────────────────────────────────────
-    def _safe_process(self, fp: Path) -> Optional[str]:
+    def _safe_process(self, obj: Any) -> Optional[str]:
         """
         Single-threaded processing wrapper with optimizations.
         Returns None on success, error message on failure.
         """
         try:
+            event = obj if isinstance(obj, AudioEvent) else None
+            fp = event.path if event else obj
+            stem = event.name if event else fp.stem
             # ─── check if output already exists ─────────────────────────
             if self.fmt == "pt":
-                out_path = self.dst_dir / (fp.stem + ".pt")
+                out_path = self.dst_dir / (stem + ".pt")
             else:
-                out_path = self.dst_dir / (fp.stem + ".npz")
+                out_path = self.dst_dir / (stem + ".npz")
             
             if out_path.exists():
                 return None  # Skip already processed files
             
-            # ─── fast duration check before loading ─────────────────────
-            try:
-                duration_sec = librosa.get_duration(path=fp)
-                if duration_sec * 1000 < self.min_len_ms:
-                    return None  # Skip, but not an error
-            except Exception:
-                # Fallback: if duration check fails, proceed with loading
-                pass
-
-            # ─── smart loading with sample rate detection ────────────────
-            # First, detect native sample rate without loading audio
-            try:
-                native_sr = librosa.get_samplerate(fp)
-                needs_resampling = (native_sr != self.sr)
-            except Exception:
-                # Fallback: assume resampling needed
-                needs_resampling = True
-                native_sr = None
-
-            # Load audio with optimal settings
-            if needs_resampling:
-                wav, actual_sr = librosa.load(fp, sr=self.sr, mono=True)
+            if event:
+                duration = max(event.end - event.start, 0.0)
+                if duration <= 0:
+                    return None
+                wav, actual_sr = librosa.load(
+                    fp,
+                    sr=self.sr,
+                    mono=True,
+                    offset=max(event.start, 0.0),
+                    duration=duration,
+                )
             else:
-                # Load at native rate, avoid unnecessary resampling
-                wav, actual_sr = librosa.load(fp, sr=None, mono=True)
-                if actual_sr != self.sr:
-                    # Resample only if detection was wrong
-                    wav = librosa.resample(wav, orig_sr=actual_sr, target_sr=self.sr)
-                    actual_sr = self.sr
+                # ─── fast duration check before loading ────────────────
+                try:
+                    duration_sec = librosa.get_duration(path=fp)
+                    if duration_sec * 1000 < self.min_len_ms:
+                        return None  # Skip, but not an error
+                except Exception:
+                    pass
+
+                # ─── smart loading with sample rate detection ──────────
+                try:
+                    native_sr = librosa.get_samplerate(fp)
+                    needs_resampling = (native_sr != self.sr)
+                except Exception:
+                    needs_resampling = True
+                    native_sr = None
+
+                if needs_resampling:
+                    wav, actual_sr = librosa.load(fp, sr=self.sr, mono=True)
+                else:
+                    wav, actual_sr = librosa.load(fp, sr=None, mono=True)
+                    if actual_sr != self.sr:
+                        wav = librosa.resample(wav, orig_sr=actual_sr, target_sr=self.sr)
+                        actual_sr = self.sr
 
             # Double-check length after loading (in case duration detection was inaccurate)
             if len(wav) / actual_sr * 1000 < self.min_len_ms:
@@ -509,19 +615,22 @@ class WavToSpec:
             if S.shape[1] < self.min_timebins:
                 return None  # Skip, but not an error
 
-            labels = np.zeros(S.shape[1], dtype=np.int32)
-            for lab, tb_on, tb_off in self.lab_map.get(fp.stem, []):
-                labels[tb_on:tb_off] = lab
+            if event:
+                labels = np.full(S.shape[1], event.label, dtype=np.int32)
+            else:
+                labels = np.zeros(S.shape[1], dtype=np.int32)
+                for lab, tb_on, tb_off in self.lab_map.get(fp.stem, []):
+                    labels[tb_on:tb_off] = lab
 
             # ─── optimized output with minimal conversions ───────────────
             if self.fmt == "pt":
                 import torch
-                out = self.dst_dir / (fp.stem + ".pt")
+                out = self.dst_dir / (stem + ".pt")
                 # S uses default dtype, avoid unnecessary conversion
                 torch.save({"s": torch.from_numpy(S),
                             "labels": torch.from_numpy(labels)}, out)
             else:  # npz (uncompressed)
-                out = self.dst_dir / (fp.stem + ".npz")
+                out = self.dst_dir / (stem + ".npz")
                 # S uses default dtype from compute_spectrogram
                 np.savez(out, s=S, labels=labels)
 
@@ -531,7 +640,7 @@ class WavToSpec:
             return None
             
         except Exception as e:
-            return f"{fp}: {e}"
+            return f"{stem}: {e}"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -545,10 +654,14 @@ def cli() -> None:
                      help="Root folder with wav/mp3/ogg files (searched recursively).")
     grp.add_argument("--file_list", type=str,
                      help="Text file with absolute/relative paths, one per line.")
+    grp.add_argument("--birdset", type=str,
+                     help="BirdSet configuration name (e.g. HSN or HSN_xc) to load via Hugging Face.")
     p.add_argument("--dst_dir",  type=str, required=True,
                    help="Where outputs go.")
     p.add_argument("--format", choices=["pt","npz"], default="pt",
                    help="output format (default: pt, fp32)")
+    p.add_argument("--birdset_split", type=str, default="train",
+                   help="Dataset split to use with --birdset (default: train)")
 
     p.add_argument("--sr", type=int, default=32_000,
                    help="Sample rate in Hz (default: 32000).")
@@ -581,6 +694,8 @@ def cli() -> None:
         src_dir=args.src_dir,
         dst_dir=args.dst_dir,
         file_list=args.file_list,
+        birdset=args.birdset,
+        birdset_split=args.birdset_split,
         step_size=args.step_size,
         n_fft=args.nfft,
         sr=args.sr,

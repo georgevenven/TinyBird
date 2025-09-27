@@ -1,0 +1,12 @@
+datasets
+hdbscan
+huggingface-hub
+librosa
+matplotlib
+numpy
+psutil
+scikit-learn
+scipy
+torch
+tqdm
+umap-learn
