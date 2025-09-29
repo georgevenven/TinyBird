@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 from model import TinyBird
 import model as tb_model
 import wandb
+import psutil
 
 class Trainer():
     def __init__(self, config, pretrained_model=None):
@@ -90,6 +91,20 @@ class Trainer():
         # Setup device
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Using device: {self.device}")
+
+        # Memory reporting (one-time, after first training step)
+        self._mem_reported = False
+        self._process = psutil.Process(os.getpid())
+
+        def _human_bytes(n: int) -> str:
+            units = ["B", "KB", "MB", "GB", "TB"]
+            i = 0
+            x = float(n)
+            while x >= 1024 and i < len(units) - 1:
+                x /= 1024.0
+                i += 1
+            return f"{x:.2f} {units[i]}"
+        self._human_bytes = _human_bytes
         
         # Initialize model
         if pretrained_model is not None:
@@ -212,6 +227,11 @@ class Trainer():
         Returns:
             loss: Scalar loss value
         """
+        # --- Memory tracking: capture baseline before the step ---
+        rss_before = self._process.memory_info().rss  # resident set size (bytes)
+        if torch.cuda.is_available() and not self._mem_reported:
+            torch.cuda.reset_peak_memory_stats(self.device)
+
         spectrograms, chirp_intervals, N , _ = batch
         x   = spectrograms.to(self.device, non_blocking=True).float()     # (B, 1, H, W)
         x_i = chirp_intervals.to(self.device, non_blocking=True)  # (B, N, 2)
@@ -264,6 +284,55 @@ class Trainer():
             else:
                 self.ema_val_loss = self.ema_alpha * self.ema_val_loss + (1 - self.ema_alpha) * loss.item()
         
+        # --- Memory tracking: report once after the first completed training step ---
+        if not self._mem_reported:
+            rss_after = self._process.memory_info().rss
+            cpu_delta = rss_after - rss_before
+
+            cuda_alloc = None
+            cuda_reserved = None
+            if torch.cuda.is_available():
+                # Ensure all CUDA work is done before querying
+                torch.cuda.synchronize(self.device)
+                cuda_alloc = torch.cuda.max_memory_allocated(self.device)
+                cuda_reserved = torch.cuda.max_memory_reserved(self.device)
+
+            # Print a concise, human-readable summary
+            print("=" * 60)
+            print("MEMORY USAGE (first training step)")
+            print("=" * 60)
+            print(f"CPU RSS before:  {self._human_bytes(rss_before)}")
+            print(f"CPU RSS after:   {self._human_bytes(rss_after)}  (+{self._human_bytes(max(0, cpu_delta))})")
+            if cuda_alloc is not None:
+                print(f"CUDA max allocated: {self._human_bytes(cuda_alloc)}")
+                print(f"CUDA max reserved:  {self._human_bytes(cuda_reserved)}")
+                # Also log raw numbers to W&B for later inspection
+                try:
+                    wandb.log({
+                        "system/cpu_rss_before": int(rss_before),
+                        "system/cpu_rss_after": int(rss_after),
+                        "system/cpu_rss_delta": int(max(0, cpu_delta)),
+                        "system/cuda_max_alloc_bytes": int(cuda_alloc),
+                        "system/cuda_max_reserved_bytes": int(cuda_reserved),
+                        "step": int(self.starting_step),
+                    }, step=int(self.starting_step))
+                except Exception:
+                    pass
+            else:
+                try:
+                    wandb.log({
+                        "system/cpu_rss_before": int(rss_before),
+                        "system/cpu_rss_after": int(rss_after),
+                        "system/cpu_rss_delta": int(max(0, cpu_delta)),
+                        "step": int(self.starting_step),
+                    }, step=int(self.starting_step))
+                except Exception:
+                    pass
+            print("=" * 60)
+
+            # Avoid spamming every step; only report once per run init
+            self._mem_reported = True
+
         return loss.item()
 
     def save_reconstruction(self, batch, step_num):
