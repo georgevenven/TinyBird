@@ -1,0 +1,38 @@
+{
+    "run_name": "tinybird_mac_v1",
+    "train_dir": "scripts/birdconv/data",
+    "val_dir": "scripts/birdconv/data",
+    
+  
+    "steps": 5,
+    "lr": 0.0002,
+    "batch_size": 2,
+  
+    "patch_height": 32,
+    "patch_width": 1,
+    "mels": 128,
+    "num_timebins": 30001,
+  
+    "dropout": 0.1,
+    "mask_p": 0.75,
+    "eval_every": 500,
+  
+    "amp": false,
+    "weight_decay": 0.0,
+  
+    "enc_hidden_d": 12,
+    "enc_n_head": 1,
+    "enc_n_layer": 1,
+    "enc_dim_ff": 12,
+  
+    "dec_hidden_d": 12,
+    "dec_n_head": 1,
+    "dec_n_layer": 1,
+    "dec_dim_ff": 12,
+  
+    "wandb_project": "tinybird-test",
+    "wandb_entity": null,
+    "wandb_mode": "online",
+  
+    "fallback_random": false
+  }
