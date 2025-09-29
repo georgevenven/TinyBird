@@ -35,3 +35,4 @@ uv.lock
 /imgs
 /archive 
 /results 
+/wandb

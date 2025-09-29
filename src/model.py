@@ -57,11 +57,19 @@ class TinyBird(nn.Module):
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
 
-    def project_to_patch(self, x):
-        # x is B, channel, height , width
-        z = self.patch_projection(x)
-        # p is hidden d, height tokens, width tokens 
-        return z
+    def tokenize_spectrogram(self, x):
+        # x  (B, C=1, H , W)
+        z = self.patch_projection(x)              # (B, D_enc, H', W')
+        H, W = z.shape[-2], z.shape[-1]
+        return z.flatten(2, 3).transpose(1, 2), H, W    # (B, T, D_enc)
+
+    def apply_position_encoding(self, z: torch.Tensor):
+        # z: (B, T, D_enc)
+
+        B, T, D = z.shape
+        assert T <= self.max_seq, f"T={z.size(1)} exceeds max_seq={self.max_seq}"
+             
+        return z + self.pos_enc[:, :T, :]   # (B, T, D_enc)
 
     def compactify_data(self, x: torch.Tensor, xi: torch.Tensor, N: torch.Tensor):
         """
@@ -253,66 +261,107 @@ class TinyBird(nn.Module):
         return z_keep, idx_restore
 
 
-    def forward_encoder(self, x: torch.Tensor, xi : torch.Tensor):
+    def forward_encoder(self, x: torch.Tensor, xi : torch.Tensor, n_blocks: int = 1, frac: float = 0.0):
         """
-        Patchify → add pos enc → mask → Transformer encoder.
+        Patchify → add positional encodings → build a **column-wise** mask from chirp boundaries →
+        keep only unmasked tokens → encode with the Transformer encoder.
+
+        Args:
+            x:  (B, 1, H, W) spectrograms after any upstream compaction/windowing.
+            xi: (B, N, 2) chirp [start, end) boundaries **in the current W frame**.
+
         Returns:
-        h: (B, keep, D_enc), idx_restore, bool_mask, T
+            h:           (B, keep, D_enc) encoder outputs for **kept** (unmasked) tokens only.
+            idx_restore: (B, T) permutation that restores the original token order after we
+                         temporarily move all kept tokens before masked ones. Use this to place
+                         decoder mask tokens back into the sequence.
+            bool_mask:   (B, T) boolean mask over tokens (True = **masked** token to be predicted).
+            T:           int total tokens in this sample = H * W (after patching), i.e. sequence length.
+
+        Notes:
+            • The mask is constructed **per column** across all mel rows: a time column that is masked
+              for a given item is masked for every row in that column. This yields a mask of shape (B, H*W).
+            • The encoder never sees masked tokens. It processes only the kept tokens; the decoder later
+              reconstructs the full sequence by inserting learned mask tokens and unshuffling with
+              `idx_restore`.
         """
+        # x:  (B, C=1, H, W)
+        # xi: (B, N, 2)
+        
+        z, H, W = self.tokenize_spectrogram(x)         # (B, T, D_enc), H, W
+        z = self.apply_position_encoding(z)            # (B, T, D_enc)
 
-        z_img = self.patch_projection(x)               # (B, D_enc, H', W')
-        H, W = z_img.shape[-2], z_img.shape[-1]
-        z = z_img.flatten(2, 3).transpose(1, 2)        # (B, T, D_enc)
-        B, T, D = z.shape
-        assert T <= self.max_seq, f"T={z.size(1)} exceeds max_seq={self.max_seq}"
-        z = z + self.pos_enc[:, :T, :]                 # (B, T, D_enc)
-
-        bool_mask = self.build_column_mask(xi, hw=(H, W), n_blocks=1 )
-
-        # z_keep, idx_restore, bool_mask = self.mask(z, hw=(H, W))    
-        z_keep, idx_restore = self.mask(z, bool_mask)
-
-
-        h = self.encoder(z_keep)                       # (B, keep, D_enc)
-        return h, idx_restore, bool_mask, T
+        bool_mask           = self.build_column_mask(xi, hw=(H, W), n_blocks=n_blocks, frac=frac )  # (B, H*W), True = masked (column-wise across H)
+        z_keep, idx_restore = self.mask(z, bool_mask) 
+        # z_keep: Kept tokens (B, keep_count, D)
+        # idx_restore: Permutation indices to restore original order (B, T)
+        
+        h = self.encoder(z_keep)                      # (B, keep, D_enc)
+        return h, idx_restore, bool_mask, H*W         # (B, keep, D_enc), (B, T), (B, T), T
     
     def forward_encoder_inference(self, x: torch.Tensor):
         """
         Patchify → add pos enc → mask → Transformer encoder.
         Returns:
-        h: (B, keep, D_enc), idx_restore, bool_mask, T
+        h: (B, T, D_enc)
         """
-        z = self.patch_projection(x)                   # (B, D_enc, H', W')
-        z = z.flatten(2, 3).transpose(1, 2)            # (B, T, D_enc)
-        B, T, D = z.shape
-        assert T <= self.max_seq, f"T={z.size(1)} exceeds max_seq={self.max_seq}"
-        z = z + self.pos_enc[:, :T, :]                  # (B, T, D_enc)
-        h = self.encoder(z)                             # (B, keep, D_enc)
-        return h
+        # x:  (B, C=1, H, W)
+
+        z, H, W = self.tokenize_spectrogram(x)         # (B, T, D_enc)
+        z = self.apply_position_encoding(z)            # (B, T, D_enc)
+        return self.encoder(z)                         # (B, T, D_enc)
+
 
     def forward_decoder(self, h: torch.Tensor, idx_restore: torch.Tensor, T: int):
         """
-        Project to decoder dim → insert mask tokens → unshuffle → add pos → decode → predict pixels.
+        Project encoder outputs to decoder width → insert learned mask tokens → unshuffle back to the
+        original token order → add decoder positional encodings → run the Transformer decoder → predict
+        pixel values for each patch.
+
+        Args:
+            h:           (B, T_enc, D_enc) encoder outputs for **kept** tokens only (T_enc ≤ T).
+            idx_restore: (B, T) permutation indices that map the kept-first layout back to the original
+                         token order (kept ∪ masked). Produced by `mask(...)` in the encoder path.
+            T:           int total number of tokens in the **full** sequence (kept + masked) after patching.
+
         Returns:
-        pred: (B, T, P) where P = patch_size[0]*patch_size[1]
+            pred:        (B, T, P) per-token predictions, where P = patch_height * patch_width.
+
+        Decoding logic:
+            1) A linear `encoder_to_decoder` projects encoder width D_enc → D_dec so encoder tokens match
+               the decoder’s channel size.
+            2) We create learned `mask_token`s of shape (B, T - T_enc, D_dec) to stand in for the masked
+               tokens that the encoder did not process.
+            3) Concatenate `[projected_kept, mask_tokens]` (kept-first layout) and apply `idx_restore`
+               to recover the original interleaving of kept+masked tokens.
+            4) Add decoder positional embeddings by projecting the encoder’s positional encodings to D_dec
+               (this keeps encoder/decoder positions consistent without maintaining a second embedding table).
+            5) Run the decoder stack and map to pixel space with `decoder_to_pixel` to obtain P values per token.
+
+        Important:
+            • `idx_restore` must be computed from the **same mask** used in the encoder step; otherwise the
+              unshuffle will place tokens incorrectly and reconstruction quality will collapse.
+            • The model learns to predict **only** masked regions during training (via `loss_mse` indexing),
+              but `pred` is returned for all tokens for convenience when depatchifying/visualizing.
         """
-        B = h.size(0)
-        # project encoder tokens to decoder width
-        y = self.encoder_to_decoder(h)                 # (B, keep, D_dec)
+        B, T_enc, D_enc = h.shape 
+
+        # 1) Match channel sizes: project encoder tokens (D_enc) to decoder width (D_dec).
+        y = self.encoder_to_decoder(h)                 # (B, T_enc, D_dec)
         D_dec = self.decoder_to_pixel.in_features
         keep = y.size(1)
 
-        # build full sequence with mask tokens then unshuffle to original order
-        # NOTE: define in __init__: self.mask_token = nn.Parameter(torch.zeros(1,1,D_dec))
-        mask_tokens = self.mask_token.expand(B, T - keep, D_dec)     # (B, T-keep, D_dec)
-        y_full = torch.cat([y, mask_tokens], dim=1)                  # kept-first layout
+        # 2) Insert learned mask tokens for the missing (masked) positions, then unshuffle back to original order.
+        #    Learned mask token (defined in __init__) provides a consistent placeholder embedding for masked slots.
+        mask_tokens = self.mask_token.expand(B, T - T_enc, D_dec)     # (B, T-keep, D_dec)
+        y_full = torch.cat([y, mask_tokens], dim=1)                   # kept-first layout
         y_full = torch.gather(y_full, 1, idx_restore.unsqueeze(-1).expand(B, T, D_dec))
 
-        pos_dec = self.encoder_to_decoder(self.pos_enc[:, :T, :])    # (1, T, D_dec)
+        pos_dec = self.encoder_to_decoder(self.pos_enc[:, :T, :])     # (1, T, D_dec) decoder pos-encs derived by projecting encoder pos-encs
         y_full = y_full + pos_dec
 
         d = self.decoder(y_full)                                     # (B, T, D_dec)
-        pred = self.decoder_to_pixel(d)                               # (B, T, P)
+        pred = self.decoder_to_pixel(d)                              # Final per-token patch prediction: (B, T, P). P is pixels per patch
         return pred
 
     def loss_mse(self, x: torch.Tensor, pred: torch.Tensor, bool_mask: torch.Tensor):
@@ -321,17 +370,15 @@ class TinyBird(nn.Module):
         x:    (B, 1, H, W)
         pred: (B, T, P) from decoder
         """
-        unfold = nn.Unfold(kernel_size=self.patch_size, stride=self.patch_size)
-        target = unfold(x).transpose(1, 2) 
-        
-        print(f"[TinyBird test] loss_mse: target={tuple(target.shape)}, pred={tuple(pred.shape)}, bool_mask={tuple(bool_mask.shape)}")
+        unfold = nn.Unfold(kernel_size=self.patch_size, stride=self.patch_size)  # unfolds spectrogram into patches of size P
+        target = unfold(x).transpose(1, 2)  # (B, T, P), where T = num patches, P = patch_height * patch_width
         
         # Normalize target patches
-        target_mean = target.mean(dim=-1, keepdim=True)
-        target_std = target.std(dim=-1, keepdim=True)
-        target = (target - target_mean) / (target_std + 1e-6)
+        target_mean = target.mean(dim=-1, keepdim=True)  # (B, T, 1), mean per patch
+        target_std = target.std(dim=-1, keepdim=True)    # (B, T, 1), std per patch
+        target = (target - target_mean) / (target_std + 1e-6)  # normalized target patches, shape (B, T, P)
         
-        loss = ((pred - target) ** 2)[bool_mask].mean()
+        loss = ((pred - target) ** 2)[bool_mask].mean()  # compute MSE only on masked patches; pred is (B, T, P), bool_mask is (B, T)
         return loss
 
 if __name__ == "__main__":

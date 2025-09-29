@@ -1,5 +1,5 @@
 import argparse 
-import os
+import os, json
 import shutil
 import json
 from datetime import datetime
@@ -9,6 +9,8 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import matplotlib.pyplot as plt
 from model import TinyBird
+import model as tb_model
+import wandb
 
 class Trainer():
     def __init__(self, config, pretrained_model=None):
@@ -50,13 +52,13 @@ class Trainer():
         self.imgs_path = os.path.join(self.run_path, "imgs")
         os.makedirs(self.weights_path, exist_ok=True)
         os.makedirs(self.imgs_path, exist_ok=True)
-        
+
         # Save config as JSON (only for new runs)
         if not config.get('is_continuing', False):
             config_path = os.path.join(self.run_path, "config.json")
             with open(config_path, 'w') as f:
                 json.dump(config, f, indent=2)
-            
+
             # Save audio processing parameters
             audio_params = {
                 "sr": 32000,  # sample rate
@@ -68,6 +70,23 @@ class Trainer():
             with open(audio_params_path, 'w') as f:
                 json.dump(audio_params, f, indent=2)
 
+        # --- Weights & Biases initialization (Step 1) ---
+        run_name = self.config.get("run_name") or os.path.basename(self.run_path.rstrip(os.sep))
+        wandb.init(
+            project=self.config.get("wandb_project", "tinybird"),
+            entity=self.config.get("wandb_entity", None),
+            name=run_name,
+            mode=self.config.get("wandb_mode", "online"),
+            config=self.config,
+        )
+        self.wandb_run = wandb.run
+        # Ensure nice metric plots (x-axis = step)
+        wandb.define_metric("step")
+        wandb.define_metric("train/*", step_metric="step")
+        wandb.define_metric("val/*", step_metric="step")
+        wandb.define_metric("lr", step_metric="step")
+        # --- End W&B initialization ---
+
         # Setup device
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Using device: {self.device}")
@@ -75,13 +94,14 @@ class Trainer():
         # Initialize model
         if pretrained_model is not None:
             # Use the loaded model from continue mode
-            self.tinybird = pretrained_model.to(self.device)
+            self.tinybird = pretrained_model.to(self.device).float()
             print("Using loaded model from checkpoint")
         else:
             # Initialize new model
-            self.tinybird = TinyBird(config).to(self.device)
+            self.tinybird = TinyBird(config).to(self.device).float()
             print("Initialized new model")
-        
+        # Watch model for gradients/param histograms (lightweight frequency)
+        wandb.watch(self.tinybird, log="gradients", log_freq=200)
         # Print parameter counts
         from utils import count_parameters
         count_parameters(self.tinybird)
@@ -193,9 +213,9 @@ class Trainer():
             loss: Scalar loss value
         """
         spectrograms, chirp_intervals, N , _ = batch
-        x = spectrograms.to(self.device, non_blocking=True)  # (B, 1, H, W)
+        x   = spectrograms.to(self.device, non_blocking=True).float()     # (B, 1, H, W)
         x_i = chirp_intervals.to(self.device, non_blocking=True)  # (B, N, 2)
-        N = N.to(self.device, non_blocking=True) # (B, 1) # number of chirp intervals
+        N   = N.to(self.device, non_blocking=True)                # (B, 1) # number of chirp intervals
 
         if is_training:
             self.tinybird.train()
@@ -207,11 +227,15 @@ class Trainer():
         with torch.set_grad_enabled(is_training):
             if self.use_amp:
                 with torch.cuda.amp.autocast():
-                    h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x, chirp_intervals, N)
+                    x, x_i  = self.tinybird.compactify_data(x, x_i, N)
+                    x, x_i  = self.tinybird.sample_data(x, x_i, N, n_blocks=3)
+                    h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x, x_i)
                     pred = self.tinybird.forward_decoder(h, idx_restore, T)
                     loss = self.tinybird.loss_mse(x, pred, bool_mask)
             else:
-                h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x, chirp_intervals, N)
+                x, x_i  = self.tinybird.compactify_data(x, x_i, N)
+                x, x_i  = self.tinybird.sample_data(x, x_i, N, n_blocks=3)
+                h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x, x_i)
                 pred = self.tinybird.forward_decoder(h, idx_restore, T)
                 loss = self.tinybird.loss_mse(x, pred, bool_mask)
         
@@ -245,9 +269,9 @@ class Trainer():
     def save_reconstruction(self, batch, step_num):
         """Save reconstruction visualization comparing input and output spectrograms."""
         spectrograms, chirp_intervals, N, _ = batch
-        x = spectrograms.to(self.device, non_blocking=True)  # (B, 1, H, W)
+        x = spectrograms.to(self.device, non_blocking=True).float()       # (B, 1, H, W)
         x_i = chirp_intervals.to(self.device, non_blocking=True)  # (B, N, 2)
-        N = N.to(self.device, non_blocking=True) # (B, 1) # number of chirp intervals
+        N = N.to(self.device, non_blocking=True)                  # (B, 1) # number of chirp intervals
 
         
         # Get model prediction
@@ -255,16 +279,20 @@ class Trainer():
         with torch.no_grad():
             if self.use_amp:
                 with torch.cuda.amp.autocast():
-                    h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x, x_i, N)
+                    x, x_i  = self.tinybird.compactify_data(x, x_i, N)
+                    x, x_i  = self.tinybird.sample_data(x, x_i, N, n_blocks=3)
+                    h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x, x_i)
                     pred = self.tinybird.forward_decoder(h, idx_restore, T)
             else:
-                h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x, x_i, N)
+                x, x_i  = self.tinybird.compactify_data(x, x_i, N)
+                x, x_i  = self.tinybird.sample_data(x, x_i, N, n_blocks=3)
+                h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x, x_i)
                 pred = self.tinybird.forward_decoder(h, idx_restore, T)
         
         # Depatchify prediction to get back (B, 1, H, W) format
         def depatchify(pred_patches):
-            # pred_patches: (B, T, P) → (B, 1, H, W)
-            H, W = self.config["mels"], self.config["num_timebins"]
+            """pred_patches: (B, T, P) → (B, 1, H, W) using the CURRENT x dims."""
+            H, W = x.shape[2], x.shape[3]  # after compactify/sample
             patch_size = self.config["patch_size"]
             fold = nn.Fold(output_size=(H, W), kernel_size=patch_size, stride=patch_size)
             return fold(pred_patches.transpose(1, 2))
@@ -331,6 +359,13 @@ class Trainer():
         recon_path = os.path.join(self.imgs_path, f"recon_step_{step_num:06d}.png")
         fig.savefig(recon_path, dpi=150)
         plt.close(fig)
+        # W&B: log recon images
+        wandb.log({
+            "recon/input": wandb.Image(x_img, caption=f"step={step_num} input"),
+            "recon/masked": wandb.Image(masked_img, caption=f"step={step_num} masked"),
+            "recon/overlay": wandb.Image(overlay_img, caption=f"step={step_num} overlay"),
+            "step": int(step_num),
+        }, step=int(step_num))
 
     def train(self):
         from data_loader import SpectogramDataset
@@ -423,6 +458,19 @@ class Trainer():
                 
                 # Save reconstruction visualization
                 self.save_reconstruction(val_batch, step_num)
+                # W&B: log validation metrics & LR once per eval
+                wandb.log({
+                    "step": int(step_num),
+                    "lr": float(current_lr),
+                    "train/loss": float(train_loss),
+                    "train/ema_loss": float(self.ema_train_loss),
+                    "val/loss": float(val_loss),
+                    "val/ema_loss": float(self.ema_val_loss),
+                }, step=int(step_num))
+                # W&B: attach the saved reconstruction png
+                wandb.log({
+                    "recon/png": wandb.Image(os.path.join(self.imgs_path, f"recon_step_{step_num:06d}.png")),
+                }, step=int(step_num))
         
         # Save final model weights
         final_step = self.starting_step + self.config['steps'] - 1
@@ -436,12 +484,12 @@ class Trainer():
         """Generate and save loss plots showing training and validation curves."""
         # Create figure with two subplots
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
-        
+
         # First panel: All losses
-        ax1.plot(self.train_steps, self.train_loss_history, 
+        ax1.plot(self.train_steps, self.train_loss_history,
                 label='Training Loss', alpha=0.7, linewidth=1, color='blue')
-        ax1.plot(self.val_steps, self.val_loss_history, 
-                label='Validation Loss', marker='o', markersize=3, 
+        ax1.plot(self.val_steps, self.val_loss_history,
+                label='Validation Loss', marker='o', markersize=3,
                 linewidth=2, color='red')
         ax1.set_xlabel('Training Steps')
         ax1.set_ylabel('Loss')
@@ -449,7 +497,7 @@ class Trainer():
         ax1.legend()
         ax1.grid(True, alpha=0.3)
         ax1.set_yscale('log')  # Log scale for loss values
-        
+
         # Second panel: EMA losses only
         # Calculate EMA train loss history for plotting
         ema_train_history = []
@@ -461,7 +509,7 @@ class Trainer():
             else:
                 ema_val = ema_alpha * ema_val + (1 - ema_alpha) * loss
             ema_train_history.append(ema_val)
-        
+
         # Calculate EMA val loss history
         ema_val_history = []
         ema_val = None
@@ -471,11 +519,11 @@ class Trainer():
             else:
                 ema_val = ema_alpha * ema_val + (1 - ema_alpha) * loss
             ema_val_history.append(ema_val)
-        
-        ax2.plot(self.train_steps, ema_train_history, 
+
+        ax2.plot(self.train_steps, ema_train_history,
                 label='EMA Training Loss', linewidth=2, color='darkblue')
-        ax2.plot(self.val_steps, ema_val_history, 
-                label='EMA Validation Loss', marker='o', markersize=3, 
+        ax2.plot(self.val_steps, ema_val_history,
+                label='EMA Validation Loss', marker='o', markersize=3,
                 linewidth=2, color='darkred')
         ax2.set_xlabel('Training Steps')
         ax2.set_ylabel('EMA Loss')
@@ -483,16 +531,23 @@ class Trainer():
         ax2.legend()
         ax2.grid(True, alpha=0.3)
         ax2.set_yscale('log')  # Log scale for loss values
-        
+
         plt.tight_layout()
-        
+
         # Save the plot
         plot_path = os.path.join(self.imgs_path, 'loss_plot.png')
         plt.savefig(plot_path, dpi=300, bbox_inches='tight')
         plt.close()
-        
+
         print(f"Loss plot saved to: {plot_path}")
         print(f"Loss log saved to: {self.loss_log_path}")
+        # W&B: log final loss curves and attach the CSV
+        wandb.log({"final/loss_plot": wandb.Image(plot_path)}, step=int(self.starting_step + self.config['steps'] - 1))
+        if os.path.exists(self.loss_log_path):
+            dest = os.path.join(wandb.run.dir, "loss_log.txt")
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            shutil.copyfile(self.loss_log_path, dest)
+            wandb.save(dest)
 
 
 if __name__ == "__main__":
@@ -531,6 +586,13 @@ if __name__ == "__main__":
     parser.add_argument("--dec_n_layer", type=int, default=3, help="decoder number of transformer layers")
     parser.add_argument("--dec_dim_ff", type=int, default=768, help="decoder feed-forward dimension")
 
+    # W&B configuration (Step 1)
+    parser.add_argument("--wandb_project", type=str, default="tinybird", help="Weights & Biases project")
+    parser.add_argument("--wandb_entity", type=str, default=None, help="Weights & Biases entity (team/user)")
+    parser.add_argument("--wandb_mode", type=str, default="online", help="Weights & Biases mode: online|offline|disabled")
+
+    parser.add_argument("--config_json", type=str, default=None, help="config json file")
+
     args = parser.parse_args()
     
     # Handle continue mode vs new training
@@ -550,12 +612,27 @@ if __name__ == "__main__":
         config['is_continuing'] = True
         
     else:
-        # New training mode - validate required args
-        if not args.train_dir or not args.val_dir or not args.run_name:
-            parser.error("--train_dir, --val_dir, and --run_name are required when not using --continue_from")
-        
-        config = vars(args)
+        if args.config_json:
+            print(f"Loading config from {args.config_json}")
+            with open(args.config_json, "r") as f:
+                config = json.load(f)
+
+            for k, v in vars(args).items():
+                if k in ["continue_from", "config_json"]:
+                    continue
+                # Only override if the CLI value differs from the parser default
+                if v is not None and v != parser.get_default(k):
+                    config[k] = v
+                    
+            # validate required fields after merge
+            for req in ["train_dir", "val_dir", "run_name"]:
+                assert req in config and config[req], f"--{req} is required (via JSON or CLI)"
+        else:
+            if not args.train_dir or not args.val_dir or not args.run_name:
+                parser.error("--train_dir, --val_dir, and --run_name are required when not using --continue_from")
+            config = vars(args)
         config['is_continuing'] = False
+
 
     # Calculate seq_len from num_timebins and patch dimensions  
     assert config["num_timebins"] % config["patch_width"] == 0, f"num_timebins ({config['num_timebins']}) must be divisible by patch_width ({config['patch_width']})"
