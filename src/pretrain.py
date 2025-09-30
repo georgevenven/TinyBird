@@ -667,7 +667,8 @@ if __name__ == "__main__":
     parser.add_argument("--wandb_mode", type=str, default="online", help="Weights & Biases mode: online|offline|disabled")
 
     parser.add_argument("--config_json", type=str, default=None, help="config json file")
-
+    parser.add_argument("--detect_anomaly", action="store_true", help="detect anomalies in the training loop")
+    
     args = parser.parse_args()
 
     warnings.filterwarnings("ignore", category=UserWarning, module="torch.nn.modules.transformer")
