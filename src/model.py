@@ -376,15 +376,42 @@ class TinyBird(nn.Module):
         target = unfold(x).transpose(1, 2).to(device=pred.device, dtype=pred.dtype)  # (B, T, P), where T = num patches, P = patch_height * patch_width
 
         # Normalize target patches
-        target_mean = target.mean(dim=-1, keepdim=True)  # (B, T, 1), mean per patch
-        target_std = target.std(dim=-1, keepdim=True)    # (B, T, 1), std per patch
-        target = (target - target_mean) / (target_std + 1e-6)  # normalized target patches, shape (B, T, P)
+        # target_mean = target.mean(dim=-1, keepdim=True)  # (B, T, 1), mean per patch
+        # target_std = target.std(dim=-1, keepdim=True)    # (B, T, 1), std per patch
+        # target = (target - target_mean) / (target_std + 1e-6)  # normalized target patches, shape (B, T, P)
         
+        # Numerically stable per-patch normalization in FP32 to avoid NaNs under AMP/FP16
+        t32 = target.float()                                                    # (B, T, P) in FP32
+        mean32 = t32.mean(dim=-1, keepdim=True)                                 # (B, T, 1)
+        # Use variance + eps, unbiased=False for stability
+        var32 = t32.var(dim=-1, keepdim=True, unbiased=False)                   # (B, T, 1)
+        eps = 1e-5
+        std32 = torch.sqrt(torch.clamp(var32, min=0.0) + eps)                   # (B, T, 1)
+        norm32 = (t32 - mean32) / std32                                         # (B, T, P)
+        # Replace any residual NaN/Inf (e.g., completely constant or empty patches)
+        norm32 = torch.nan_to_num(norm32, nan=0.0, posinf=0.0, neginf=0.0)      # (B, T, P)
+        target = norm32.to(dtype=pred.dtype)                                     # (B, T, P) match pred dtype
+
+
+
+
         # loss = ((pred - target) ** 2)[bool_mask].mean()  # compute MSE only on masked patches; pred is (B, T, P), bool_mask is (B, T)
 
         # MSE per token, then masked mean across tokens
         per_pixel = (pred - target).pow(2)                                        # (B, T, P)
-        per_token = per_pixel.mean(dim=-1)                                        # (B, T)
+        per_token = per_pixel.mean(dim=-1)
+        
+                # Defensive guard: detect NaNs/Inf in per_token
+        if torch.isnan(per_token).any() or torch.isinf(per_token).any():
+            # Print one-time diagnostics to help trace bad values
+            if not hasattr(self, "_loss_nan_warned"):
+                print("[loss_mse] WARNING: NaN/Inf detected in per_token. Dumping stats once.")
+                print("  target stats:", float(t32.min()), float(t32.max()), float(var32.mean()))
+                self._loss_nan_warned = True
+            per_token = torch.nan_to_num(per_token, nan=0.0, posinf=0.0, neginf=0.0)
+        
+    
+                                                # (B, T)
         masked_sum = (per_token * bool_mask.float()).sum()                        # scalar
         masked_count = bool_mask.sum().clamp_min(1).to(per_token.dtype)           # scalar
         loss = masked_sum / masked_count                                          # scalar

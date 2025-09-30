@@ -120,8 +120,9 @@ class Trainer():
             self.tinybird = TinyBird(config).to(self.device).float()
             print("Initialized new model")
 
-        torch.autograd.set_detect_anomaly(True)
-        print("Anomaly detection enabled")
+        if self.config.get("detect_anomaly", False):
+            torch.autograd.set_detect_anomaly(True)
+            print("Anomaly detection enabled")
 
         # Watch model for gradients/param histograms (lightweight frequency)
         wandb.watch(self.tinybird, log="gradients", log_freq=200)
