@@ -1,17 +1,21 @@
 import argparse 
-import os, json
-import shutil
+import os
 import json
+import shutil
+import warnings
 from datetime import datetime
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 from model import TinyBird
 import model as tb_model
 import wandb
 import psutil
+from utils import load_model_from_checkpoint, count_parameters
+from data_loader import SpectogramDataset
 
 class Trainer():
     def __init__(self, config, pretrained_model=None):
@@ -118,7 +122,6 @@ class Trainer():
         # Watch model for gradients/param histograms (lightweight frequency)
         wandb.watch(self.tinybird, log="gradients", log_freq=200)
         # Print parameter counts
-        from utils import count_parameters
         count_parameters(self.tinybird)
         
         # Initialize optimizer
@@ -129,7 +132,7 @@ class Trainer():
         
         # Initialize AMP scaler if AMP is enabled
         self.use_amp = config.get("amp", False)
-        self.scaler = torch.cuda.amp.GradScaler() if self.use_amp else None
+        self.scaler = torch.amp.GradScaler('cuda') if self.use_amp else None
         
         # Loss tracking
         self.ema_train_loss = None
@@ -246,7 +249,7 @@ class Trainer():
         # Forward pass through encoder-decoder
         with torch.set_grad_enabled(is_training):
             if self.use_amp:
-                with torch.cuda.amp.autocast():
+                with torch.amp.autocast('cuda'):
                     x, x_i  = self.tinybird.compactify_data(x, x_i, N)
                     x, x_i  = self.tinybird.sample_data(x, x_i, N, n_blocks=3)
                     h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x, x_i)
@@ -347,7 +350,7 @@ class Trainer():
         self.tinybird.eval()
         with torch.no_grad():
             if self.use_amp:
-                with torch.cuda.amp.autocast():
+                with torch.amp.autocast('cuda'):
                     x, x_i  = self.tinybird.compactify_data(x, x_i, N)
                     x, x_i  = self.tinybird.sample_data(x, x_i, N, n_blocks=3)
                     h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x, x_i)
@@ -437,8 +440,6 @@ class Trainer():
         }, step=int(step_num))
 
     def train(self):
-        from data_loader import SpectogramDataset
-        from torch.utils.data import DataLoader
         
         # Initialize datasets
         train_dataset = SpectogramDataset(
@@ -663,11 +664,12 @@ if __name__ == "__main__":
     parser.add_argument("--config_json", type=str, default=None, help="config json file")
 
     args = parser.parse_args()
+
+    warnings.filterwarnings("ignore", category=UserWarning, module="torch.nn.modules.transformer")
     
     # Handle continue mode vs new training
     if args.continue_from:
         # Continue training mode - load config from existing run
-        from utils import load_model_from_checkpoint
         
         # Load existing config and model
         model, config = load_model_from_checkpoint(args.continue_from, fallback_to_random=args.fallback_random)

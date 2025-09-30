@@ -370,6 +370,8 @@ class TinyBird(nn.Module):
         x:    (B, 1, H, W)
         pred: (B, T, P) from decoder
         """
+        # Ensure bool_mask is on the same device as pred for indexing during backward
+        bool_mask = bool_mask.to(pred.device)
         unfold = nn.Unfold(kernel_size=self.patch_size, stride=self.patch_size)  # unfolds spectrogram into patches of size P
         target = unfold(x).transpose(1, 2)  # (B, T, P), where T = num patches, P = patch_height * patch_width
         
