@@ -150,14 +150,14 @@ class TinyBird(nn.Module):
 
         # Per item in batch start index in [0, N[b]-n_blocks]
         start_max = (N.squeeze(1) - n_blocks + 1).clamp_min(1)            # (B,)
-        start = (torch.rand(B, device=device) * start_max.float()).floor().to(torch.long)  # (B,)
+        start = (torch.rand(B, device=device) * start_max.float()).floor().to(device=device,dtype=torch.long)  # (B,)
         end   = start + n_blocks                                            # (B,)
 
         b_ix = torch.arange(B, device=device)
 
         # Raw window bounds in ORIGINAL x-coords: start at first slice's start, end at last slice's end
-        st_raw = xi[b_ix, start, 0].to(torch.long)                        # (B,)
-        en_raw = xi[b_ix, end - 1, 1].to(torch.long)                      # (B,) end is exclusive
+        st_raw = xi[b_ix, start, 0].to(device=device,dtype=torch.long)                        # (B,)
+        en_raw = xi[b_ix, end - 1, 1].to(device=device,dtype=torch.long)                      # (B,) end is exclusive
 
         # Per-item widths and common batch width
         widths = (en_raw - st_raw).clamp_min(1)                           # (B,)
@@ -380,7 +380,15 @@ class TinyBird(nn.Module):
         target_std = target.std(dim=-1, keepdim=True)    # (B, T, 1), std per patch
         target = (target - target_mean) / (target_std + 1e-6)  # normalized target patches, shape (B, T, P)
         
-        loss = ((pred - target) ** 2)[bool_mask].mean()  # compute MSE only on masked patches; pred is (B, T, P), bool_mask is (B, T)
+        # loss = ((pred - target) ** 2)[bool_mask].mean()  # compute MSE only on masked patches; pred is (B, T, P), bool_mask is (B, T)
+
+        # MSE per token, then masked mean across tokens
+        per_pixel = (pred - target).pow(2)                                        # (B, T, P)
+        per_token = per_pixel.mean(dim=-1)                                        # (B, T)
+        masked_sum = (per_token * bool_mask.float()).sum()                        # scalar
+        masked_count = bool_mask.sum().clamp_min(1).to(per_token.dtype)           # scalar
+        loss = masked_sum / masked_count                                          # scalar
+        
         return loss
 
 if __name__ == "__main__":
