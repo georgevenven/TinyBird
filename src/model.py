@@ -58,7 +58,6 @@ class TinyBird(nn.Module):
         for p in self.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
-        print("self.sep_param values", self.sep_param.values())
 
     def tokenize_spectrogram(self, x):
         # x  (B, C=1, H , W)
