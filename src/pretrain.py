@@ -119,6 +119,10 @@ class Trainer():
             # Initialize new model
             self.tinybird = TinyBird(config).to(self.device).float()
             print("Initialized new model")
+
+        torch.autograd.set_detect_anomaly(True)
+        print("Anomaly detection enabled")
+
         # Watch model for gradients/param histograms (lightweight frequency)
         wandb.watch(self.tinybird, log="gradients", log_freq=200)
         # Print parameter counts

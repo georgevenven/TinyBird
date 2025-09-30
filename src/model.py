@@ -368,7 +368,7 @@ class TinyBird(nn.Module):
         """
         Compute MSE on masked patches only.
         x:    (B, 1, H, W)
-        pred: (B, T, P) from decoder
+        pred: (B, T, P) 
         """
         # Ensure bool_mask is on the same device as pred for indexing during backward
         bool_mask = bool_mask.to(pred.device)
