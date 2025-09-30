@@ -40,7 +40,9 @@ class TinyBird(nn.Module):
         self.decoder_to_pixel = nn.Linear(config["dec_hidden_d"], self.patch_size[0] * self.patch_size[1])
 
         self.sep_param  = nn.Parameter(torch.zeros(1, 1, 1))
-        self.sep_token  = self.sep_param.expand(1, config["mels"],1)
+        # NOTE: expansion needs to occur at run time to be on the correct device
+        # self.sep_token  = self.sep_param.expand(1, config["mels"],1)
+
         self.mask_token = nn.Parameter(torch.zeros(1, 1, config["dec_hidden_d"]))
 
         self.pos_enc  = nn.Parameter(torch.zeros(1, config["max_seq"], config["enc_hidden_d"] ))
@@ -110,7 +112,11 @@ class TinyBird(nn.Module):
         # w_max: (B, )           #width of each item
 
         x_new = torch.zeros_like(x)  # ensures columns beyond valid region are zero
-        sep_col_vec = self.sep_token[0, :, 0]  # (H,) matches x_new[b, 0, :, idx]
+
+        # Expand the learnable separator scalar to a column on the **current** device/dtype
+        sep_col_vec = self.sep_param.expand(1, x.size(2), 1)[0, :, 0]
+        sep_col_vec = sep_col_vec.to(device=x.device, dtype=x.dtype)  # (H,) matches x_new[b, 0, :, idx]
+
         for b in range(B): 
             n_valid = int(N[b, 0].item())
             for i in range(n_valid):
