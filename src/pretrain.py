@@ -20,6 +20,10 @@ from data_loader import SpectogramDataset
 class Trainer():
     def __init__(self, config, pretrained_model=None):
         self.config = config
+
+        # Setup device
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Using device: {self.device}")
         
         # Handle continue mode vs new training
         if config.get('is_continuing', False):
@@ -91,10 +95,6 @@ class Trainer():
         wandb.define_metric("val/*", step_metric="step")
         wandb.define_metric("lr", step_metric="step")
         # --- End W&B initialization ---
-
-        # Setup device
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"Using device: {self.device}")
 
         # Memory reporting (one-time, after first training step)
         self._mem_reported = False

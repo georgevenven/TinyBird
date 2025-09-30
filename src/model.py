@@ -226,7 +226,7 @@ class TinyBird(nn.Module):
             remaining = remaining[torch.randperm(remaining.numel(), device=device)[:m_w - int(mask2d[b].sum().item())]] # randomly select remaining columns to keep mask width constant for each item in the batch
             mask2d[b, remaining] = True
 
-        return mask2d.unsqueeze(1).expand(-1, H, -1).flatten(1,2).to(device=device) # (B,W) -> (B, H, W) -> (B, H*W) 
+        return mask2d.unsqueeze(1).expand(-1, H, -1).flatten(1,2).to(device=device,dtype=torch.bool) # (B,W) -> (B, H, W) -> (B, H*W) 
 
     def mask(self, z: torch.Tensor, bool_mask: torch.Tensor ) :
         """
