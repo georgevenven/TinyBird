@@ -226,7 +226,7 @@ class TinyBird(nn.Module):
             remaining = remaining[torch.randperm(remaining.numel(), device=device)[:m_w - int(mask2d[b].sum().item())]] # randomly select remaining columns to keep mask width constant for each item in the batch
             mask2d[b, remaining] = True
 
-        return mask2d.unsqueeze(1).expand(-1, H, -1).flatten(1,2) # (B,W) -> (B, H, W) -> (B, H*W) 
+        return mask2d.unsqueeze(1).expand(-1, H, -1).flatten(1,2).to(device=device) # (B,W) -> (B, H, W) -> (B, H*W) 
 
     def mask(self, z: torch.Tensor, bool_mask: torch.Tensor ) :
         """
@@ -372,9 +372,9 @@ class TinyBird(nn.Module):
         """
         # Ensure bool_mask is on the same device as pred for indexing during backward
         bool_mask = bool_mask.to(pred.device)
-        unfold = nn.Unfold(kernel_size=self.patch_size, stride=self.patch_size)  # unfolds spectrogram into patches of size P
-        target = unfold(x).transpose(1, 2)  # (B, T, P), where T = num patches, P = patch_height * patch_width
-        
+        unfold = nn.Unfold(kernel_size=self.patch_size, stride=self.patch_size)      # unfolds spectrogram into patches of size P
+        target = unfold(x).transpose(1, 2).to(device=pred.device, dtype=pred.dtype)  # (B, T, P), where T = num patches, P = patch_height * patch_width
+
         # Normalize target patches
         target_mean = target.mean(dim=-1, keepdim=True)  # (B, T, 1), mean per patch
         target_std = target.std(dim=-1, keepdim=True)    # (B, T, 1), std per patch
