@@ -337,7 +337,7 @@ class Trainer():
             train_dataset,
             batch_size=self.config["batch_size"],
             shuffle=True,
-            num_workers=4,
+            num_workers=self.config["num_workers"],
             pin_memory=True
         )
         
@@ -345,7 +345,7 @@ class Trainer():
             val_dataset,
             batch_size=self.config["batch_size"],
             shuffle=False,
-            num_workers=4,
+            num_workers=self.config["num_workers"],
             pin_memory=True
         )
         
@@ -513,6 +513,7 @@ if __name__ == "__main__":
     parser.add_argument("--steps", type=int, default=500_000, help="number of training steps")
     parser.add_argument("--lr", type=float, default=1e-4, help="learning rate")
     parser.add_argument("--batch_size", type=int, default=256, help="batch size")
+    parser.add_argument("--num_workers", type=int, default=8, help="number of DataLoader worker processes")
     parser.add_argument("--patch_height", type=int, default=32, help="patch height")
     parser.add_argument("--patch_width", type=int, default=1, help="patch width")
     parser.add_argument("--mels", type=int, default=128, help="number of mel bins")
@@ -554,7 +555,7 @@ if __name__ == "__main__":
                 
         config['continue_from'] = args.continue_from
         config['is_continuing'] = True
-        
+
     else:
         # New training mode - validate required args
         if not args.train_dir or not args.val_dir or not args.run_name:
@@ -562,6 +563,9 @@ if __name__ == "__main__":
         
         config = vars(args)
         config['is_continuing'] = False
+
+    # Ensure num_workers is present even if older configs omitted it
+    config.setdefault('num_workers', 8)
 
     # Calculate seq_len from num_timebins and patch dimensions  
     assert config["num_timebins"] % config["patch_width"] == 0, f"num_timebins ({config['num_timebins']}) must be divisible by patch_width ({config['patch_width']})"
