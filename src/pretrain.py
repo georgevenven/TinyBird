@@ -225,18 +225,6 @@ class Trainer():
             
             # Update learning rate scheduler
             self.scheduler.step()
-            
-            # Update EMA train loss
-            if self.ema_train_loss is None:
-                self.ema_train_loss = loss.item()
-            else:
-                self.ema_train_loss = self.ema_alpha * self.ema_train_loss + (1 - self.ema_alpha) * loss.item()
-        else:
-            # Update EMA val loss
-            if self.ema_val_loss is None:
-                self.ema_val_loss = loss.item()
-            else:
-                self.ema_val_loss = self.ema_alpha * self.ema_val_loss + (1 - self.ema_alpha) * loss.item()
         
         return loss.item()
 
@@ -400,6 +388,19 @@ class Trainer():
                 self.val_loss_history.append(val_loss)
                 self.val_steps.append(step_num)
                 
+                # Update EMA losses at the same interval (eval_every)
+                # Update EMA train loss
+                if self.ema_train_loss is None:
+                    self.ema_train_loss = train_loss
+                else:
+                    self.ema_train_loss = self.ema_alpha * self.ema_train_loss + (1 - self.ema_alpha) * train_loss
+                
+                # Update EMA val loss
+                if self.ema_val_loss is None:
+                    self.ema_val_loss = val_loss
+                else:
+                    self.ema_val_loss = self.ema_alpha * self.ema_val_loss + (1 - self.ema_alpha) * val_loss
+                
                 # Print progress
                 current_lr = self.scheduler.get_last_lr()[0]
                 print(f"Step {step_num}: Train Loss = {train_loss:.6f}, "
@@ -446,32 +447,42 @@ class Trainer():
         ax1.set_yscale('log')  # Log scale for loss values
         
         # Second panel: EMA losses only
-        # Calculate EMA train loss history for plotting
+        # Note: EMA losses are now calculated at eval_every intervals only
+        # We need to reconstruct the EMA history from the loss log for plotting
         ema_train_history = []
-        ema_alpha = self.ema_alpha
-        ema_val = None
-        for loss in self.train_loss_history:
-            if ema_val is None:
-                ema_val = loss
-            else:
-                ema_val = ema_alpha * ema_val + (1 - ema_alpha) * loss
-            ema_train_history.append(ema_val)
-        
-        # Calculate EMA val loss history
         ema_val_history = []
-        ema_val = None
-        for i, loss in enumerate(self.val_loss_history):
-            if ema_val is None:
-                ema_val = loss
-            else:
-                ema_val = ema_alpha * ema_val + (1 - ema_alpha) * loss
-            ema_val_history.append(ema_val)
         
-        ax2.plot(self.train_steps, ema_train_history, 
-                label='EMA Training Loss', linewidth=2, color='darkblue')
-        ax2.plot(self.val_steps, ema_val_history, 
-                label='EMA Validation Loss', marker='o', markersize=3, 
-                linewidth=2, color='darkred')
+        # Read EMA values from loss log if available
+        if os.path.exists(self.loss_log_path):
+            try:
+                with open(self.loss_log_path, 'r') as f:
+                    lines = f.readlines()[1:]  # Skip header
+                
+                eval_steps = []
+                for line in lines:
+                    parts = line.strip().split(',')
+                    if len(parts) >= 5:
+                        eval_steps.append(int(parts[0]))
+                        ema_train_history.append(float(parts[2]))
+                        ema_val_history.append(float(parts[4]))
+                
+                # Plot EMA losses using eval steps
+                if eval_steps and ema_train_history and ema_val_history:
+                    ax2.plot(eval_steps, ema_train_history, 
+                            label='EMA Training Loss', linewidth=2, color='darkblue')
+                    ax2.plot(eval_steps, ema_val_history, 
+                            label='EMA Validation Loss', marker='o', markersize=3, 
+                            linewidth=2, color='darkred')
+                else:
+                    ax2.text(0.5, 0.5, 'No EMA data available for plotting', 
+                            transform=ax2.transAxes, ha='center', va='center')
+            except Exception as e:
+                print(f"Warning: Could not read EMA data from loss log: {e}")
+                ax2.text(0.5, 0.5, 'Error reading EMA data', 
+                        transform=ax2.transAxes, ha='center', va='center')
+        else:
+            ax2.text(0.5, 0.5, 'No loss log available for EMA plotting', 
+                    transform=ax2.transAxes, ha='center', va='center')
         ax2.set_xlabel('Training Steps')
         ax2.set_ylabel('EMA Loss')
         ax2.set_title('Exponential Moving Average Loss')
@@ -500,7 +511,7 @@ if __name__ == "__main__":
 
     # Defaults 
     parser.add_argument("--steps", type=int, default=500_000, help="number of training steps")
-    parser.add_argument("--lr", type=float, default=2e-4, help="learning rate")
+    parser.add_argument("--lr", type=float, default=1e-4, help="learning rate")
     parser.add_argument("--batch_size", type=int, default=256, help="batch size")
     parser.add_argument("--patch_height", type=int, default=32, help="patch height")
     parser.add_argument("--patch_width", type=int, default=1, help="patch width")

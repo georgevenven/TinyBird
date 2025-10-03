@@ -3,41 +3,34 @@ import torch.nn.functional as F
 from pathlib import Path
 import torch
 import random
+import json
 
 class SpectogramDataset(Dataset):
-    def __init__(self, dir, n_mels=128, n_timebins=1024, pad_crop=True):
+    def __init__(self, dir, n_timebins=1024, pad_crop=True):
         self.file_dirs = list(Path(dir).glob("*.pt"))
-        self.n_mels = n_mels
+
+        audio_json_path = Path(dir) / "audio_params.json"
+        with open(audio_json_path, "r") as f:
+            self.audio_data_json = json.load(f)
+
+        # We outta make sure that all of this metadata is present before continuing the execution of training, or whatever that is we are doing 
+        required_keys = ["mels", "sr", "hop_size", "fft", "mean", "std"]
+        for key in required_keys:
+            if key not in self.audio_data_json:
+                raise SystemExit(f"Missing required key '{key}' in audio_params.json. Exiting.")
+
+        self.n_mels = self.audio_data_json["mels"]
+        self.sr = self.audio_data_json["sr"]
+        self.hop_size = self.audio_data_json["hop_size"]
+        self.fft = self.audio_data_json["fft"]
+        self.mean = self.audio_data_json["mean"]
+        self.std = self.audio_data_json["std"]
         self.n_timebins = n_timebins
         self.pad_crop = pad_crop
-        if len(self.file_dirs) == 0: raise("no files!!")
-        
-        # Compute dataset statistics
-        self.mean, self.std = self._compute_stats()
 
-    # GPT Generated function  
-    def _compute_stats(self):
-        """Compute mean and std across 2.5% of the dataset for z-score normalization"""
-        all_values = []
-        
-        # Select 2.5% of files randomly for statistics computation
-        subset_size = max(1, int(len(self.file_dirs) * 0.025))
-        subset_files = random.sample(self.file_dirs, subset_size)
-        
-        print(f"Computing dataset statistics on {subset_size} files (2.5% of {len(self.file_dirs)} total files)...")
-        for path in subset_files:
-            f = torch.load(path, map_location="cpu", weights_only=False)
-            spec = f['s']
-            all_values.append(spec.flatten())
-        
-        # Concatenate all values and compute statistics
-        all_values = torch.cat(all_values)
-        mean = all_values.mean()
-        std = all_values.std()
-        
-        print(f"Dataset statistics (from 2.5% subset) - Mean: {mean:.4f}, Std: {std:.4f}")
-        return mean, std
-
+        if len(self.file_dirs) == 0:
+            raise SystemExit("no files!!")
+            
     # time only crop / pads, if mels are wrong assert will catch
     def crop_or_pad(self, spec):
         frq, time = spec.shape

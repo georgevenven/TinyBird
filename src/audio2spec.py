@@ -661,8 +661,7 @@ def cli() -> None:
     p.add_argument("--format", choices=["pt","npz"], default="pt",
                    help="output format (default: pt, fp32)")
     p.add_argument("--birdset_split", type=str, default="train",
-                   help="Dataset split to use with --birdset (default: train)")
-
+                   help="Dataset split to use with --birdset (default: train) for XCL that is the only one")
     p.add_argument("--sr", type=int, default=32_000,
                    help="Sample rate in Hz (default: 32000).")
     p.add_argument("--step_size", type=int, default=64,

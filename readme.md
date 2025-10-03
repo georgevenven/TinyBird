@@ -24,3 +24,9 @@
 ```
 
 - Times are milliseconds; `plot_embedding_bf.py` converts them to 2 ms timebins.
+
+
+
+
+#### 
+audio2spec.py --> compute_statistics_of_spectrograms.py --> pretrain.py --> plot_embedding.py

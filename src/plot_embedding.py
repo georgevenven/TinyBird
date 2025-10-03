@@ -489,7 +489,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Simple UMAP embedding visualization")
-    parser.add_argument("--num_timebins", type=int, required=True, help="Number of time bins")
+    parser.add_argument("--num_timebins", type=int, default=12400, help="Number of time bins")
     parser.add_argument("--run_dir", type=str, required=True, help="Run directory path")
     parser.add_argument("--checkpoint", type=str, default=None, help="Checkpoint file (optional)")
     parser.add_argument("--spec_dir", type=str, required=True, help="Directory of specs to plot the embedding of")
