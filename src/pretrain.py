@@ -18,6 +18,69 @@ import random
 from utils import load_model_from_checkpoint, count_parameters
 from data_loader import SpectogramDataset, ChunkingLoader
 
+import contextlib
+import time
+
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+
+def human_bytes(n: int) -> str:
+    units = ["B","KB","MB","GB","TB"]
+    x = float(n); i=0
+    while x>=1024 and i<len(units)-1: x/=1024.0; i+=1
+    return f"{x:.2f} {units[i]}"
+
+@contextlib.contextmanager
+def cuda_mem_scope(device):
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats(device)
+    start = time.time()
+    try:
+        yield
+    finally:
+        dur = time.time() - start
+        if torch.cuda.is_available():
+            alloc = torch.cuda.max_memory_allocated(device)
+            resv  = torch.cuda.max_memory_reserved(device)
+            free_b, total_b = torch.cuda.mem_get_info()
+            print(f"[cuda] step_peak alloc={human_bytes(alloc)}  reserved={human_bytes(resv)}  "
+                  f"free={human_bytes(free_b)}  total={human_bytes(total_b)}  dur={dur:.3f}s")
+            # also log to W&B
+            try:
+                wandb.log({
+                    "cuda/peak_alloc": int(alloc),
+                    "cuda/peak_reserved": int(resv),
+                    "cuda/free": int(free_b),
+                    "cuda/total": int(total_b),
+                }, commit=False)
+            except Exception:
+                pass
+
+def log_batch_shapes(tag, x, x_i, N, n_blocks, masked_blocks, frac):
+    print(f"[{tag}] x={tuple(x.shape)}, x_i={tuple(x_i.shape)}, N={tuple(N.shape)}, "
+          f"n_blocks={n_blocks}, masked_blocks={masked_blocks}, frac={frac}")
+    try:
+        wandb.log({
+            f"{tag}/B": int(x.size(0)),
+            f"{tag}/H": int(x.size(2)),
+            f"{tag}/W": int(x.size(3)),
+            f"{tag}/num_tokens": int((x.size(2)//x.new_tensor([0]).numel() or 1)),  # harmless placeholder
+            f"{tag}/n_blocks": int(n_blocks),
+            f"{tag}/masked_blocks": int(masked_blocks),
+            f"{tag}/frac": float(frac),
+        }, commit=False)
+    except Exception:
+        pass
+
+def dump_cuda_summary():
+    if torch.cuda.is_available():
+        try:
+            print(torch.cuda.memory_summary())
+        except Exception as e:
+            print(f"[cuda] memory_summary failed: {e}")
+
+
+
 class Trainer():
     def __init__(self, config, pretrained_model=None):
         self.config = config
@@ -95,6 +158,9 @@ class Trainer():
         wandb.define_metric("train/*", step_metric="step")
         wandb.define_metric("val/*", step_metric="step")
         wandb.define_metric("lr", step_metric="step")
+        wandb.define_metric("cuda/*", step_metric="step")
+        wandb.define_metric("system/*", step_metric="step")
+
         # --- End W&B initialization ---
 
         # Memory reporting (one-time, after first training step)
@@ -247,12 +313,9 @@ class Trainer():
         N   = N.to(self.device, non_blocking=True)                # (B, 1) # number of chirp intervals
 
 
-
-
         r = random.random()
         masked_blocks = 1   if r < 0.5 else 0
         frac          = 0.0 if r < 0.5 else 0.5
-
 
         if is_training:
             self.tinybird.train()
@@ -261,31 +324,24 @@ class Trainer():
             self.tinybird.eval()
         
         # Forward pass through encoder-decoder
-        with torch.set_grad_enabled(is_training):
-            if self.use_amp:
-                with torch.amp.autocast('cuda'):
+        with cuda_mem_scope(self.device):
+            with torch.set_grad_enabled(is_training):
+                if self.use_amp:
+                    with torch.amp.autocast('cuda'):
+                        x, x_i  = self.tinybird.compactify_data(x, x_i, N)
+                        x, x_i  = self.tinybird.sample_data(x, x_i, N, n_blocks=n_blocks)
+                        log_batch_shapes("train_batch", x, x_i, N, n_blocks, masked_blocks, frac)
+                        h, idx_restore, bool_mask, bool_pad, T = self.tinybird.forward_encoder(x, x_i, masked_blocks=masked_blocks, frac=frac)
+                        pred = self.tinybird.forward_decoder(h, idx_restore, T, bool_pad = bool_pad)
+                        loss = self.tinybird.loss_mse(x, pred, bool_mask)
+                else:
                     x, x_i  = self.tinybird.compactify_data(x, x_i, N)
                     x, x_i  = self.tinybird.sample_data(x, x_i, N, n_blocks=n_blocks)
+                    log_batch_shapes("train_batch", x, x_i, N, n_blocks, masked_blocks, frac)
                     h, idx_restore, bool_mask, bool_pad, T = self.tinybird.forward_encoder(x, x_i, masked_blocks=masked_blocks, frac=frac)
                     pred = self.tinybird.forward_decoder(h, idx_restore, T, bool_pad = bool_pad)
                     loss = self.tinybird.loss_mse(x, pred, bool_mask)
-            else:
-                x, x_i  = self.tinybird.compactify_data(x, x_i, N)
-                x, x_i  = self.tinybird.sample_data(x, x_i, N, n_blocks=n_blocks)
-
-                print("=" * 60)
-                print("Forward pass through encoder-decoder")
-                print("=" * 60)
-                print(f"[n_blocks]={n_blocks}")
-                print(f"[x]={x.shape}")
-                print(f"[x_i]={x_i.shape}")
-                print(f"[masked_blocks]={masked_blocks}")
-                print(f"[frac]={frac}")
-
-                h, idx_restore, bool_mask, bool_pad, T = self.tinybird.forward_encoder(x, x_i, masked_blocks=masked_blocks, frac=frac)
-                pred = self.tinybird.forward_decoder(h, idx_restore, T, bool_pad = bool_pad)
-                loss = self.tinybird.loss_mse(x, pred, bool_mask)
-        
+            
         # Backward pass only for training
         if is_training:
             if self.use_amp:
@@ -509,8 +565,26 @@ class Trainer():
         for step_num in range(self.starting_step, end_step):
             train_iter = iter(train_loader) if 'train_iter' not in locals() else train_iter
             train_batch, k = next(train_iter)
-            train_loss = self.step(train_batch, is_training=True, n_blocks=int(k))
 
+            try:
+                train_loss = self.step(train_batch, is_training=True, n_blocks=int(k))
+            except RuntimeError as e:
+                if "out of memory" in str(e).lower():
+                    print("\n[OOM] CUDA out of memory caught. Dumping diagnostics...")
+                    dump_cuda_summary()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    # optional: quick mitigation — drop half the batch once and retry
+                    spectrograms, chirp_intervals, N, filenames = train_batch
+                    if spectrograms.size(0) > 1:
+                        half = spectrograms.size(0) // 2
+                        train_batch = (spectrograms[:half], chirp_intervals[:half], N[:half], filenames[:half])
+                        print(f"[OOM] Retrying with smaller micro-batch: B={half}")
+                        train_loss = self.step(train_batch, is_training=True, n_blocks=int(max(1, k//2)))
+                    else:
+                        raise
+                else:
+                    raise
             # Store training loss every step
             self.train_loss_history.append(train_loss)
             self.train_steps.append(step_num)
@@ -532,13 +606,17 @@ class Trainer():
 
                 # Print progress
                 current_lr = self.scheduler.get_last_lr()[0]
+                wandb.log({
+                    "step": int(step_num),
+                    "lr": float(current_lr),
+                    "train/loss_step": float(train_loss),
+                    "train/ema_loss_step": float(self.ema_train_loss if self.ema_train_loss is not None else train_loss),
+                }, step=int(step_num))
                 print(f"Step {step_num}: Train Loss = {train_loss:.6f}, "
                       f"EMA Train = {self.ema_train_loss:.6f}, "
                       f"Val Loss = {val_loss:.6f}, "
                       f"EMA Val = {self.ema_val_loss:.6f}, "
                       f"LR = {current_lr:.2e}")
-
-                # Log losses to file
                 with open(self.loss_log_path, 'a') as f:
                     f.write(f"{step_num},{train_loss:.6f},{self.ema_train_loss:.6f},{val_loss:.6f},{self.ema_val_loss:.6f}\n")
 
