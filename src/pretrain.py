@@ -14,8 +14,9 @@ from model import TinyBird
 import model as tb_model
 import wandb
 import psutil
+import random
 from utils import load_model_from_checkpoint, count_parameters
-from data_loader import SpectogramDataset
+from data_loader import SpectogramDataset, ChunkingLoader
 
 class Trainer():
     def __init__(self, config, pretrained_model=None):
@@ -224,7 +225,7 @@ class Trainer():
         else:
             print("No loss log found, starting from step 0")
 
-    def step(self, batch, is_training=True):
+    def step(self, batch, is_training=True, n_blocks: int = 3):
         """
         Perform one forward pass and optionally backward pass.
         
@@ -245,6 +246,14 @@ class Trainer():
         x_i = chirp_intervals.to(self.device, non_blocking=True)  # (B, N, 2)
         N   = N.to(self.device, non_blocking=True)                # (B, 1) # number of chirp intervals
 
+
+
+
+        r = random.random()
+        masked_blocks = 1   if r < 0.5 else 0
+        frac          = 0.0 if r < 0.5 else 0.5
+
+
         if is_training:
             self.tinybird.train()
             self.optimizer.zero_grad(set_to_none=True)
@@ -256,14 +265,24 @@ class Trainer():
             if self.use_amp:
                 with torch.amp.autocast('cuda'):
                     x, x_i  = self.tinybird.compactify_data(x, x_i, N)
-                    x, x_i  = self.tinybird.sample_data(x, x_i, N, n_blocks=3)
-                    h, idx_restore, bool_mask, bool_pad, T = self.tinybird.forward_encoder(x, x_i)
+                    x, x_i  = self.tinybird.sample_data(x, x_i, N, n_blocks=n_blocks)
+                    h, idx_restore, bool_mask, bool_pad, T = self.tinybird.forward_encoder(x, x_i, masked_blocks=masked_blocks, frac=frac)
                     pred = self.tinybird.forward_decoder(h, idx_restore, T, bool_pad = bool_pad)
                     loss = self.tinybird.loss_mse(x, pred, bool_mask)
             else:
                 x, x_i  = self.tinybird.compactify_data(x, x_i, N)
-                x, x_i  = self.tinybird.sample_data(x, x_i, N, n_blocks=3)
-                h, idx_restore, bool_mask, bool_pad, T = self.tinybird.forward_encoder(x, x_i)
+                x, x_i  = self.tinybird.sample_data(x, x_i, N, n_blocks=n_blocks)
+
+                print("=" * 60)
+                print("Forward pass through encoder-decoder")
+                print("=" * 60)
+                print(f"[n_blocks]={n_blocks}")
+                print(f"[x]={x.shape}")
+                print(f"[x_i]={x_i.shape}")
+                print(f"[masked_blocks]={masked_blocks}")
+                print(f"[frac]={frac}")
+
+                h, idx_restore, bool_mask, bool_pad, T = self.tinybird.forward_encoder(x, x_i, masked_blocks=masked_blocks, frac=frac)
                 pred = self.tinybird.forward_decoder(h, idx_restore, T, bool_pad = bool_pad)
                 loss = self.tinybird.loss_mse(x, pred, bool_mask)
         
@@ -445,29 +464,30 @@ class Trainer():
         }, step=int(step_num))
 
     def train(self):
-        
         # Initialize datasets
         train_dataset = SpectogramDataset(
             dir=self.config["train_dir"],
             n_mels=self.config["mels"],
             n_timebins=self.config["num_timebins"]
         )
-        
+
         val_dataset = SpectogramDataset(
             dir=self.config["val_dir"],
             n_mels=self.config["mels"],
             n_timebins=self.config["num_timebins"]
         )
-        
+
         # Initialize dataloaders
-        train_loader = DataLoader(
+        base_loader = DataLoader(
             train_dataset,
             batch_size=self.config["batch_size"],
             shuffle=True,
             num_workers=4,
-            pin_memory=True
+            pin_memory=True,
+            drop_last=True  # Ensure no undersized batches
         )
-        
+        train_loader = ChunkingLoader(base_loader)
+
         val_loader = DataLoader(
             val_dataset,
             batch_size=self.config["batch_size"],
@@ -475,31 +495,26 @@ class Trainer():
             num_workers=4,
             pin_memory=True
         )
-        
+
         # Training loop
         train_iter = iter(train_loader)
         val_iter = iter(val_loader)
-        
+
         # Calculate total steps and range
         total_steps = self.config["steps"]
         end_step = self.starting_step + total_steps
-        
+
         print(f"Training from step {self.starting_step} to {end_step}")
-        
+
         for step_num in range(self.starting_step, end_step):
-            try:
-                train_batch = next(train_iter)
-            except StopIteration:
-                train_iter = iter(train_loader)
-                train_batch = next(train_iter)
-            
-            # Training step
-            train_loss = self.step(train_batch, is_training=True)
-            
+            train_iter = iter(train_loader) if 'train_iter' not in locals() else train_iter
+            train_batch, k = next(train_iter)
+            train_loss = self.step(train_batch, is_training=True, n_blocks=int(k))
+
             # Store training loss every step
             self.train_loss_history.append(train_loss)
             self.train_steps.append(step_num)
-            
+
             # Evaluation and checkpointing
             if step_num % self.config["eval_every"] == 0:
                 try:
@@ -507,14 +522,14 @@ class Trainer():
                 except StopIteration:
                     val_iter = iter(val_loader)
                     val_batch = next(val_iter)
-                
+
                 # Validation step (no gradients)
                 val_loss = self.step(val_batch, is_training=False)
-                
+
                 # Store validation loss
                 self.val_loss_history.append(val_loss)
                 self.val_steps.append(step_num)
-                
+
                 # Print progress
                 current_lr = self.scheduler.get_last_lr()[0]
                 print(f"Step {step_num}: Train Loss = {train_loss:.6f}, "
@@ -522,15 +537,15 @@ class Trainer():
                       f"Val Loss = {val_loss:.6f}, "
                       f"EMA Val = {self.ema_val_loss:.6f}, "
                       f"LR = {current_lr:.2e}")
-                
+
                 # Log losses to file
                 with open(self.loss_log_path, 'a') as f:
                     f.write(f"{step_num},{train_loss:.6f},{self.ema_train_loss:.6f},{val_loss:.6f},{self.ema_val_loss:.6f}\n")
-                
+
                 # Save model weights
                 weight_path = os.path.join(self.weights_path, f"model_step_{step_num:06d}.pth")
                 torch.save(self.tinybird.state_dict(), weight_path)
-                
+
                 # Save reconstruction visualization
                 self.save_reconstruction(val_batch, step_num)
                 # W&B: log validation metrics & LR once per eval
@@ -546,12 +561,12 @@ class Trainer():
                 wandb.log({
                     "recon/png": wandb.Image(os.path.join(self.imgs_path, f"recon_step_{step_num:06d}.png")),
                 }, step=int(step_num))
-        
+
         # Save final model weights
         final_step = self.starting_step + self.config['steps'] - 1
         final_weight_path = os.path.join(self.weights_path, f"model_step_{final_step:06d}.pth")
         torch.save(self.tinybird.state_dict(), final_weight_path)
-        
+
         # Generate loss plot at the end of training
         self.end_of_train_viz()
 

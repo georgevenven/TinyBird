@@ -187,29 +187,29 @@ class TinyBird(nn.Module):
         return x_out, xi_out
 
     
-    def build_column_mask(self, xi:torch.Tensor,  hw: (None,None), n_blocks: int = 0, frac: float = 0.0):
+    def build_column_mask(self, xi:torch.Tensor,  hw: (None,None), masked_blocks: int = 0, frac: float = 0.0):
         """
         Generate column-wise masking pattern for spectrogram patches.
         
         Args:
             xi: Chirp boundaries (B, N, 2)
             hw: Spatial dimensions (H, W)
-            n_blocks: Number of chirp blocks to mask (or 0)
+            masked_blocks: Number of chirp blocks to mask (or 0)
             frac: Fraction of columns to mask 0.0-1.0 (or 0.0)
         
         Returns:
             Boolean mask (B, H*W) where True = masked patches
         
-        Note: Exactly one of n_blocks or frac must be > 0
+        Note: Exactly one of masked_blocks or frac must be > 0
         """
         assert xi.dim() == 3 and xi.size(2) == 2, f"xi must be (B, N, 2), got {tuple(xi.shape)}"
         H, W = hw
         device = xi.device
         B, N, _ = xi.shape
-        assert n_blocks < N, f"n_blocks must be less than N, got {n_blocks} and {N}"
+        assert masked_blocks < N, f"masked_blocks must be less than N, got {masked_blocks} and {N}"
         assert frac >=0 and frac < 1, f"frac must be between 0 and 1, got {frac}"
-        assert not(n_blocks > 0 and frac > 0), f"either n_blocks or frac must be greater than 0 not both, got {n_blocks} and {frac}"
-        assert n_blocks == 0 or frac == 0, f"n_blocks or frac must be greater than 0, got {n_blocks} and {frac}"
+        assert not(masked_blocks > 0 and frac > 0), f"either masked_blocks or frac must be greater than 0 not both, got {masked_blocks} and {frac}"
+        assert masked_blocks == 0 or frac == 0, f"masked_blocks or frac must be greater than 0, got {masked_blocks} and {frac}"
 
         starts = xi[:, :, 0].to(torch.long).clamp(min=0, max=W)   # (B, N)
         ends   = xi[:, :, 1].to(torch.long).clamp(min=0, max=W)   # (B, N)
@@ -217,8 +217,8 @@ class TinyBird(nn.Module):
 
         # get n_block random blocks between 0 and N ensure there are no duplicates
         blocks = []
-        if n_blocks > 0:
-           blocks = torch.randperm(N, device=device)[:n_blocks]  # randomly select n_blocks blocks
+        if masked_blocks > 0:
+           blocks = torch.randperm(N, device=device)[:masked_blocks]  # randomly select n_blocks blocks
            m_w = max([ int(widths[b, blocks].sum().item()) for b in range(B) ]) # max width of the blocks
         else :  # frac > 0
            m_w = max(0, min(W - 1, int(round(float(frac) * W)))) # width of the mask, no block selected
@@ -274,7 +274,7 @@ class TinyBird(nn.Module):
         return z_keep, idx_restore
 
 
-    def forward_encoder(self, x: torch.Tensor, xi : torch.Tensor, n_blocks: int = 1, frac: float = 0.0):
+    def forward_encoder(self, x: torch.Tensor, xi : torch.Tensor, masked_blocks: int = 1, frac: float = 0.0):
         """
         Patchify → add positional encodings → build a **column-wise** mask from chirp boundaries →
         keep only unmasked tokens → encode with the Transformer encoder.
@@ -304,7 +304,7 @@ class TinyBird(nn.Module):
         z, H, W = self.tokenize_spectrogram(x)         # (B, T, D_enc), H, W
         z = self.apply_position_encoding(z)            # (B, T, D_enc)
 
-        bool_pad,bool_mask  = self.build_column_mask(xi, hw=(H, W), n_blocks=n_blocks, frac=frac )  
+        bool_pad,bool_mask  = self.build_column_mask(xi, hw=(H, W), masked_blocks=masked_blocks, frac=frac )  
         # bool_pad  : (B, H*W), True = padded (column-wise across H)
         # bool_mask : (B, H*W), True = masked (column-wise across H) pad_mask & bool_mask are exclusive
 
