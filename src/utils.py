@@ -196,3 +196,95 @@ def load_audio_params(data_dir):
             raise SystemExit(f"Missing required key '{key}' in audio_params.json. Exiting.")
     
     return audio_data_json
+
+def load_training_state(run_dir, eval_every=500):
+    """
+    Load training state from a run directory's loss log.
+    
+    Args:
+        run_dir (str): Path to the run directory containing loss_log.txt
+        eval_every (int): Evaluation interval to calculate next starting step
+    
+    Returns:
+        dict: Dictionary containing training state with keys:
+            - 'starting_step': Next step to continue training from
+            - 'steps': List of step numbers
+            - 'train_losses': List of training losses
+            - 'val_losses': List of validation losses
+            - 'ema_train_losses': List of EMA training losses
+            - 'ema_val_losses': List of EMA validation losses
+            - 'last_ema_train_loss': Last EMA training loss value (or None)
+            - 'last_ema_val_loss': Last EMA validation loss value (or None)
+            - 'found_state': Boolean indicating if training state was found
+    """
+    loss_log_path = os.path.join(run_dir, "loss_log.txt")
+    
+    # Initialize default state
+    training_state = {
+        'starting_step': 0,
+        'steps': [],
+        'train_losses': [],
+        'val_losses': [],
+        'ema_train_losses': [],
+        'ema_val_losses': [],
+        'last_ema_train_loss': None,
+        'last_ema_val_loss': None,
+        'found_state': False
+    }
+    
+    if os.path.exists(loss_log_path):
+        try:
+            # Read CSV manually to avoid pandas dependency
+            with open(loss_log_path, 'r') as f:
+                lines = f.readlines()[1:]  # Skip header
+            
+            if lines:
+                # Parse the last line to get the last step
+                last_line = lines[-1].strip().split(',')
+                last_step = int(last_line[0])
+                training_state['starting_step'] = last_step + eval_every
+                
+                # Load all loss history
+                steps = []
+                train_losses = []
+                val_losses = []
+                ema_train_losses = []
+                ema_val_losses = []
+                
+                for line in lines:
+                    parts = line.strip().split(',')
+                    if len(parts) >= 5:
+                        steps.append(int(parts[0]))
+                        train_losses.append(float(parts[1]))
+                        ema_train_losses.append(float(parts[2]))
+                        val_losses.append(float(parts[3]))
+                        ema_val_losses.append(float(parts[4]))
+                
+                # Store loss history
+                training_state['steps'] = steps
+                training_state['train_losses'] = train_losses
+                training_state['val_losses'] = val_losses
+                training_state['ema_train_losses'] = ema_train_losses
+                training_state['ema_val_losses'] = ema_val_losses
+                
+                # Set last EMA losses
+                if ema_train_losses and ema_val_losses:
+                    training_state['last_ema_train_loss'] = ema_train_losses[-1]
+                    training_state['last_ema_val_loss'] = ema_val_losses[-1]
+                
+                training_state['found_state'] = True
+                
+                print(f"Loaded training state. Continuing from step {training_state['starting_step']}")
+                if training_state['last_ema_train_loss'] is not None:
+                    print(f"Previous EMA train loss: {training_state['last_ema_train_loss']:.6f}")
+                if training_state['last_ema_val_loss'] is not None:
+                    print(f"Previous EMA val loss: {training_state['last_ema_val_loss']:.6f}")
+            else:
+                print("Loss log file is empty, starting from step 0")
+        except Exception as e:
+            print(f"Error loading training state: {e}")
+            print("Starting from step 0")
+    else:
+        print("No loss log found, starting from step 0")
+    
+    return training_state

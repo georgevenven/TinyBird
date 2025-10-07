@@ -351,7 +351,7 @@ def main(args):
     print(f"Unlabeled song patches: {unlabeled_count}")
     
     # --- remove average vector per position (choose one) ---
-    mode = None  # {"absolute", "relative", None}
+    mode = "absolute"  # {"absolute", "relative", None}
     Z_np = Z.cpu().numpy()
     if mode == "absolute":
         uniq = np.unique(pos_ids)

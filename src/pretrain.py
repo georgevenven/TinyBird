@@ -1,14 +1,14 @@
-import argparse 
+import argparse
 import os
 import shutil
 import json
 from datetime import datetime
 import torch
-import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
-import matplotlib.pyplot as plt
 from model import TinyBird
+from plotting_utils import plot_loss_curves, save_reconstruction_plot
+from utils import load_training_state
 
 class Trainer():
     def __init__(self, config, pretrained_model=None):
@@ -89,7 +89,7 @@ class Trainer():
         # Loss tracking
         self.ema_train_loss = None
         self.ema_val_loss = None
-        self.ema_alpha = 0.99
+        self.ema_alpha = 0.9
         
         # Loss history for plotting
         self.train_loss_history = []
@@ -101,7 +101,21 @@ class Trainer():
         self.starting_step = 0
         if config.get('is_continuing', False):
             # Load existing step count and loss history
-            self._load_training_state()
+            training_state = load_training_state(self.run_path, config.get('eval_every', 500))
+            
+            # Apply loaded state to trainer
+            self.starting_step = training_state['starting_step']
+            self.train_steps = training_state['steps']
+            self.train_loss_history = training_state['train_losses']
+            self.val_steps = training_state['steps']
+            self.val_loss_history = training_state['val_losses']
+            self.ema_train_loss = training_state['last_ema_train_loss']
+            self.ema_val_loss = training_state['last_ema_val_loss']
+            
+            # Advance scheduler to correct step if training state was found
+            if training_state['found_state']:
+                for _ in range(self.starting_step):
+                    self.scheduler.step()
         
         # Setup loss logging file
         self.loss_log_path = os.path.join(self.run_path, "loss_log.txt")
@@ -114,62 +128,6 @@ class Trainer():
             if not os.path.exists(self.loss_log_path):
                 print(f"Warning: Loss log not found at {self.loss_log_path}, starting fresh")
 
-    def _load_training_state(self):
-        """Load training state from existing run for continuing training."""
-        # Load loss history from loss log
-        if os.path.exists(self.loss_log_path):
-            try:
-                # Read CSV manually to avoid pandas dependency
-                with open(self.loss_log_path, 'r') as f:
-                    lines = f.readlines()[1:]  # Skip header
-                
-                if lines:
-                    # Parse the last line to get the last step
-                    last_line = lines[-1].strip().split(',')
-                    last_step = int(last_line[0])
-                    self.starting_step = last_step + self.config.get('eval_every', 500)
-                    
-                    # Load all loss history
-                    steps = []
-                    train_losses = []
-                    val_losses = []
-                    ema_train_losses = []
-                    ema_val_losses = []
-                    
-                    for line in lines:
-                        parts = line.strip().split(',')
-                        if len(parts) >= 5:
-                            steps.append(int(parts[0]))
-                            train_losses.append(float(parts[1]))
-                            ema_train_losses.append(float(parts[2]))
-                            val_losses.append(float(parts[3]))
-                            ema_val_losses.append(float(parts[4]))
-                    
-                    # Store loss history
-                    self.train_steps = steps
-                    self.train_loss_history = train_losses
-                    self.val_steps = steps
-                    self.val_loss_history = val_losses
-                    
-                    # Set EMA losses to last values
-                    if ema_train_losses and ema_val_losses:
-                        self.ema_train_loss = ema_train_losses[-1]
-                        self.ema_val_loss = ema_val_losses[-1]
-                    
-                    print(f"Loaded training state. Continuing from step {self.starting_step}")
-                    print(f"Previous EMA train loss: {self.ema_train_loss:.6f}")
-                    print(f"Previous EMA val loss: {self.ema_val_loss:.6f}")
-                    
-                    # Advance scheduler to correct step
-                    for _ in range(self.starting_step):
-                        self.scheduler.step()
-                else:
-                    print("Loss log file is empty, starting from step 0")
-            except Exception as e:
-                print(f"Error loading training state: {e}")
-                print("Starting from step 0")
-        else:
-            print("No loss log found, starting from step 0")
 
     def step(self, batch, is_training=True):
         """
@@ -220,92 +178,15 @@ class Trainer():
 
     def save_reconstruction(self, batch, step_num):
         """Save reconstruction visualization comparing input and output spectrograms."""
-        spectrograms, _ = batch
-        x = spectrograms.to(self.device, non_blocking=True)  # (B, 1, H, W)
-        
-        # Get model prediction
-        self.tinybird.eval()
-        with torch.no_grad():
-            if self.use_amp:
-                with torch.cuda.amp.autocast():
-                    h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x)
-                    pred = self.tinybird.forward_decoder(h, idx_restore, T)
-            else:
-                h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x)
-                pred = self.tinybird.forward_decoder(h, idx_restore, T)
-        
-        bool_mask = bool_mask.reshape(bool_mask.size(0), -1)
-
-        # Depatchify prediction to get back (B, 1, H, W) format
-        def depatchify(pred_patches):
-            # pred_patches: (B, T, P) → (B, 1, H, W)
-            H, W = self.config["mels"], self.config["num_timebins"]
-            patch_size = self.config["patch_size"]
-            fold = nn.Fold(output_size=(H, W), kernel_size=patch_size, stride=patch_size)
-            return fold(pred_patches.transpose(1, 2))
-        
-        # Denormalize predictions to match original patch scale
-        def denormalize_predictions(x_patches, pred_patches):
-            # x_patches: (B, T, P), pred_patches: (B, T, P)
-            # Apply same normalization as loss function, then reverse it on predictions
-            target_mean = x_patches.mean(dim=-1, keepdim=True)
-            target_std = x_patches.std(dim=-1, keepdim=True)
-            # Denormalize: pred_denorm = pred * std + mean
-            pred_denorm = pred_patches * (target_std + 1e-6) + target_mean
-            return pred_denorm
-        
-        # Create overlay: unmasked original + masked predictions
-        def create_overlay(x_patches, pred_patches, bool_mask):
-            # x_patches: (B, T, P), pred_patches: (B, T, P), bool_mask: (B, T)
-            overlay_patches = x_patches.clone()
-            overlay_patches[bool_mask] = pred_patches[bool_mask]
-            return overlay_patches
-        
-        # Convert input to patches for overlay
-        unfold = nn.Unfold(kernel_size=self.config["patch_size"], stride=self.config["patch_size"])
-        x_patches = unfold(x).transpose(1, 2)  # (B, T, P)
-        
-        # Denormalize predictions to original scale
-        pred_denorm = denormalize_predictions(x_patches, pred)
-        
-        # Create overlay patches
-        overlay_patches = create_overlay(x_patches, pred_denorm, bool_mask)
-        
-        # Create masked original: original with black (zero) where masked
-        def create_masked_original(x_patches, bool_mask):
-            # x_patches: (B, T, P), bool_mask: (B, T)
-            masked_patches = x_patches.clone()
-            # Set masked patches to minimum value to ensure they appear black
-            min_val = masked_patches.min()
-            masked_patches[bool_mask] = min_val - 1.0
-            return masked_patches
-        
-        # Save reconstruction comparison
-        x_img = x[0, 0].detach().cpu().numpy()  # First sample, first channel
-        masked_img = depatchify(create_masked_original(x_patches, bool_mask))[0, 0].detach().cpu().numpy()
-        overlay_img = depatchify(overlay_patches)[0, 0].detach().cpu().numpy()
-        
-        fig = plt.figure(figsize=(12, 4.5))  # Taller figure for 3 rows
-        
-        ax1 = plt.subplot(3, 1, 1)
-        ax1.imshow(x_img, origin="lower", aspect="auto")
-        ax1.set_title("Input Spectrogram")
-        ax1.axis("off")
-        
-        ax2 = plt.subplot(3, 1, 2)
-        ax2.imshow(masked_img, origin="lower", aspect="auto", cmap="viridis")
-        ax2.set_title("Original with Mask (black = masked patches)")
-        ax2.axis("off")
-        
-        ax3 = plt.subplot(3, 1, 3)
-        ax3.imshow(overlay_img, origin="lower", aspect="auto")
-        ax3.set_title("Overlay: Unmasked Original + Masked Predictions")
-        ax3.axis("off")
-        
-        fig.tight_layout()
-        recon_path = os.path.join(self.imgs_path, f"recon_step_{step_num:06d}.png")
-        fig.savefig(recon_path, dpi=150)
-        plt.close(fig)
+        save_reconstruction_plot(
+            self.tinybird,
+            batch,
+            config=self.config,
+            device=self.device,
+            use_amp=self.use_amp,
+            output_dir=self.imgs_path,
+            step_num=step_num,
+        )
 
     def train(self):
         from data_loader import SpectogramDataset
@@ -420,73 +301,15 @@ class Trainer():
 
     def end_of_train_viz(self):
         """Generate and save loss plots showing training and validation curves."""
-        # Create figure with two subplots
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
-        
-        # First panel: All losses
-        ax1.plot(self.train_steps, self.train_loss_history, 
-                label='Training Loss', alpha=0.7, linewidth=1, color='blue')
-        ax1.plot(self.val_steps, self.val_loss_history, 
-                label='Validation Loss', marker='o', markersize=3, 
-                linewidth=2, color='red')
-        ax1.set_xlabel('Training Steps')
-        ax1.set_ylabel('Loss')
-        ax1.set_title('Training and Validation Loss')
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
-        ax1.set_yscale('log')  # Log scale for loss values
-        
-        ema_train_history = []
-        ema_val_history = []
-        
-        # Read EMA values from loss log if available
-        if os.path.exists(self.loss_log_path):
-            try:
-                with open(self.loss_log_path, 'r') as f:
-                    lines = f.readlines()[1:]  # Skip header
-                
-                eval_steps = []
-                for line in lines:
-                    parts = line.strip().split(',')
-                    if len(parts) >= 5:
-                        eval_steps.append(int(parts[0]))
-                        ema_train_history.append(float(parts[2]))
-                        ema_val_history.append(float(parts[4]))
-                
-                # Plot EMA losses using eval steps
-                if eval_steps and ema_train_history and ema_val_history:
-                    ax2.plot(eval_steps, ema_train_history, 
-                            label='EMA Training Loss', linewidth=2, color='darkblue')
-                    ax2.plot(eval_steps, ema_val_history, 
-                            label='EMA Validation Loss', marker='o', markersize=3, 
-                            linewidth=2, color='darkred')
-                else:
-                    ax2.text(0.5, 0.5, 'No EMA data available for plotting', 
-                            transform=ax2.transAxes, ha='center', va='center')
-            except Exception as e:
-                print(f"Warning: Could not read EMA data from loss log: {e}")
-                ax2.text(0.5, 0.5, 'Error reading EMA data', 
-                        transform=ax2.transAxes, ha='center', va='center')
-        else:
-            ax2.text(0.5, 0.5, 'No loss log available for EMA plotting', 
-                    transform=ax2.transAxes, ha='center', va='center')
-        ax2.set_xlabel('Training Steps')
-        ax2.set_ylabel('EMA Loss')
-        ax2.set_title('Exponential Moving Average Loss')
-        ax2.legend()
-        ax2.grid(True, alpha=0.3)
-        ax2.set_yscale('log')  # Log scale for loss values
-        
-        plt.tight_layout()
-        
-        # Save the plot
         plot_path = os.path.join(self.imgs_path, 'loss_plot.png')
-        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        print(f"Loss plot saved to: {plot_path}")
-        print(f"Loss log saved to: {self.loss_log_path}")
-
+        plot_loss_curves(
+            train_steps=self.train_steps,
+            train_losses=self.train_loss_history,
+            val_steps=self.val_steps,
+            val_losses=self.val_loss_history,
+            loss_log_path=self.loss_log_path,
+            output_path=plot_path,
+        )
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="pretrain args")
@@ -508,6 +331,7 @@ if __name__ == "__main__":
     
     parser.add_argument("--dropout", type=float, default=0.1, help="dropout rate")
     parser.add_argument("--mask_p", type=float, default=0.75, help="mask probability")
+    parser.add_argument("--mask_c", type=float, default=0.1, help="seed probability for Voronoi mask")
     parser.add_argument("--eval_every", type=int, default=500, help="evaluate every N steps")
     parser.add_argument("--amp", action="store_true", help="enable automatic mixed precision training")
     parser.add_argument("--weight_decay", type=float, default=0.1, help="weight decay")
@@ -522,7 +346,7 @@ if __name__ == "__main__":
     # Decoder Model
     parser.add_argument("--dec_hidden_d", type=int, default=192, help="decoder hidden dimension")
     parser.add_argument("--dec_n_head", type=int, default=6, help="decoder number of attention heads")
-    parser.add_argument("--dec_n_layer", type=int, default=3, help="decoder number of transformer layers")
+    parser.add_argument("--dec_n_layer", type=int, default=2, help="decoder number of transformer layers")
     parser.add_argument("--dec_dim_ff", type=int, default=768, help="decoder feed-forward dimension")
 
     args = parser.parse_args()
@@ -537,6 +361,7 @@ if __name__ == "__main__":
         
         config['continue_from'] = args.continue_from
         config['is_continuing'] = True
+        config.setdefault("mask_c", args.mask_c)
 
     else:
         # New training mode - validate required args

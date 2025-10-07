@@ -1,5 +1,6 @@
 *.png
 *.log
+*.pyc
 /recons
 /runs
 /imgs

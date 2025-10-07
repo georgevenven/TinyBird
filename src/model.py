@@ -8,6 +8,7 @@ class TinyBird(nn.Module):
         self.patch_size = config["patch_size"]
         self.max_seq = config["max_seq"]
         self.mask_p = config["mask_p"]
+        self.mask_c = config["mask_c"]
 
         self.patch_projection = nn.Conv2d(
             in_channels = 1,
@@ -16,20 +17,20 @@ class TinyBird(nn.Module):
             stride = self.patch_size 
         )
 
-        self.encoder_transformer_block = nn.TransformerEncoderLayer(
+        encoder_transformer_block = nn.TransformerEncoderLayer(
             d_model=config["enc_hidden_d"], nhead=config["enc_n_head"],
             dim_feedforward=config["enc_dim_ff"], dropout=config["dropout"],
             batch_first=True, norm_first=True 
         )
 
-        self.decoder_transformer_block = nn.TransformerEncoderLayer(
+        decoder_transformer_block = nn.TransformerEncoderLayer(
             d_model=config["dec_hidden_d"], nhead=config["dec_n_head"],
             dim_feedforward=config["dec_dim_ff"], dropout=config["dropout"],
             batch_first=True, norm_first=True  
         )
 
-        self.encoder = nn.TransformerEncoder(self.encoder_transformer_block, num_layers=config["enc_n_layer"])
-        self.decoder = nn.TransformerEncoder(self.decoder_transformer_block, num_layers=config["dec_n_layer"])
+        self.encoder = nn.TransformerEncoder(encoder_transformer_block, num_layers=config["enc_n_layer"])
+        self.decoder = nn.TransformerEncoder(decoder_transformer_block, num_layers=config["dec_n_layer"])
 
         self.encoder_to_decoder = nn.Linear(config["enc_hidden_d"], config["dec_hidden_d"])
         self.decoder_to_pixel = nn.Linear(config["dec_hidden_d"], self.patch_size[0] * self.patch_size[1])
@@ -42,44 +43,48 @@ class TinyBird(nn.Module):
         
         self.pos_enc = nn.Parameter(torch.randn(1, config["enc_hidden_d"], max_h, max_w))
 
-        # blockwise mask width in **tokens** along W' (time)
-        self.mask_block_w = config.get("mask_block_w", 32)
-
-    def project_to_patch(self, x):
-        # x is B, channel, height , width
-        z = self.patch_projection(x)
-        # p is hidden d, height tokens, width tokens 
-        return z
-
-    def voronoi_mask(self, hw, p=None, c=0.1, device=None):
+    def voronoi_mask(self, hw, p=0.75, c=0.1, device=None):
         """
-        Document and understand this better ... bernoulli is imprecise 
+        bernoulli is imprecise (probably fine)
 
         made by george and opus 
         """
-
-        if p is None:
-            p = self.mask_p
         H, W = hw
         n_patches = H * W
         n_masked_patches = round(n_patches * p)
         n_seeds = round(n_masked_patches * c)
         
         # Step 1: Create seeds
-        mask = torch.bernoulli(torch.full((H, W), c, device=device)).bool()
+        # create matrix with 0.1 values, bernoulli creates coin flip on each position, each pos has 10 precent chance being seed 
+        mask = torch.bernoulli(torch.full((H, W), c, device=device)).bool() 
         
         # Step 2: Distance transform
-        seed_coords = torch.nonzero(mask, as_tuple=False).float()
-        if seed_coords.shape[0] == 0:
-            seed_coords = torch.tensor([[H // 2, W // 2]], dtype=torch.float, device=device)
+        # returns coords of seeds, N x 2 (the 2 dimensions being row/col idx)
+        seed_coords = torch.nonzero(mask, as_tuple=False).float() # returns coords of True (seeds)
         
+        # if zero seeds, unlikely, but if p is low and c is low this is bound to happen in a long train run 
+        if seed_coords.shape[0] == 0:
+            seed_coords = torch.tensor([[H // 2, W // 2]], dtype=torch.float, device=device) # set a seed cord in the middle 
+        
+        # the three lines below generate a coordinate grid the size of the patch grid 
         y_coords = torch.arange(H, device=device).unsqueeze(1).expand(-1, W)
         x_coords = torch.arange(W, device=device).unsqueeze(0).expand(H, -1)
         grid_coords = torch.stack([y_coords, x_coords], dim=-1).float()
         
+        # Scale coordinates by actual patch dimensions for proper Euclidean distance
+        patch_height = self.patch_size[0]
+        patch_width = self.patch_size[1]
+        
+        # efficent distance calculation, we flatten the distances 
         grid_flat = grid_coords.reshape(-1, 1, 2)
         seeds_flat = seed_coords.unsqueeze(0)
-        dists = torch.norm(grid_flat - seeds_flat, dim=2)
+        
+        # Scale the coordinate differences by patch dimensions
+        coord_diff = grid_flat - seeds_flat  # (n_patches, n_seeds, 2)
+        coord_diff[..., 0] *= patch_height   # Scale y differences
+        coord_diff[..., 1] *= patch_width    # Scale x differences
+        dists = torch.norm(coord_diff, dim=2)
+        
         min_distances, _ = torch.min(dists, dim=1)
         distances = min_distances.reshape(H, W)
         
@@ -118,7 +123,7 @@ class TinyBird(nn.Module):
         z_seq = z.flatten(2).transpose(1, 2)        # (B, T, D_enc)
         T = z_seq.size(1)
 
-        mask_grid = self.voronoi_mask((H, W), p=self.mask_p, device=z.device)
+        mask_grid = self.voronoi_mask((H, W), p=self.mask_p, c=self.mask_c, device=z.device)
         bool_mask_flat = mask_grid.flatten()
         bool_mask = bool_mask_flat.unsqueeze(0).expand(B, -1)               # (B, T)
 

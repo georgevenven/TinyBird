@@ -4,8 +4,6 @@
 import os, json, time, gc, argparse, logging, random, psutil, signal, sys, shutil
 import multiprocessing as mp
 from pathlib import Path
-from dataclasses import dataclass
-from typing import Tuple, Dict, List, Any, Optional
 
 import numpy as np
 import librosa
@@ -13,26 +11,28 @@ import librosa.display                       # noqa: F401  (kept for future plot
 from tqdm import tqdm
 
 
-@dataclass(frozen=True)
 class AudioEvent:
-    path: Path
-    start: float
-    end: float
-    label: int
-    name: str
+    __slots__ = ("path", "start", "end", "label", "name")
+
+    def __init__(self, path, start, end, label, name):
+        self.path = Path(path)
+        self.start = float(start)
+        self.end = float(end)
+        self.label = int(label)
+        self.name = str(name)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # helper: STFT → log‑magnitude
 # ══════════════════════════════════════════════════════════════════════════════
 def compute_spectrogram(
-    wav: np.ndarray,
-    sr: int,
-    n_fft: int,
-    hop: int,
+    wav,
+    sr,
+    n_fft,
+    hop,
     *,
-    mel: bool,
-    n_mels: int
-) -> np.ndarray:
+    mel,
+    n_mels
+):
     """
     Returns log‑magnitude spectrogram in **dB**.
     • linear STFT  → shape (n_fft//2 + 1, T)   (default 513 × T for n_fft=1024)  
@@ -77,19 +77,19 @@ def compute_spectrogram(
 # standalone worker function (picklable)
 # ══════════════════════════════════════════════════════════════════════════════
 def process_audio_file(
-    obj: Any,
-    dst_dir: Path,
-    sr: int,
-    n_fft: int,
-    step: int,
-    use_mel: bool,
-    n_mels: int,
-    min_len_ms: int,
-    min_timebins: int,
-    fmt: str,
-    lab_map: Dict[str, List[Tuple[int, int, int]]],
-    skipped_counter: Any
-) -> Optional[str]:
+    obj,
+    dst_dir,
+    sr,
+    n_fft,
+    step,
+    use_mel,
+    n_mels,
+    min_len_ms,
+    min_timebins,
+    fmt,
+    lab_map,
+    skipped_counter
+):
     """
     Standalone worker function that processes a single audio file.
     Returns None on success, error message on failure.
@@ -191,7 +191,7 @@ def process_audio_file(
         return f"{stem}: {e}"
 
 
-def calculate_optimal_workers(total_files: int, avg_file_size_mb: float = 50) -> int:
+def calculate_optimal_workers(total_files, avg_file_size_mb=50):
     """
     Calculate optimal number of workers based on available memory and CPU cores.
     Assumes each worker needs ~200MB + file_size for processing.
@@ -216,7 +216,7 @@ def calculate_optimal_workers(total_files: int, avg_file_size_mb: float = 50) ->
     return max(1, optimal)
 
 
-def batch_write_outputs(outputs: List[Tuple[Path, np.ndarray, np.ndarray]], fmt: str) -> None:
+def batch_write_outputs(outputs, fmt):
     """
     Batch write multiple outputs for better I/O efficiency.
     This is a simple optimization - more complex batching could be implemented.
@@ -243,25 +243,25 @@ class WavToSpec:
 
     def __init__(
         self,
-        src_dir: str | None,
-        dst_dir: str,
+        src_dir,
+        dst_dir,
         *,
-        file_list: str | None = None,
-        birdset: str | None = None,
-        birdset_split: str = "train",
-        step_size: int = 160,
-        n_fft: int = 1024,
-        sr: int = 32_000,
-        take_n_random: int | None = None,
-        single_threaded: bool = True,
-        min_len_ms: int = 25,
-        min_timebins: int = 25,
-        fmt: str = "pt",
-        mel: bool = True,
-        n_mels: int = 128,
-        json_path: str | None = None,
-        max_workers: int | None = None,
-    ) -> None:
+        file_list=None,
+        birdset=None,
+        birdset_split="train",
+        step_size=160,
+        n_fft=1024,
+        sr=32_000,
+        take_n_random=None,
+        single_threaded=True,
+        min_len_ms=25,
+        min_timebins=25,
+        fmt="pt",
+        mel=True,
+        n_mels=128,
+        json_path=None,
+        max_workers=None,
+    ):
         self.src_dir = Path(src_dir) if src_dir is not None else None
         self.dst_dir = Path(dst_dir)
         self.dst_dir.mkdir(parents=True, exist_ok=True)
@@ -284,8 +284,8 @@ class WavToSpec:
         self._setup_logging()
         # Remove unpicklable Manager().Value - will create in run() if needed
 
-        self.lab_map: Dict[str, List[Tuple[int, int, int]]] = {}
-        self._birdset_cache_dirs: set[Path] = set()
+        self.lab_map = {}
+        self._birdset_cache_dirs = set()
         self.audio_files = self._gather_files()
         
         # Save audio parameters to destination directory
@@ -323,14 +323,16 @@ class WavToSpec:
     # ──────────────────────────────────────────────────────────────────────
     # misc
     # ──────────────────────────────────────────────────────────────────────
-    def _setup_logging(self) -> None:
+    def _setup_logging(self):
+        log_dir = self.src_dir / "logs" if self.src_dir else Path("logs")
+        log_dir.mkdir(exist_ok=True)
         logging.basicConfig(
-            filename="error_log.log",
-            level=logging.ERROR,
+            filename=log_dir / "run.log",
+            level=logging.INFO,
             format="%(asctime)s - %(levelname)s - %(message)s"
         )
 
-    def _save_audio_params(self) -> None:
+    def _save_audio_params(self):
         """Save audio processing parameters to JSON file in destination directory."""
         params = {
             "sr": self.sr,
@@ -343,7 +345,7 @@ class WavToSpec:
         with open(params_file, 'w') as f:
             json.dump(params, f, indent=2)
 
-    def _gather_files(self) -> List[Any]:
+    def _gather_files(self):
         if self.birdset:
             files = self._gather_birdset_files()
         elif self.file_list:
@@ -368,14 +370,14 @@ class WavToSpec:
 
         return files
 
-    def _gather_birdset_files(self) -> List[AudioEvent]:
+    def _gather_birdset_files(self):
         try:
             from datasets import load_dataset  # type: ignore
         except ImportError as exc:
             raise RuntimeError("Install the 'datasets' package to use --birdset") from exc
 
         ds = load_dataset("DBD-research-group/BirdSet", self.birdset, split=self.birdset_split)
-        files: List[AudioEvent] = []
+        files = []
 
         for sample in ds:
             audio_info = sample.get("audio")
@@ -415,7 +417,7 @@ class WavToSpec:
 
         return files
 
-    def _cleanup_birdset_cache(self) -> None:
+    def _cleanup_birdset_cache(self):
         if not self._birdset_cache_dirs:
             return
         for directory in sorted(self._birdset_cache_dirs, key=lambda p: len(str(p)), reverse=True):
@@ -429,7 +431,7 @@ class WavToSpec:
     # ──────────────────────────────────────────────────────────────────────
     # public entry
     # ──────────────────────────────────────────────────────────────────────
-    def run(self) -> None:
+    def run(self):
         if not self.audio_files:
             if self.birdset:
                 self._cleanup_birdset_cache()
@@ -549,7 +551,7 @@ class WavToSpec:
     # ──────────────────────────────────────────────────────────────────────
     # helpers
     # ──────────────────────────────────────────────────────────────────────
-    def _safe_process(self, obj: Any) -> Optional[str]:
+    def _safe_process(self, obj):
         """
         Single-threaded processing wrapper with optimizations.
         Returns None on success, error message on failure.
@@ -646,7 +648,7 @@ class WavToSpec:
 # ══════════════════════════════════════════════════════════════════════════════
 # CLI
 # ══════════════════════════════════════════════════════════════════════════════
-def cli() -> None:
+def cli():
     p = argparse.ArgumentParser(
         description="Convert audio → log‑spectrogram .npz (no JSON, no filtering).")
     grp = p.add_mutually_exclusive_group(required=True)
