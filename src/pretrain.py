@@ -57,16 +57,6 @@ class Trainer():
             with open(config_path, 'w') as f:
                 json.dump(config, f, indent=2)
             
-            # Save audio processing parameters
-            audio_params = {
-                "sr": 32000,  # sample rate
-                "mels": config["mels"],  # number of mel bins
-                "hop_size": 160,  # hop length 
-                "n_fft": 1024  # FFT size
-            }
-            audio_params_path = os.path.join(self.run_path, "audio_params.json")
-            with open(audio_params_path, 'w') as f:
-                json.dump(audio_params, f, indent=2)
 
         # Setup device
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -244,6 +234,8 @@ class Trainer():
                 h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x)
                 pred = self.tinybird.forward_decoder(h, idx_restore, T)
         
+        bool_mask = bool_mask.reshape(bool_mask.size(0), -1)
+
         # Depatchify prediction to get back (B, 1, H, W) format
         def depatchify(pred_patches):
             # pred_patches: (B, T, P) → (B, 1, H, W)
@@ -322,13 +314,11 @@ class Trainer():
         # Initialize datasets
         train_dataset = SpectogramDataset(
             dir=self.config["train_dir"],
-            n_mels=self.config["mels"],
             n_timebins=self.config["num_timebins"]
         )
         
         val_dataset = SpectogramDataset(
             dir=self.config["val_dir"],
-            n_mels=self.config["mels"],
             n_timebins=self.config["num_timebins"]
         )
         
@@ -446,9 +436,6 @@ class Trainer():
         ax1.grid(True, alpha=0.3)
         ax1.set_yscale('log')  # Log scale for loss values
         
-        # Second panel: EMA losses only
-        # Note: EMA losses are now calculated at eval_every intervals only
-        # We need to reconstruct the EMA history from the loss log for plotting
         ema_train_history = []
         ema_val_history = []
         
@@ -514,17 +501,17 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=1e-4, help="learning rate")
     parser.add_argument("--batch_size", type=int, default=256, help="batch size")
     parser.add_argument("--num_workers", type=int, default=8, help="number of DataLoader worker processes")
+
     parser.add_argument("--patch_height", type=int, default=32, help="patch height")
     parser.add_argument("--patch_width", type=int, default=1, help="patch width")
-    parser.add_argument("--mels", type=int, default=128, help="number of mel bins")
     parser.add_argument("--num_timebins", type=int, default=1024, help="n number of time bins")
+    
     parser.add_argument("--dropout", type=float, default=0.1, help="dropout rate")
     parser.add_argument("--mask_p", type=float, default=0.75, help="mask probability")
     parser.add_argument("--eval_every", type=int, default=500, help="evaluate every N steps")
     parser.add_argument("--amp", action="store_true", help="enable automatic mixed precision training")
-    parser.add_argument("--weight_decay", type=float, default=0, help="weight decay")
+    parser.add_argument("--weight_decay", type=float, default=0.1, help="weight decay")
     parser.add_argument("--continue_from", type=str, help="continue training from existing run directory (path to run dir)")
-    parser.add_argument("--fallback_random", action="store_true", help="if checkpoint not found when continuing, initialize with random weights instead of raising error")
 
     # Encoder 
     parser.add_argument("--enc_hidden_d", type=int, default=384, help="encoder hidden dimension")
@@ -546,13 +533,8 @@ if __name__ == "__main__":
         from utils import load_model_from_checkpoint
         
         # Load existing config and model
-        model, config = load_model_from_checkpoint(args.continue_from, fallback_to_random=args.fallback_random)
+        model, config = load_model_from_checkpoint(args.continue_from, fallback_to_random=False)
         
-        # Override with any command line args that were provided
-        for key, value in vars(args).items():
-            if value is not None and key not in ['continue_from']:
-                config[key] = value
-                
         config['continue_from'] = args.continue_from
         config['is_continuing'] = True
 
@@ -563,18 +545,20 @@ if __name__ == "__main__":
         
         config = vars(args)
         config['is_continuing'] = False
-
-    # Ensure num_workers is present even if older configs omitted it
-    config.setdefault('num_workers', 8)
+    
+    # Load audio params from training directory
+    from utils import load_audio_params
+    
+    audio_params = load_audio_params(config["train_dir"])
+    config["mels"] = audio_params["mels"]
+    # Configure patch size and max sequence length for model
+    config["patch_size"] = (config["patch_height"], config["patch_width"])
+    config["max_seq"] = (config["num_timebins"] // config["patch_width"]) * (config["mels"] // config["patch_height"])
 
     # Calculate seq_len from num_timebins and patch dimensions  
     assert config["num_timebins"] % config["patch_width"] == 0, f"num_timebins ({config['num_timebins']}) must be divisible by patch_width ({config['patch_width']})"
     assert config["mels"] % config["patch_height"] == 0, f"mels ({config['mels']}) must be divisible by patch_height ({config['patch_height']})"
-    
-    # Configure patch size and max sequence length for model
-    config["patch_size"] = (config["patch_height"], config["patch_width"])
-    config["max_seq"] = (config["num_timebins"] // config["patch_width"]) * (config["mels"] // config["patch_height"])
-    
+
     # Create trainer with loaded model if continuing
     if config.get('is_continuing', False):
         trainer = Trainer(config, pretrained_model=model)

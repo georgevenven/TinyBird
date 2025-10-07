@@ -1,5 +1,5 @@
 import torch, math 
-from torch import nn
+from torch import nn, zero_
 
 class TinyBird(nn.Module):
     def __init__(self, config):
@@ -34,9 +34,14 @@ class TinyBird(nn.Module):
         self.encoder_to_decoder = nn.Linear(config["enc_hidden_d"], config["dec_hidden_d"])
         self.decoder_to_pixel = nn.Linear(config["dec_hidden_d"], self.patch_size[0] * self.patch_size[1])
 
-        self.mask_token = nn.Parameter(torch.zeros(1, 1, config["dec_hidden_d"]))
+        self.mask_token = nn.Parameter(torch.randn(1, 1, config["dec_hidden_d"]))
 
-        self.pos_enc = nn.Parameter(torch.zeros(1, config["max_seq"], config["enc_hidden_d"]))
+        # Calculate max patch grid dimensions for 2D positional encoding
+        max_h = config["mels"] // config["patch_height"]
+        max_w = config["num_timebins"] // config["patch_width"]
+        
+        self.pos_enc = nn.Parameter(torch.randn(1, config["enc_hidden_d"], max_h, max_w))
+
         # blockwise mask width in **tokens** along W' (time)
         self.mask_block_w = config.get("mask_block_w", 32)
 
@@ -46,100 +51,102 @@ class TinyBird(nn.Module):
         # p is hidden d, height tokens, width tokens 
         return z
 
-    def encode_pos(self, z):
-        z = z.flatten(2,3).transpose(2,1) # into a seq of tokens  B, Dim, tokens
-        print(z.shape)
-        z += self.pos_enc
-        return z # shape batch x seq x dim 
+    def voronoi_mask(self, hw, p=None, c=0.1, device=None):
+        """
+        Document and understand this better ... bernoulli is imprecise 
 
-        # ───────────── written by GPT ─────────────
-    def mask(self, z: torch.Tensor, hw=None):
+        made by george and opus 
         """
-        Blockwise stripes + exact target masked count via top-up/trim.
-        Returns:
-          z_keep: (B, keep, D)
-          idx_restore: (B, T)
-          bool_mask: (B, T)  True where masked
-        """
-        if hw is None:
-            raise ValueError("mask(hw=...) requires spatial shape (H', W').")
-        B, T, D = z.shape
+
+        if p is None:
+            p = self.mask_p
         H, W = hw
-        assert H * W == T
-        Wb = min(self.mask_block_w, W)
+        n_patches = H * W
+        n_masked_patches = round(n_patches * p)
+        n_seeds = round(n_masked_patches * c)
+        
+        # Step 1: Create seeds
+        mask = torch.bernoulli(torch.full((H, W), c, device=device)).bool()
+        
+        # Step 2: Distance transform
+        seed_coords = torch.nonzero(mask, as_tuple=False).float()
+        if seed_coords.shape[0] == 0:
+            seed_coords = torch.tensor([[H // 2, W // 2]], dtype=torch.float, device=device)
+        
+        y_coords = torch.arange(H, device=device).unsqueeze(1).expand(-1, W)
+        x_coords = torch.arange(W, device=device).unsqueeze(0).expand(H, -1)
+        grid_coords = torch.stack([y_coords, x_coords], dim=-1).float()
+        
+        grid_flat = grid_coords.reshape(-1, 1, 2)
+        seeds_flat = seed_coords.unsqueeze(0)
+        dists = torch.norm(grid_flat - seeds_flat, dim=2)
+        min_distances, _ = torch.min(dists, dim=1)
+        distances = min_distances.reshape(H, W)
+        
+        # Step 3: Find threshold
+        distances_flat = distances.flatten()
+        sorted_distances, _ = torch.sort(distances_flat)
+        threshold = sorted_distances[min(n_masked_patches - 1, len(sorted_distances) - 1)]
+        
+        # Step 4: Create final mask
+        final_mask = distances < threshold
+        n_selected = torch.sum(final_mask).item()
+        n_needed = n_masked_patches - n_selected
+        
+        if n_needed > 0:
+            boundary_mask = (distances == threshold)
+            boundary_indices = torch.nonzero(boundary_mask, as_tuple=False)
+            if len(boundary_indices) >= n_needed:
+                perm = torch.randperm(len(boundary_indices), device=device)[:n_needed]
+                selected_boundary = boundary_indices[perm]
+                final_mask[selected_boundary[:, 0], selected_boundary[:, 1]] = True
+        
+        return final_mask
 
-        # target masked tokens
-        n_mask = max(1, int(round(self.mask_p * T)))
-
-        # sample stripes (allows overlap = fast)
-        n_blocks = max(1, math.ceil(n_mask / Wb))
-        rows   = torch.randint(H, (n_blocks,), device=z.device)               # with replacement
-        starts = torch.randint(W - Wb + 1, (n_blocks,), device=z.device)      # with replacement
-        cols   = starts.unsqueeze(1) + torch.arange(Wb, device=z.device).unsqueeze(0)  # (n_blocks, Wb)
-
-        mask2d = torch.zeros(H, W, dtype=torch.bool, device=z.device)
-        mask2d[rows.unsqueeze(1).expand_as(cols).reshape(-1), cols.reshape(-1)] = True
-        flat = mask2d.view(-1)                                                # (T,)
-
-        # enforce exact cardinality n_mask (top-up or trim)
-        cur = int(flat.sum().item())
-        if cur < n_mask:
-            need = n_mask - cur
-            cand = (~flat).nonzero(as_tuple=False).squeeze(1)
-            add  = cand[torch.randperm(cand.numel(), device=z.device)[:need]]
-            flat[add] = True
-        elif cur > n_mask:
-            drop = cur - n_mask
-            ones = flat.nonzero(as_tuple=False).squeeze(1)
-            rem  = ones[torch.randperm(ones.numel(), device=z.device)[:drop]]
-            flat[rem] = False
-
-        bool_mask = flat.view(1, T).expand(B, T)                              # (B,T)
-        idx_mask  = flat.nonzero(as_tuple=False).squeeze(1)                   # (n_mask,)
-        idx_keep  = (~flat).nonzero(as_tuple=False).squeeze(1)                # (T-n_mask,)
-        keep = idx_keep.numel()
-
-        idx_keep_b = idx_keep.unsqueeze(0).expand(B, keep)
-        z_keep = torch.gather(z, 1, idx_keep_b.unsqueeze(-1).expand(B, keep, D))
-
-        perm = torch.cat([idx_keep, idx_mask], dim=0)                         # kept-first layout
-        idx_restore = perm.argsort().unsqueeze(0).expand(B, T)
-        return z_keep, idx_restore, bool_mask
-
-    def forward_encoder(self, x: torch.Tensor):
+    def forward_encoder(self, x):
         """
         Patchify → add pos enc → mask → Transformer encoder.
         Returns:
           h: (B, keep, D_enc), idx_restore, bool_mask, T
         """
-        z_img = self.patch_projection(x)               # (B, D_enc, H', W')
-        H, W = z_img.shape[-2], z_img.shape[-1]
-        z = z_img.flatten(2, 3).transpose(1, 2)        # (B, T, D_enc)
-        B, T, D = z.shape
-        if T > self.pos_enc.size(1):
-            raise ValueError(f"T={T} exceeds max_seq={self.pos_enc.size(1)}")
-        z = z + self.pos_enc[:, :T, :]                 # (B, T, D_enc)
-        z_keep, idx_restore, bool_mask = self.mask(z, hw=(H, W))  # blockwise mask
-        h = self.encoder(z_keep)                       # (B, keep, D_enc)
+
+        z = self.patch_projection(x)               # (B, D_enc, H', W')
+        B, D, H, W = z.shape
+
+        pos_enc = self.pos_enc[:, :, :H, :W]
+        z = z + pos_enc
+        z_seq = z.flatten(2).transpose(1, 2)        # (B, T, D_enc)
+        T = z_seq.size(1)
+
+        mask_grid = self.voronoi_mask((H, W), p=self.mask_p, device=z.device)
+        bool_mask_flat = mask_grid.flatten()
+        bool_mask = bool_mask_flat.unsqueeze(0).expand(B, -1)               # (B, T)
+
+        keep_indices = torch.nonzero(~bool_mask_flat, as_tuple=False).squeeze(1)
+        mask_indices = torch.nonzero(bool_mask_flat, as_tuple=False).squeeze(1)
+
+        z_keep = torch.index_select(z_seq, 1, keep_indices)                 # (B, keep, D_enc)
+
+        perm = torch.cat([keep_indices, mask_indices], dim=0)               # kept-first layout
+        idx_restore = perm.argsort().unsqueeze(0).expand(B, -1)             # (B, T)
+
+        h = self.encoder(z_keep)                   # (B, keep, D_enc)
         return h, idx_restore, bool_mask, T
     
-    def forward_encoder_inference(self, x: torch.Tensor):
-        """
-        Patchify → add pos enc → mask → Transformer encoder.
-        Returns:
-          h: (B, keep, D_enc), idx_restore, bool_mask, T
-        """
-        z = self.patch_projection(x)                   # (B, D_enc, H', W')
-        z = z.flatten(2, 3).transpose(1, 2)            # (B, T, D_enc)
-        B, T, D = z.shape
-        if T > self.pos_enc.size(1):
-            raise ValueError(f"T={T} exceeds max_seq={self.pos_enc.size(1)}")
-        z = z + self.pos_enc[:, :T, :]                 # (B, T, D_enc)
+    def forward_encoder_inference(self, x):
+       
+        z = self.patch_projection(x)               # (B, D_enc, H', W')
+        B, D, H, W = z.shape
 
-        h = self.encoder(z)                       # (B, keep, D_enc)
+        pos_enc = self.pos_enc[:, :, :H, :W]
+        z = z + pos_enc
+        z_seq = z.flatten(2).transpose(1, 2)        # (B, T, D_enc)
+
+        h = self.encoder(z_seq)
+
         return h
 
-    def forward_decoder(self, h: torch.Tensor, idx_restore: torch.Tensor, T: int):
+    def forward_decoder(self, h, idx_restore, T):
         """
         Project to decoder dim → insert mask tokens → unshuffle → add pos → decode → predict pixels.
         Returns:
@@ -152,20 +159,23 @@ class TinyBird(nn.Module):
         keep = y.size(1)
 
         # build full sequence with mask tokens then unshuffle to original order
-        # NOTE: define in __init__: self.mask_token = nn.Parameter(torch.zeros(1,1,D_dec))
         mask_tokens = self.mask_token.expand(B, T - keep, D_dec)     # (B, T-keep, D_dec)
         y_full = torch.cat([y, mask_tokens], dim=1)                  # kept-first layout
         y_full = torch.gather(y_full, 1, idx_restore.unsqueeze(-1).expand(B, T, D_dec))
 
-        # reuse encoder pos via linear map to decoder width
-        pos_dec = self.encoder_to_decoder(self.pos_enc[:, :T, :])    # (1, T, D_dec)
+        # Convert 2D pos enc to 1D sequence format for decoder
+        # We need to determine H, W from T and the original patch grid dimensions
+        H_max, W_max = self.pos_enc.size(2), self.pos_enc.size(3)
+        # Assume the patches fill the grid in row-major order
+        pos_enc_seq = self.pos_enc.flatten(2, 3).transpose(1, 2)[:, :T, :]  # (1, T, D_enc)
+        pos_dec = self.encoder_to_decoder(pos_enc_seq)    # (1, T, D_dec)
         y_full = y_full + pos_dec
 
         d = self.decoder(y_full)                                     # (B, T, D_dec)
         pred = self.decoder_to_pixel(d)                               # (B, T, P)
         return pred
 
-    def loss_mse(self, x: torch.Tensor, pred: torch.Tensor, bool_mask: torch.Tensor):
+    def loss_mse(self, x, pred, bool_mask):
         """
         Compute MSE on masked patches only.
         x:    (B, 1, H, W)

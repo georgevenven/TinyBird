@@ -2,6 +2,7 @@ import os
 import json
 import glob
 import torch
+from pathlib import Path
 from model import TinyBird
 
 def count_parameters(model):
@@ -166,3 +167,32 @@ def load_model_from_checkpoint(run_dir="", checkpoint_file=None, fallback_to_ran
         print(f"Model loaded from: {os.path.basename(checkpoint_path)}")
     
     return tinybird, config
+
+def load_audio_params(data_dir):
+    """
+    Load audio parameters from audio_params.json in the specified directory.
+    
+    Args:
+        data_dir (str): Path to directory containing audio_params.json
+    
+    Returns:
+        dict: Dictionary containing audio parameters (mels, sr, hop_size, fft, mean, std)
+    
+    Raises:
+        SystemExit: If audio_params.json is missing or lacks required keys
+    """
+    audio_json_path = Path(data_dir) / "audio_params.json"
+    
+    if not audio_json_path.exists():
+        raise SystemExit(f"audio_params.json not found in directory: {data_dir}")
+    
+    with open(audio_json_path, "r") as f:
+        audio_data_json = json.load(f)
+    
+    # Validate required keys
+    required_keys = ["mels", "sr", "hop_size", "fft", "mean", "std"]
+    for key in required_keys:
+        if key not in audio_data_json:
+            raise SystemExit(f"Missing required key '{key}' in audio_params.json. Exiting.")
+    
+    return audio_data_json

@@ -215,7 +215,6 @@ def main(args):
     # Create embedding dataset using a large max_context, then batch-chunk per file
     embedding_dataset = SpectogramDataset(
         dir=args["spec_dir"],
-        n_mels=config["mels"],
         n_timebins=args.get("max_context", config["num_timebins"] * 64),
         pad_crop=False
     )
@@ -352,7 +351,7 @@ def main(args):
     print(f"Unlabeled song patches: {unlabeled_count}")
     
     # --- remove average vector per position (choose one) ---
-    mode = "absolute"  # {"absolute", "relative", None}
+    mode = None  # {"absolute", "relative", None}
     Z_np = Z.cpu().numpy()
     if mode == "absolute":
         uniq = np.unique(pos_ids)

@@ -3,22 +3,15 @@ import torch.nn.functional as F
 from pathlib import Path
 import torch
 import random
-import json
+from utils import load_audio_params
 
 class SpectogramDataset(Dataset):
     def __init__(self, dir, n_timebins=1024, pad_crop=True):
         self.file_dirs = list(Path(dir).glob("*.pt"))
 
-        audio_json_path = Path(dir) / "audio_params.json"
-        with open(audio_json_path, "r") as f:
-            self.audio_data_json = json.load(f)
-
-        # We outta make sure that all of this metadata is present before continuing the execution of training, or whatever that is we are doing 
-        required_keys = ["mels", "sr", "hop_size", "fft", "mean", "std"]
-        for key in required_keys:
-            if key not in self.audio_data_json:
-                raise SystemExit(f"Missing required key '{key}' in audio_params.json. Exiting.")
-
+        # Load audio parameters using utility function
+        self.audio_data_json = load_audio_params(dir)
+        
         self.n_mels = self.audio_data_json["mels"]
         self.sr = self.audio_data_json["sr"]
         self.hop_size = self.audio_data_json["hop_size"]
