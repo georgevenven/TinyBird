@@ -31,7 +31,7 @@ def human_bytes(n: int) -> str:
     return f"{x:.2f} {units[i]}"
 
 @contextlib.contextmanager
-def cuda_mem_scope(device):
+def cuda_mem_scope(device, step=None):
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats(device)
     start = time.time()
@@ -43,32 +43,38 @@ def cuda_mem_scope(device):
             alloc = torch.cuda.max_memory_allocated(device)
             resv  = torch.cuda.max_memory_reserved(device)
             free_b, total_b = torch.cuda.mem_get_info()
-            print(f"[cuda] step_peak alloc={human_bytes(alloc)}  reserved={human_bytes(resv)}  "
+            print(f"alloc={human_bytes(alloc)}  reserved={human_bytes(resv)}  "
                   f"free={human_bytes(free_b)}  total={human_bytes(total_b)}  dur={dur:.3f}s")
             # also log to W&B
             try:
-                wandb.log({
+                payload = {
                     "cuda/peak_alloc": int(alloc),
                     "cuda/peak_reserved": int(resv),
                     "cuda/free": int(free_b),
                     "cuda/total": int(total_b),
-                }, commit=False)
+                }
+                if step is not None:
+                    payload["step"] = int(step)
+                wandb.log(payload, step=int(step) if step is not None else None, commit=True)
             except Exception:
                 pass
 
-def log_batch_shapes(tag, x, x_i, N, n_blocks, masked_blocks, frac):
-    print(f"[{tag}] x={tuple(x.shape)}, x_i={tuple(x_i.shape)}, N={tuple(N.shape)}, "
-          f"n_blocks={n_blocks}, masked_blocks={masked_blocks}, frac={frac}")
+def log_batch_shapes(tag, step_num, x, x_i, N, n_blocks, masked_blocks, frac, patch_size=(32,1)):
+    H, W = int(x.size(2)), int(x.size(3))
+    ph, pw = patch_size
+    num_tokens = (H // ph) * (W // pw)
+    print(f"x={tuple(x.shape)}, x_i={tuple(x_i.shape)}, N={tuple(N.shape)}, n_blocks={n_blocks}, masked_blocks={masked_blocks}, frac={frac}")
     try:
         wandb.log({
+            "step": int(step_num),
             f"{tag}/B": int(x.size(0)),
-            f"{tag}/H": int(x.size(2)),
-            f"{tag}/W": int(x.size(3)),
-            f"{tag}/num_tokens": int((x.size(2)//x.new_tensor([0]).numel() or 1)),  # harmless placeholder
+            f"{tag}/H": H,
+            f"{tag}/W": W,
+            f"{tag}/num_tokens": int(num_tokens),
             f"{tag}/n_blocks": int(n_blocks),
             f"{tag}/masked_blocks": int(masked_blocks),
             f"{tag}/frac": float(frac),
-        }, commit=False)
+        }, step=int(step_num) if step_num is not None else None, commit=True)
     except Exception:
         pass
 
@@ -160,6 +166,7 @@ class Trainer():
         wandb.define_metric("lr", step_metric="step")
         wandb.define_metric("cuda/*", step_metric="step")
         wandb.define_metric("system/*", step_metric="step")
+        wandb.define_metric("recon/*", step_metric="step")
 
         # --- End W&B initialization ---
 
@@ -203,7 +210,8 @@ class Trainer():
         self.scheduler = CosineAnnealingLR(self.optimizer, T_max=config["steps"])
         
         # Initialize AMP scaler if AMP is enabled
-        self.use_amp = config.get("amp", False)
+        self.use_amp = bool(config.get("amp", False)) and torch.cuda.is_available()
+
         self.scaler = torch.amp.GradScaler('cuda') if self.use_amp else None
         
         # Loss tracking
@@ -291,7 +299,7 @@ class Trainer():
         else:
             print("No loss log found, starting from step 0")
 
-    def step(self, batch, is_training=True, n_blocks: int = 3):
+    def step(self, step_num,batch, is_training=True, n_blocks: int = 3):
         """
         Perform one forward pass and optionally backward pass.
         
@@ -324,20 +332,28 @@ class Trainer():
             self.tinybird.eval()
         
         # Forward pass through encoder-decoder
-        with cuda_mem_scope(self.device):
+        with cuda_mem_scope(self.device, step=step_num):
             with torch.set_grad_enabled(is_training):
                 if self.use_amp:
                     with torch.amp.autocast('cuda'):
                         x, x_i  = self.tinybird.compactify_data(x, x_i, N)
                         x, x_i  = self.tinybird.sample_data(x, x_i, N, n_blocks=n_blocks)
-                        log_batch_shapes("train_batch", x, x_i, N, n_blocks, masked_blocks, frac)
+
+                        if x.shape[-1] > 3000:
+                            masked_blocks, frac = 0,.5
+
+                        log_batch_shapes("train_batch", step_num,x, x_i, N, n_blocks, masked_blocks, frac, patch_size=self.config["patch_size"])
                         h, idx_restore, bool_mask, bool_pad, T = self.tinybird.forward_encoder(x, x_i, masked_blocks=masked_blocks, frac=frac)
                         pred = self.tinybird.forward_decoder(h, idx_restore, T, bool_pad = bool_pad)
                         loss = self.tinybird.loss_mse(x, pred, bool_mask)
                 else:
                     x, x_i  = self.tinybird.compactify_data(x, x_i, N)
                     x, x_i  = self.tinybird.sample_data(x, x_i, N, n_blocks=n_blocks)
-                    log_batch_shapes("train_batch", x, x_i, N, n_blocks, masked_blocks, frac)
+
+                    if x.shape[-1] > 3000:
+                        masked_blocks, frac = 0,.5
+
+                    log_batch_shapes("train_batch", step_num,x, x_i, N, n_blocks, masked_blocks, frac, patch_size=self.config["patch_size"])
                     h, idx_restore, bool_mask, bool_pad, T = self.tinybird.forward_encoder(x, x_i, masked_blocks=masked_blocks, frac=frac)
                     pred = self.tinybird.forward_decoder(h, idx_restore, T, bool_pad = bool_pad)
                     loss = self.tinybird.loss_mse(x, pred, bool_mask)
@@ -563,11 +579,10 @@ class Trainer():
         print(f"Training from step {self.starting_step} to {end_step}")
 
         for step_num in range(self.starting_step, end_step):
-            train_iter = iter(train_loader) if 'train_iter' not in locals() else train_iter
             train_batch, k = next(train_iter)
 
             try:
-                train_loss = self.step(train_batch, is_training=True, n_blocks=int(k))
+                train_loss = self.step(step_num, train_batch,is_training=True, n_blocks=int(k))
             except RuntimeError as e:
                 if "out of memory" in str(e).lower():
                     print("\n[OOM] CUDA out of memory caught. Dumping diagnostics...")
@@ -580,7 +595,7 @@ class Trainer():
                         half = spectrograms.size(0) // 2
                         train_batch = (spectrograms[:half], chirp_intervals[:half], N[:half], filenames[:half])
                         print(f"[OOM] Retrying with smaller micro-batch: B={half}")
-                        train_loss = self.step(train_batch, is_training=True, n_blocks=int(max(1, k//2)))
+                        train_loss = self.step(step_num, train_batch, is_training=True, n_blocks=int(max(1, k//2)))
                     else:
                         raise
                 else:
@@ -598,7 +613,7 @@ class Trainer():
                     val_batch = next(val_iter)
 
                 # Validation step (no gradients)
-                val_loss = self.step(val_batch, is_training=False)
+                val_loss = self.step(step_num, val_batch, is_training=False)
 
                 # Store validation loss
                 self.val_loss_history.append(val_loss)
