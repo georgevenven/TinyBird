@@ -5,9 +5,9 @@
     "run_dir": "/mnt/birdconv/tb_conv_runs",
     
   
-    "steps": 5,
+    "steps": 50000,
     "lr": 0.0002,
-    "batch_size": 2,
+    "batch_size": 16,
   
     "patch_height": 32,
     "patch_width": 1,
