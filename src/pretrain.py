@@ -53,9 +53,7 @@ def cuda_mem_scope(device, step=None):
                     "cuda/free": int(free_b),
                     "cuda/total": int(total_b),
                 }
-                if step is not None:
-                    payload["step"] = int(step)
-                wandb.log(payload, step=int(step) if step is not None else None, commit=True)
+                wandb.log(payload, step=int(step) if step is not None else None, commit=False)
             except Exception:
                 pass
 
@@ -66,7 +64,6 @@ def log_batch_shapes(tag, step_num, x, x_i, N, n_blocks, masked_blocks, frac, pa
     print(f"x={tuple(x.shape)}, x_i={tuple(x_i.shape)}, N={tuple(N.shape)}, n_blocks={n_blocks}, masked_blocks={masked_blocks}, frac={frac}")
     try:
         wandb.log({
-            "step": int(step_num),
             f"{tag}/B": int(x.size(0)),
             f"{tag}/H": H,
             f"{tag}/W": W,
@@ -74,7 +71,7 @@ def log_batch_shapes(tag, step_num, x, x_i, N, n_blocks, masked_blocks, frac, pa
             f"{tag}/n_blocks": int(n_blocks),
             f"{tag}/masked_blocks": int(masked_blocks),
             f"{tag}/frac": float(frac),
-        }, step=int(step_num) if step_num is not None else None, commit=True)
+        }, step=int(step_num) if step_num is not None else None, commit=False)
     except Exception:
         pass
 
@@ -406,27 +403,6 @@ class Trainer():
                 print(f"CUDA max allocated: {self._human_bytes(cuda_alloc)}")
                 print(f"CUDA max reserved:  {self._human_bytes(cuda_reserved)}")
                 # Also log raw numbers to W&B for later inspection
-                try:
-                    wandb.log({
-                        "system/cpu_rss_before": int(rss_before),
-                        "system/cpu_rss_after": int(rss_after),
-                        "system/cpu_rss_delta": int(max(0, cpu_delta)),
-                        "system/cuda_max_alloc_bytes": int(cuda_alloc),
-                        "system/cuda_max_reserved_bytes": int(cuda_reserved),
-                        "step": int(self.starting_step),
-                    }, step=int(self.starting_step))
-                except Exception:
-                    pass
-            else:
-                try:
-                    wandb.log({
-                        "system/cpu_rss_before": int(rss_before),
-                        "system/cpu_rss_after": int(rss_after),
-                        "system/cpu_rss_delta": int(max(0, cpu_delta)),
-                        "step": int(self.starting_step),
-                    }, step=int(self.starting_step))
-                except Exception:
-                    pass
             print("=" * 60)
 
             # Avoid spamming every step; only report once per run init
@@ -532,8 +508,7 @@ class Trainer():
             "recon/input": wandb.Image(x_img, caption=f"step={step_num} input"),
             "recon/masked": wandb.Image(masked_img, caption=f"step={step_num} masked"),
             "recon/overlay": wandb.Image(overlay_img, caption=f"step={step_num} overlay"),
-            "step": int(step_num),
-        }, step=int(step_num))
+        }, step=int(step_num), commit=False )
 
     def train(self):
         # Initialize datasets
@@ -605,6 +580,7 @@ class Trainer():
             self.train_steps.append(step_num)
 
             # Evaluation and checkpointing
+            current_lr = self.scheduler.get_last_lr()[0]
             if step_num % self.config["eval_every"] == 0:
                 try:
                     val_batch = next(val_iter)
@@ -620,13 +596,6 @@ class Trainer():
                 self.val_steps.append(step_num)
 
                 # Print progress
-                current_lr = self.scheduler.get_last_lr()[0]
-                wandb.log({
-                    "step": int(step_num),
-                    "lr": float(current_lr),
-                    "train/loss_step": float(train_loss),
-                    "train/ema_loss_step": float(self.ema_train_loss if self.ema_train_loss is not None else train_loss),
-                }, step=int(step_num))
                 print(f"Step {step_num}: Train Loss = {train_loss:.6f}, "
                       f"EMA Train = {self.ema_train_loss:.6f}, "
                       f"Val Loss = {val_loss:.6f}, "
@@ -641,20 +610,20 @@ class Trainer():
 
                 # Save reconstruction visualization
                 self.save_reconstruction(val_batch, step_num)
-                # W&B: log validation metrics & LR once per eval
                 wandb.log({
-                    "step": int(step_num),
                     "lr": float(current_lr),
-                    "train/loss": float(train_loss),
-                    "train/ema_loss": float(self.ema_train_loss),
+                    "train/loss_step": float(train_loss),
+                    "train/ema_loss_step": float(self.ema_train_loss if self.ema_train_loss is not None else train_loss),
                     "val/loss": float(val_loss),
                     "val/ema_loss": float(self.ema_val_loss),
-                }, step=int(step_num))
-                # W&B: attach the saved reconstruction png
+                }, step=int(step_num), commit=True)
+            else :
                 wandb.log({
-                    "recon/png": wandb.Image(os.path.join(self.imgs_path, f"recon_step_{step_num:06d}.png")),
-                }, step=int(step_num))
-
+                    "lr": float(current_lr),
+                    "train/loss_step": float(train_loss),
+                    "train/ema_loss_step": float(self.ema_train_loss if self.ema_train_loss is not None else train_loss),
+                }, step=int(step_num), commit=True)
+ 
         # Save final model weights
         final_step = self.starting_step + self.config['steps'] - 1
         final_weight_path = os.path.join(self.weights_path, f"model_step_{final_step:06d}.pth")
@@ -725,7 +694,7 @@ class Trainer():
         print(f"Loss plot saved to: {plot_path}")
         print(f"Loss log saved to: {self.loss_log_path}")
         # W&B: log final loss curves and attach the CSV
-        wandb.log({"final/loss_plot": wandb.Image(plot_path)}, step=int(self.starting_step + self.config['steps'] - 1))
+        wandb.log({"final/loss_plot": wandb.Image(plot_path)}, step=int(self.starting_step + self.config['steps'] - 1), commit=True)
         if os.path.exists(self.loss_log_path):
             dest = os.path.join(wandb.run.dir, "loss_log.txt")
             os.makedirs(os.path.dirname(dest), exist_ok=True)
