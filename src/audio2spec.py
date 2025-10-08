@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 
 class AudioEvent:
-    __slots__ = ("path", "start", "end", "label", "name")
+    __slots__ = ("path", "start", "end", "label", "name", "waveform", "sample_rate")
 
     def __init__(self, path, start, end, label, name):
         self.path = Path(path)
@@ -20,19 +20,13 @@ class AudioEvent:
         self.end = float(end)
         self.label = int(label)
         self.name = str(name)
+        self.waveform = None  # Will be set for BirdSet events
+        self.sample_rate = None  # Will be set for BirdSet events
 
 # ══════════════════════════════════════════════════════════════════════════════
 # helper: STFT → log‑magnitude
 # ══════════════════════════════════════════════════════════════════════════════
-def compute_spectrogram(
-    wav,
-    sr,
-    n_fft,
-    hop,
-    *,
-    mel,
-    n_mels
-):
+def compute_spectrogram(wav, sr, n_fft, hop, *, mel, n_mels):
     """
     Returns log‑magnitude spectrogram in **dB**.
     • linear STFT  → shape (n_fft//2 + 1, T)   (default 513 × T for n_fft=1024)  
@@ -43,26 +37,10 @@ def compute_spectrogram(
     # wav uses default dtype from the loader
     if mel:
         # melspectrogram already computes power spectrum internally
-        S = librosa.feature.melspectrogram(
-            y=wav,  # no dtype conversion needed
-            sr=sr,
-            n_fft=n_fft,
-            hop_length=hop,
-            power=2.0,         # power‑spectrogram
-            n_mels=n_mels,
-            fmin=20,
-            fmax=sr // 2,
-            # Using default dtype
-        )
+        S = librosa.feature.melspectrogram(y=wav, sr=sr, n_fft=n_fft, hop_length=hop, power=2.0, n_mels=n_mels, fmin=20, fmax=sr // 2)
     else:
         # More efficient power calculation for linear STFT
-        stft_complex = librosa.stft(
-            wav,  # no dtype conversion needed
-            n_fft=n_fft,
-            hop_length=hop,
-            window="hann",
-            dtype=np.complex64  # use complex64 for memory efficiency
-        )
+        stft_complex = librosa.stft(wav, n_fft=n_fft, hop_length=hop, window="hann", dtype=np.complex64)
         # Efficient power calculation using real and imaginary parts
         S = stft_complex.real**2 + stft_complex.imag**2
         # Using default dtype
@@ -76,20 +54,7 @@ def compute_spectrogram(
 # ══════════════════════════════════════════════════════════════════════════════
 # standalone worker function (picklable)
 # ══════════════════════════════════════════════════════════════════════════════
-def process_audio_file(
-    obj,
-    dst_dir,
-    sr,
-    n_fft,
-    step,
-    use_mel,
-    n_mels,
-    min_len_ms,
-    min_timebins,
-    fmt,
-    lab_map,
-    skipped_counter
-):
+def process_audio_file(obj, dst_dir, sr, n_fft, step, use_mel, n_mels, min_len_ms, min_timebins, fmt, skipped_counter):
     """
     Standalone worker function that processes a single audio file.
     Returns None on success, error message on failure.
@@ -113,13 +78,22 @@ def process_audio_file(
             if duration <= 0:
                 skipped_counter.value += 1
                 return None
-            wav, actual_sr = librosa.load(
-                fp,
-                sr=sr,
-                mono=True,
-                offset=max(event.start, 0.0),
-                duration=duration,
-            )
+            
+            # Use pre-loaded waveform if available (BirdSet streaming)
+            if hasattr(event, 'waveform') and event.waveform is not None:
+                full_wav = event.waveform
+                actual_sr = event.sample_rate
+                # Extract the event segment
+                start_idx = int(max(event.start, 0.0) * actual_sr)
+                end_idx = int(event.end * actual_sr)
+                wav = full_wav[start_idx:end_idx]
+                # Resample if needed
+                if actual_sr != sr:
+                    wav = librosa.resample(wav, orig_sr=actual_sr, target_sr=sr)
+                    actual_sr = sr
+            else:
+                # Fallback to file loading for non-BirdSet events
+                wav, actual_sr = librosa.load(fp, sr=sr, mono=True, offset=max(event.start, 0.0), duration=duration)
         else:
             # ─── fast duration check before loading ─────────────────
             try:
@@ -153,9 +127,7 @@ def process_audio_file(
             return None
 
         # ─── spectrogram ─────────────────────────────────────────────
-        S = compute_spectrogram(
-            wav, actual_sr, n_fft, step,
-            mel=use_mel, n_mels=n_mels)
+        S = compute_spectrogram(wav, actual_sr, n_fft, step, mel=use_mel, n_mels=n_mels)
 
         if S.shape[1] < min_timebins:
             skipped_counter.value += 1
@@ -165,16 +137,13 @@ def process_audio_file(
             labels = np.full(S.shape[1], event.label, dtype=np.int32)
         else:
             labels = np.zeros(S.shape[1], dtype=np.int32)
-            for lab, tb_on, tb_off in lab_map.get(fp.stem, []):
-                labels[tb_on:tb_off] = lab
 
         # ─── optimized output with minimal conversions ───────────────
         if fmt == "pt":
             import torch
             out = dst_dir / (stem + ".pt")
             # S uses default dtype, avoid unnecessary conversion
-            torch.save({"s": torch.from_numpy(S),
-                        "labels": torch.from_numpy(labels)}, out)
+            torch.save({"s": torch.from_numpy(S), "labels": torch.from_numpy(labels)}, out)
         else:  # npz (uncompressed)
             out = dst_dir / (stem + ".npz")
             # S uses default dtype from compute_spectrogram
@@ -216,20 +185,6 @@ def calculate_optimal_workers(total_files, avg_file_size_mb=50):
     return max(1, optimal)
 
 
-def batch_write_outputs(outputs, fmt):
-    """
-    Batch write multiple outputs for better I/O efficiency.
-    This is a simple optimization - more complex batching could be implemented.
-    """
-    for out_path, S, labels in outputs:
-        if fmt == "pt":
-            import torch
-            torch.save({"s": torch.from_numpy(S),
-                        "labels": torch.from_numpy(labels)}, out_path)
-        else:  # npz
-            np.savez(out_path, s=S, labels=labels)
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # main worker class
 # ══════════════════════════════════════════════════════════════════════════════
@@ -241,27 +196,7 @@ class WavToSpec:
         labels  -> int32   (T,)    all zeros (placeholder)
     """
 
-    def __init__(
-        self,
-        src_dir,
-        dst_dir,
-        *,
-        file_list=None,
-        birdset=None,
-        birdset_split="train",
-        step_size=160,
-        n_fft=1024,
-        sr=32_000,
-        take_n_random=None,
-        single_threaded=True,
-        min_len_ms=25,
-        min_timebins=25,
-        fmt="pt",
-        mel=True,
-        n_mels=128,
-        json_path=None,
-        max_workers=None,
-    ):
+    def __init__(self, src_dir, dst_dir, *, file_list=None, birdset=None, birdset_split="train", step_size=160, n_fft=1024, sr=32_000, take_n_random=None, single_threaded=True, min_len_ms=25, min_timebins=25, fmt="pt", mel=True, n_mels=128, max_workers=None):
         self.src_dir = Path(src_dir) if src_dir is not None else None
         self.dst_dir = Path(dst_dir)
         self.dst_dir.mkdir(parents=True, exist_ok=True)
@@ -284,41 +219,10 @@ class WavToSpec:
         self._setup_logging()
         # Remove unpicklable Manager().Value - will create in run() if needed
 
-        self.lab_map = {}
-        self._birdset_cache_dirs = set()
         self.audio_files = self._gather_files()
         
         # Save audio parameters to destination directory
         self._save_audio_params()
-
-        # Build label map if json_path is provided
-        if json_path is not None:
-            p = Path(json_path)
-            json_files = [p] if p.is_file() else list(p.glob("*.json"))
-
-            for jfp in json_files:
-                text = jfp.read_text()
-                # Allow [ {...}, {...} ]    OR    {"filename": ...}    OR   NDJSON
-                to_parse = text.strip()
-                items = []
-                if to_parse.startswith('['):                       # big list
-                    items = json.loads(to_parse)
-                elif to_parse.startswith('{'):                     # single object
-                    items = [json.loads(to_parse)]
-                else:                                              # NDJSON
-                    items = [json.loads(line) for line in to_parse.splitlines() if line.strip()]
-
-                for jo in items:
-                    fname = jo["filename"]
-                    hop_ms = 1e3 * self.step / self.sr
-                    tmp = []
-                    for lab, spans in jo.get("syllable_labels", {}).items():
-                        for on, off in spans:
-                            tb_on  = int(round(on  * 1e3 / hop_ms))
-                            tb_off = int(round(off * 1e3 / hop_ms))
-                            tmp.append((int(lab), tb_on, tb_off))
-                    if tmp:
-                        self.lab_map.setdefault(Path(fname).stem, []).extend(tmp)
 
     # ──────────────────────────────────────────────────────────────────────
     # misc
@@ -338,7 +242,7 @@ class WavToSpec:
             "sr": self.sr,
             "mels": self.n_mels,
             "hop_size": self.step,
-            "fft": self.n_fft
+            "fft": self.n_fft,
         }
         
         params_file = self.dst_dir / "audio_params.json"
@@ -347,7 +251,9 @@ class WavToSpec:
 
     def _gather_files(self):
         if self.birdset:
-            files = self._gather_birdset_files()
+            # For BirdSet, process samples immediately instead of collecting them
+            self._process_birdset_samples()
+            return []  # Return empty since we processed everything already
         elif self.file_list:
             files = [Path(line.strip()) for line in self.file_list.read_text().splitlines() if line.strip()]
         else:
@@ -365,70 +271,118 @@ class WavToSpec:
                 print("no audio files matched ‑ nothing to do.")
             return []
 
+        # For BirdSet streaming, we collect all files first, then sample if needed
         if self.take_n_random and self.take_n_random < len(files):
             files = random.sample(files, self.take_n_random)
 
         return files
 
-    def _gather_birdset_files(self):
+    def _process_birdset_samples(self):
+        """Process BirdSet samples immediately, parsing detected events"""
         try:
-            from datasets import load_dataset  # type: ignore
+            from datasets import load_dataset, Audio  # type: ignore
         except ImportError as exc:
             raise RuntimeError("Install the 'datasets' package to use --birdset") from exc
 
-        ds = load_dataset("DBD-research-group/BirdSet", self.birdset, split=self.birdset_split)
-        files = []
-
-        for sample in ds:
-            audio_info = sample.get("audio")
-            audio_path = None
-            if isinstance(audio_info, dict):
-                audio_path = audio_info.get("path")
-            elif hasattr(audio_info, "path"):
-                audio_path = getattr(audio_info, "path")
-
-            if not audio_path:
-                audio_path = sample.get("filepath")
-
-            if not audio_path:
+        print(f"Loading BirdSet dataset: {self.birdset}, split: {self.birdset_split}")
+        ds = load_dataset("DBD-research-group/BirdSet", self.birdset, 
+                         split=self.birdset_split, streaming=True)
+        ds = ds.cast_column("audio", Audio(sampling_rate=self.sr))
+        
+        print("Starting to process samples...")
+        start_time = time.time()
+        processed_spectrograms = 0
+        processed_samples = 0
+        skipped_count = 0
+        
+        for idx, sample in enumerate(ds):
+            processed_samples += 1
+            
+            # Print progress every 250 samples
+            if processed_samples % 250 == 0:
+                elapsed = time.time() - start_time
+                print(f"Processed {processed_samples} samples → {processed_spectrograms} spectrograms in {elapsed:.1f}s")
+            
+            # Safety limit for testing
+            if self.take_n_random and processed_spectrograms >= self.take_n_random:
+                print(f"Reached take_n_random limit: {processed_spectrograms} spectrograms created")
+                break
+                
+            # Get audio info directly from HF
+            audio_info = sample.get("audio", {})
+            if not audio_info:
+                skipped_count += 1
+                continue
+                
+            waveform = audio_info.get("array")
+            actual_sr = audio_info.get("sampling_rate", self.sr)
+            audio_path = audio_info.get("path")
+            
+            if waveform is None:
+                skipped_count += 1
                 continue
 
-            events = sample.get("detected_events")
-            if not events:
-                continue
-
+            # Event information is available in sample.get("detected_events", [])
+            # Each event is a tuple of (start_time, end_time) in seconds
+            # detected_events = sample.get("detected_events", [])
+            # for event_idx, event in enumerate(detected_events):
+            #     start, end = event  # start and end times in seconds
+            
+            # Get label if available, otherwise use 0
             try:
-                label_idx = int(sample.get("ebird_code"))
+                label_idx = int(sample.get("ebird_code", 0))
             except (TypeError, ValueError):
-                continue
+                label_idx = 0
 
-            fp = Path(audio_path)
-            for idx, event in enumerate(events):
-                if not event or len(event) != 2:
-                    continue
-                start, end = event
-                if start is None or end is None:
-                    continue
-                if end <= start:
-                    continue
-                name = f"{fp.stem}_event{idx:04d}"
-                files.append(AudioEvent(path=fp, start=float(start), end=float(end), label=label_idx, name=name))
-                self._birdset_cache_dirs.add(fp.parent)
+            # Extract recording ID from filepath for naming
+            filepath = sample.get("filepath", "")
+            
+            # Create base name - ebird_code + recording ID
+            if filepath:
+                recording_id = Path(filepath).stem  # e.g., "XC1229031"
+                name = f"{label_idx}_{recording_id}"
+            elif audio_path:
+                recording_id = Path(audio_path).stem
+                name = f"{label_idx}_{recording_id}"
+            else:
+                name = f"{label_idx}_sample_{idx:06d}"
 
-        return files
+            # Handle missing or None audio_path
+            if audio_path is None:
+                audio_path = f"{name}.wav"
+                fp = Path(audio_path)
+            else:
+                fp = Path(audio_path)
 
-    def _cleanup_birdset_cache(self):
-        # Preserve Hugging Face dataset caches between runs; just clear bookkeeping.
-        if self._birdset_cache_dirs:
-            self._birdset_cache_dirs.clear()
+            # Process full sample (no event snipping)
+            duration = len(waveform) / actual_sr
+            
+            audio_event = AudioEvent(path=fp, start=0.0, end=duration, 
+                                   label=label_idx, name=name)
+            audio_event.waveform = waveform
+            audio_event.sample_rate = actual_sr
+            
+            # Process this sample immediately
+            result = self._safe_process(audio_event)
+            if result is None:
+                processed_spectrograms += 1
+            else:
+                skipped_count += 1
+
+        # Final statistics
+        elapsed = time.time() - start_time
+        print(f"BirdSet processing complete: {processed_spectrograms} spectrograms created from {processed_samples} samples, {skipped_count} skipped in {elapsed:.1f}s")
+
+
 
     # ──────────────────────────────────────────────────────────────────────
     # public entry
     # ──────────────────────────────────────────────────────────────────────
     def run(self):
         if not self.audio_files:
+            # For BirdSet, processing is already done in _process_birdset_samples
             if self.birdset:
-                self._cleanup_birdset_cache()
+                print("BirdSet processing completed.")
             return                       # exit 0, no fuss
         
         # Set up signal handler for graceful shutdown
@@ -465,24 +419,18 @@ class WavToSpec:
                 worker_args = (
                     self.dst_dir, self.sr, self.n_fft, self.step,
                     self.use_mel, self.n_mels, self.min_len_ms,
-                    self.min_timebins, self.fmt, self.lab_map, skipped_counter
+                    self.min_timebins, self.fmt, skipped_counter
                 )
                 
                 failed_files = []
                 
-                with ctx.Pool(
-                    processes=num_workers, 
-                    maxtasksperchild=10,  # Lower value to prevent memory accumulation
-                    initargs=()
-                ) as pool:
+                with ctx.Pool(processes=num_workers, maxtasksperchild=10, initargs=()) as pool:
                     
                     # Use imap_unordered for better memory control
                     task_args = [(fp,) + worker_args for fp in self.audio_files]
                     
                     try:
-                        for i, result in enumerate(pool.imap_unordered(
-                            self._worker_wrapper, task_args, chunksize=1
-                        )):
+                        for i, result in enumerate(pool.imap_unordered(self._worker_wrapper, task_args, chunksize=1)):
                             if result is not None:  # error occurred
                                 failed_files.append(result)
                                 logging.error(result)
@@ -524,8 +472,6 @@ class WavToSpec:
             # Restore original signal handler
             signal.signal(signal.SIGINT, original_sigint_handler)
             pbar.close()
-            if self.birdset:
-                self._cleanup_birdset_cache()
             
         processed_count = len(self.audio_files) - skipped_count
         print(f"Total processed: {processed_count}")
@@ -567,13 +513,22 @@ class WavToSpec:
                 duration = max(event.end - event.start, 0.0)
                 if duration <= 0:
                     return None
-                wav, actual_sr = librosa.load(
-                    fp,
-                    sr=self.sr,
-                    mono=True,
-                    offset=max(event.start, 0.0),
-                    duration=duration,
-                )
+                
+                # Use pre-loaded waveform if available (BirdSet streaming)
+                if hasattr(event, 'waveform') and event.waveform is not None:
+                    full_wav = event.waveform
+                    actual_sr = event.sample_rate
+                    # Extract the event segment
+                    start_idx = int(max(event.start, 0.0) * actual_sr)
+                    end_idx = int(event.end * actual_sr)
+                    wav = full_wav[start_idx:end_idx]
+                    # Resample if needed
+                    if actual_sr != self.sr:
+                        wav = librosa.resample(wav, orig_sr=actual_sr, target_sr=self.sr)
+                        actual_sr = self.sr
+                else:
+                    # Fallback to file loading for non-BirdSet events
+                    wav, actual_sr = librosa.load(fp, sr=self.sr, mono=True, offset=max(event.start, 0.0), duration=duration)
             else:
                 # ─── fast duration check before loading ────────────────
                 try:
@@ -604,9 +559,7 @@ class WavToSpec:
                 return None  # Skip, but not an error
 
             # ─── spectrogram ─────────────────────────────────────────────
-            S = compute_spectrogram(
-                    wav, actual_sr, self.n_fft, self.step,
-                    mel=self.use_mel, n_mels=self.n_mels)
+            S = compute_spectrogram(wav, actual_sr, self.n_fft, self.step, mel=self.use_mel, n_mels=self.n_mels)
 
             if S.shape[1] < self.min_timebins:
                 return None  # Skip, but not an error
@@ -615,16 +568,13 @@ class WavToSpec:
                 labels = np.full(S.shape[1], event.label, dtype=np.int32)
             else:
                 labels = np.zeros(S.shape[1], dtype=np.int32)
-                for lab, tb_on, tb_off in self.lab_map.get(fp.stem, []):
-                    labels[tb_on:tb_off] = lab
 
             # ─── optimized output with minimal conversions ───────────────
             if self.fmt == "pt":
                 import torch
                 out = self.dst_dir / (stem + ".pt")
                 # S uses default dtype, avoid unnecessary conversion
-                torch.save({"s": torch.from_numpy(S),
-                            "labels": torch.from_numpy(labels)}, out)
+                torch.save({"s": torch.from_numpy(S), "labels": torch.from_numpy(labels)}, out)
             else:  # npz (uncompressed)
                 out = self.dst_dir / (stem + ".npz")
                 # S uses default dtype from compute_spectrogram
@@ -677,31 +627,13 @@ def cli():
                          help="Output linear‑frequency STFT bins.")
     p.add_argument("--n_mels", type=int, default=128,
                    help="Number of mel bands (default: 128)")
-    p.add_argument("--json_path", type=str, default=None,
-                   help="Directory containing label JSON files (optional)")
     p.add_argument("--max_workers", type=int, default=None,
                    help="Maximum number of worker processes (default: auto-detect)")
     args = p.parse_args()
 
     single = args.single_threaded.lower() in {"true", "1", "yes"}
 
-    converter = WavToSpec(
-        src_dir=args.src_dir,
-        dst_dir=args.dst_dir,
-        file_list=args.file_list,
-        birdset=args.birdset,
-        birdset_split=args.birdset_split,
-        step_size=args.step_size,
-        n_fft=args.nfft,
-        sr=args.sr,
-        take_n_random=args.take_n_random,
-        single_threaded=single,
-        fmt=args.format,
-        mel=not args.linear,
-        n_mels=args.n_mels,
-        json_path=args.json_path,
-        max_workers=args.max_workers,
-    )
+    converter = WavToSpec(src_dir=args.src_dir, dst_dir=args.dst_dir, file_list=args.file_list, birdset=args.birdset, birdset_split=args.birdset_split, step_size=args.step_size, n_fft=args.nfft, sr=args.sr, take_n_random=args.take_n_random, single_threaded=single, fmt=args.format, mel=not args.linear, n_mels=args.n_mels, max_workers=args.max_workers)
     converter.run()
 
 

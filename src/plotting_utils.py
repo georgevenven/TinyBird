@@ -11,13 +11,17 @@ import os
 from typing import Iterable, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
 import torch.nn as nn
 
-DEFAULT_RECON_FIGSIZE: Tuple[float, float] = (12.0, 4.5)  # width, height in inches
+SPEC_FIGSIZE: Tuple[float, float] = (10.0, 6.0)  # matches plot_embedding chunk visuals
+SPEC_DPI = 300
+SPEC_IMSHOW_KW = {"origin": "lower", "aspect": "auto", "interpolation": "none"}
+SPEC_TITLE_KW = {"fontsize": 18, "fontweight": "bold"}
+SPEC_TITLE_Y = 1.15
 DEFAULT_LOSS_FIGSIZE: Tuple[float, float] = (12.0, 10.0)
 LOSS_DPI = 300
-RECON_DPI = 150
 
 TRAIN_COLOR = "royalblue"
 VAL_COLOR = "tomato"
@@ -50,12 +54,42 @@ def _create_overlay(
     return overlay
 
 
-def _create_masked_original(x_patches: torch.Tensor, bool_mask: torch.Tensor) -> torch.Tensor:
-    """Zero out masked patches to visualize which regions were hidden."""
-    masked = x_patches.clone()
-    min_val = masked.min()
-    masked[bool_mask] = min_val - 1.0
-    return masked
+def _mask_flat_to_image(mask_flat: np.ndarray, *, patch_size: Sequence[int], spec_shape: Tuple[int, int]) -> np.ndarray:
+    """Expand a flattened patch mask to the full spectrogram pixel grid."""
+    patch_h, patch_w = patch_size
+    spec_h, spec_w = spec_shape
+    grid_h = spec_h // patch_h
+    grid_w = spec_w // patch_w
+    mask_grid = mask_flat.reshape(grid_h, grid_w)
+    mask_img = np.repeat(np.repeat(mask_grid, patch_h, axis=0), patch_w, axis=1).astype(bool)
+    return mask_img
+
+
+def _imshow_spec(ax: plt.Axes, image: np.ndarray, *, spec_shape: Tuple[int, int], cmap=None) -> None:
+    """Consistently display a spectrogram-sized array."""
+    extent = (0, spec_shape[1], 0, spec_shape[0])
+    ax.imshow(image, extent=extent, cmap=cmap, **SPEC_IMSHOW_KW)
+    ax.set_xlim(0, spec_shape[1])
+    ax.set_ylim(0, spec_shape[0])
+
+
+def _style_spec_ax(ax: plt.Axes, title: str, *, cmap: Optional[str] = None) -> None:
+    """Apply shared TinyBird spectrogram styling to the given axes."""
+    if cmap is not None:
+        ax.images[-1].set_cmap(cmap)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    ax.text(
+        0.5,
+        SPEC_TITLE_Y,
+        title,
+        transform=ax.transAxes,
+        ha="center",
+        va="bottom",
+        **SPEC_TITLE_KW,
+    )
 
 
 def save_reconstruction_plot(
@@ -67,7 +101,7 @@ def save_reconstruction_plot(
     use_amp: bool,
     output_dir: str,
     step_num: int,
-    figsize: Tuple[int, int] = DEFAULT_RECON_FIGSIZE,
+    figsize: Optional[Tuple[int, int]] = None,
     cmap: str = MASK_CMAP,
 ) -> str:
     """
@@ -91,43 +125,54 @@ def save_reconstruction_plot(
 
     bool_mask = bool_mask.reshape(bool_mask.size(0), -1)
     patch_size = config["patch_size"]
+    spec_shape = (config["mels"], config["num_timebins"])
 
     unfold = nn.Unfold(kernel_size=patch_size, stride=patch_size)
     x_patches = unfold(x).transpose(1, 2)
 
-    pred_denorm = _denormalize_predictions(x_patches, pred)
+    # Disable per-patch denormalization so we visualise raw decoder outputs.
+    # pred_denorm = _denormalize_predictions(x_patches, pred)
+    pred_denorm = pred
     overlay_patches = _create_overlay(x_patches, pred_denorm, bool_mask)
 
     overlay_img = _depatchify(overlay_patches, mels=config["mels"], timebins=config["num_timebins"], patch_size=patch_size)
-    masked_img = _depatchify(
-        _create_masked_original(x_patches, bool_mask), mels=config["mels"], timebins=config["num_timebins"], patch_size=patch_size
-    )
 
     x_img = x[0, 0].detach().cpu().numpy()
-    masked_img_np = masked_img[0, 0].detach().cpu().numpy()
     overlay_img_np = overlay_img[0, 0].detach().cpu().numpy()
+    mask_flat_np = bool_mask[0].detach().cpu().numpy().astype(bool)
+    mask_img_np = _mask_flat_to_image(mask_flat_np, patch_size=patch_size, spec_shape=spec_shape)
+
+    masked_display = x_img.copy()
+    masked_display[mask_img_np] = np.nan
+
+    if isinstance(cmap, str):
+        mask_cmap = plt.get_cmap(cmap, 256)
+    else:
+        mask_cmap = cmap
+    if hasattr(mask_cmap, "with_extremes"):
+        mask_cmap = mask_cmap.with_extremes(bad="black")
+    else:
+        mask_cmap = mask_cmap.copy() if hasattr(mask_cmap, "copy") else mask_cmap
+        mask_cmap.set_bad("black")
 
     os.makedirs(output_dir, exist_ok=True)
-    fig = plt.figure(figsize=figsize)
+    fig = plt.figure(figsize=figsize or SPEC_FIGSIZE, dpi=SPEC_DPI)
+    gs = fig.add_gridspec(3, 1, height_ratios=[3, 3, 3], hspace=0.7)
 
-    ax1 = plt.subplot(3, 1, 1)
-    ax1.imshow(x_img, origin="lower", aspect="auto")
-    ax1.set_title("Input Spectrogram")
-    ax1.axis("off")
+    ax1 = fig.add_subplot(gs[0, 0])
+    _imshow_spec(ax1, x_img, spec_shape=spec_shape)
+    _style_spec_ax(ax1, "Input Spectrogram")
 
-    ax2 = plt.subplot(3, 1, 2)
-    ax2.imshow(masked_img_np, origin="lower", aspect="auto", cmap=cmap)
-    ax2.set_title("Original with Mask (black = masked patches)")
-    ax2.axis("off")
+    ax2 = fig.add_subplot(gs[1, 0])
+    _imshow_spec(ax2, masked_display, spec_shape=spec_shape, cmap=mask_cmap)
+    _style_spec_ax(ax2, "Original with Mask (black = masked patches)", cmap=mask_cmap)
 
-    ax3 = plt.subplot(3, 1, 3)
-    ax3.imshow(overlay_img_np, origin="lower", aspect="auto")
-    ax3.set_title("Overlay: Unmasked Original + Masked Predictions")
-    ax3.axis("off")
+    ax3 = fig.add_subplot(gs[2, 0])
+    _imshow_spec(ax3, overlay_img_np, spec_shape=spec_shape)
+    _style_spec_ax(ax3, "Overlay: Unmasked Original + Masked Predictions")
 
-    fig.tight_layout()
     recon_path = os.path.join(output_dir, f"recon_step_{step_num:06d}.png")
-    fig.savefig(recon_path, dpi=RECON_DPI)
+    fig.savefig(recon_path, dpi=SPEC_DPI, bbox_inches="tight")
     plt.close(fig)
 
     return recon_path

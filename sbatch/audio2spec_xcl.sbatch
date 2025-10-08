@@ -3,8 +3,8 @@
 #SBATCH --partition=computelong
 #SBATCH --job-name=tinybird-xcl
 #SBATCH --time=7-00:00:00
-#SBATCH --cpus-per-task=64
-#SBATCH --mem=400G
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=100G
 #SBATCH --output=/home/georgev/TinyBird/logs/tinybird-xcl-%j.out
 #SBATCH --error=/home/georgev/TinyBird/logs/tinybird-xcl-%j.err
 
@@ -37,7 +37,7 @@ cd "$HOME/TinyBird"
 
 # Run all splits; change list if XCL only has some splits
 python -u src/audio2spec.py \
---birdset XCL \
+--birdset XCM \
 --birdset_split "train" \
 --dst_dir "$MY_SCRATCH/specs/" \
 --format pt \
