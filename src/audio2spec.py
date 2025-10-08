@@ -418,15 +418,9 @@ class WavToSpec:
         return files
 
     def _cleanup_birdset_cache(self):
-        if not self._birdset_cache_dirs:
-            return
-        for directory in sorted(self._birdset_cache_dirs, key=lambda p: len(str(p)), reverse=True):
-            try:
-                if directory.exists():
-                    shutil.rmtree(directory, ignore_errors=False)
-            except Exception as exc:
-                logging.error(f"failed to remove cache directory {directory}: {exc}")
-        self._birdset_cache_dirs.clear()
+        # Preserve Hugging Face dataset caches between runs; just clear bookkeeping.
+        if self._birdset_cache_dirs:
+            self._birdset_cache_dirs.clear()
 
     # ──────────────────────────────────────────────────────────────────────
     # public entry

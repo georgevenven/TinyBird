@@ -18,14 +18,10 @@ conda activate /home/georgev/.conda/envs/tinybird
 # --- scratch on Talapas is /scratch/<PIRG>/<USER>, not /gpfs/scratch/<USER>
 PIRG=${PIRG:-gardnerlab}
 MY_SCRATCH=/scratch/${PIRG}/${USER}
-mkdir -p "$MY_SCRATCH/specs" "$MY_SCRATCH/.cache/huggingface"
+mkdir -p "$MY_SCRATCH/specs"
 chmod -R g+rwX "$MY_SCRATCH"
 
-# --- Hugging Face caches to scratch
-export HF_HOME="$MY_SCRATCH/.cache/huggingface"
-export HF_DATASETS_CACHE="$HF_HOME/datasets"
-export HF_HUB_CACHE="$HF_HOME/hub"
-export TRANSFORMERS_CACHE="$HF_HOME/transformers"
+# --- Hugging Face cache: rely on defaults to keep things simple
 
 # --- keep libraries from oversubscribing threads
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
