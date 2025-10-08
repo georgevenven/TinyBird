@@ -37,7 +37,7 @@ cd "$HOME/TinyBird"
 
 # Run all splits; change list if XCL only has some splits
 python -u src/audio2spec.py \
---birdset XCM \
+--birdset "XCM" \
 --birdset_split "train" \
 --dst_dir "$MY_SCRATCH/specs/" \
 --format pt \
