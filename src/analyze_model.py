@@ -87,16 +87,11 @@ def process_file(model, dataset, index, device):
     x_mean = mean_column_over_intervals(x, x_i, N)
 
     def compute_loss(x, x_i, N, start, x_mean, n_blocks):
-
         xs, x_is = model.sample_data(x.clone(), x_i.clone(), N.clone(), n_blocks=n_blocks, start=start)
 
         if n_blocks == 1:
-            # Compare the sampled 1-block slice against the global mean column using the SAME loss function
-            # used elsewhere (model.loss_mse), with a full-True mask.
-            bool_mask = torch.ones_like(xs, dtype=torch.bool)
             x_mean_expanded = x_mean.expand_as(xs)
-            return model.loss_mse(xs, x_mean_expanded, bool_mask)
-
+            return (x_mean_expanded - xs).pow(2).mean(dim=-1)  # (B, T, P)
 
         # Initialize masked_blocks and frac based on sequence length
         if xs.shape[-1] > 3000:
