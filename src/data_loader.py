@@ -1,3 +1,9 @@
+from torch.utils.data import Dataset
+import torch.nn.functional as F
+from pathlib import Path
+import torch
+import random
+
 def batch_size_of(batch):
     if isinstance(batch, torch.Tensor):
         return batch.size(0)
@@ -7,11 +13,6 @@ def batch_size_of(batch):
         return len(batch)
     except Exception:
         raise TypeError(f"Unsupported batch element type for size detection: {type(batch)}")
-from torch.utils.data import Dataset, DataLoader
-import torch.nn.functional as F
-from pathlib import Path
-import torch
-import random
 
 class SpectogramDataset(Dataset):
     def __init__(self, dir, n_mels=128, n_timebins=1024, pad_crop=True):
@@ -87,18 +88,58 @@ class SpectogramDataset(Dataset):
 
         return padded, N
 
+    def pad_vector(self, vec, max_N, pad_value=-1):
+        """Pad 1-D tensor vec to length max_N with pad_value. Returns (padded, length)."""
+        vec = torch.as_tensor(vec)
+        assert vec.ndim == 1, f"Expected 1-D vector, got {vec.shape}"
+        N = vec.shape[0]
+        padded = torch.full((max_N,), pad_value, dtype=vec.dtype)
+        n_copy = min(N, max_N)
+        padded[:n_copy] = vec[:n_copy]
+        return padded, N
+
 
     def __getitem__(self, index):
         path = self.file_dirs[index]   # pick actual .pt path
 
         try:
-            f=torch.load(path, map_location="cpu",weights_only=False)
+            f = torch.load(path, map_location="cpu", weights_only=False)
         except:
             index = random.randint(0, len(self.file_dirs)-1)
             path = self.file_dirs[index]
-            f=torch.load(path, map_location="cpu",weights_only=False)
+            f = torch.load(path, map_location="cpu", weights_only=False)
+
         spec = f['s']
-        chirp_intervals , N  =   self.pad_chirp_intervals(f['chirp_intervals'], self.n_timebins)
+        # Convert to torch if numpy
+        if not isinstance(spec, torch.Tensor):
+            spec = torch.as_tensor(spec)
+
+        # Intervals (Nx2)
+        chirp_int_np = f['chirp_intervals']
+        if isinstance(chirp_int_np, torch.Tensor):
+            chirp_int = chirp_int_np
+        else:
+            chirp_int = torch.as_tensor(chirp_int_np)
+        chirp_intervals, N = self.pad_chirp_intervals(chirp_int, self.n_timebins)
+
+        # Chirp labels (N,)
+        if 'chirp_labels' in f:
+            cl_np = f['chirp_labels']
+            chirp_labels = cl_np if isinstance(cl_np, torch.Tensor) else torch.as_tensor(cl_np)
+            chirp_labels = chirp_labels.to(dtype=torch.int32)
+        else:
+            # Backward compatibility: default to zeros of original N
+            orig_N = chirp_int.shape[0]
+            chirp_labels = torch.zeros((orig_N,), dtype=torch.int32)
+        chirp_labels_pad, N_labels = self.pad_vector(chirp_labels, self.n_timebins, pad_value=-1)
+
+        # Consistency guard
+        if N_labels != N:
+            N = min(N, N_labels)
+            # ensure shapes are correct regardless
+            chirp_intervals = chirp_intervals[:self.n_timebins]
+            chirp_labels_pad = chirp_labels_pad[:self.n_timebins]
+
         filename = path.stem
 
         # Apply z-score normalization
@@ -108,9 +149,9 @@ class SpectogramDataset(Dataset):
             spec = self.crop_or_pad(spec)
             assert spec.shape[0] == self.n_mels and spec.shape[1] == self.n_timebins
 
-        spec = spec.unsqueeze(0) # since we are dealing with image data, conv requires channels 
+        spec = spec.unsqueeze(0)
 
-        return spec, chirp_intervals, N , filename 
+        return spec, chirp_intervals, chirp_labels_pad, N, filename
 
     def __len__(self):
         return len(self.file_dirs)

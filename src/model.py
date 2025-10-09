@@ -135,7 +135,7 @@ class TinyBird(nn.Module):
 
         return x_new, xi_new
         
-    def sample_data(self, x: torch.Tensor, xi: torch.Tensor, N: torch.Tensor, n_blocks: int):
+    def sample_data(self, x: torch.Tensor, xi: torch.Tensor, N: torch.Tensor, n_blocks: int, start: int = -1):
         """
         Sample random contiguous windows of chirp blocks.
         
@@ -144,6 +144,7 @@ class TinyBird(nn.Module):
             xi: Chirp boundaries (B, N_max, 2)
             N: Valid chirp counts per item (B,)
             n_blocks: Number of adjacent blocks to sample
+            start: Start index for sampling (or -1 for random) [ensures n_blocks contiguous blocks]
         
         Returns:
             x_out: Windowed spectrograms (B, C, H, max_width)
@@ -156,8 +157,11 @@ class TinyBird(nn.Module):
         n_blocks = int(min(n_blocks, N.min().item()))  # ensure feasible for all items
 
         # Per item in batch start index in [0, N[b]-n_blocks]
-        start_max = (N.squeeze(1) - n_blocks + 1).clamp_min(1)            # (B,)
-        start = (torch.rand(B, device=device) * start_max.float()).floor().to(device=device,dtype=torch.long)  # (B,)
+        if start >= 0:
+            start = torch.full((B,), int(start), device=device, dtype=torch.long)
+        else:
+            start_max = (N.squeeze(1) - n_blocks + 1).clamp_min(1)
+            start = (torch.rand(B, device=device) * start_max.float()).floor().to(device=device, dtype=torch.long)
         end   = start + n_blocks                                            # (B,)
 
         b_ix = torch.arange(B, device=device)

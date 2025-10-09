@@ -13,3 +13,10 @@ dependencies = [
     "tqdm>=4.67.1",
     "wandb>=0.19.2"
 ]
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.format]
+skip-magic-trailing-comma = true
+quote-style = "preserve"

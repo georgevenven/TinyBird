@@ -312,7 +312,9 @@ class Trainer():
         if torch.cuda.is_available() and not self._mem_reported:
             torch.cuda.reset_peak_memory_stats(self.device)
 
-        spectrograms, chirp_intervals, N , _ = batch
+
+
+        spectrograms, chirp_intervals, _ , N , _ = batch
         x   = spectrograms.to(self.device, non_blocking=True).float()     # (B, 1, H, W)
         x_i = chirp_intervals.to(self.device, non_blocking=True)  # (B, N, 2)
         N   = N.to(self.device, non_blocking=True)                # (B, 1) # number of chirp intervals
@@ -412,7 +414,7 @@ class Trainer():
 
     def save_reconstruction(self, batch, step_num):
         """Save reconstruction visualization comparing input and output spectrograms."""
-        spectrograms, chirp_intervals, N, _ = batch
+        spectrograms, chirp_intervals, _ , N, _ = batch
         x = spectrograms.to(self.device, non_blocking=True).float()       # (B, 1, H, W)
         x_i = chirp_intervals.to(self.device, non_blocking=True)  # (B, N, 2)
         N = N.to(self.device, non_blocking=True)                  # (B, 1) # number of chirp intervals
@@ -565,7 +567,7 @@ class Trainer():
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
                     # optional: quick mitigation — drop half the batch once and retry
-                    spectrograms, chirp_intervals, N, filenames = train_batch
+                    spectrograms, chirp_intervals, _ , N, filenames = train_batch
                     if spectrograms.size(0) > 1:
                         half = spectrograms.size(0) // 2
                         train_batch = (spectrograms[:half], chirp_intervals[:half], N[:half], filenames[:half])
@@ -612,16 +614,16 @@ class Trainer():
                 self.save_reconstruction(val_batch, step_num)
                 wandb.log({
                     "lr": float(current_lr),
-                    "train/loss_step": float(train_loss),
-                    "train/ema_loss_step": float(self.ema_train_loss if self.ema_train_loss is not None else train_loss),
+                    "train/loss": float(train_loss),
+                    "train/ema_loss": float(self.ema_train_loss if self.ema_train_loss is not None else train_loss),
                     "val/loss": float(val_loss),
                     "val/ema_loss": float(self.ema_val_loss),
                 }, step=int(step_num), commit=True)
             else :
                 wandb.log({
                     "lr": float(current_lr),
-                    "train/loss_step": float(train_loss),
-                    "train/ema_loss_step": float(self.ema_train_loss if self.ema_train_loss is not None else train_loss),
+                    "train/loss": float(train_loss),
+                    "train/ema_loss": float(self.ema_train_loss if self.ema_train_loss is not None else train_loss),
                 }, step=int(step_num), commit=True)
  
         # Save final model weights

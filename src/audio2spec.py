@@ -1,42 +1,36 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # audio2spec.py  ‑  simple .wav /.mp3/.ogg ➜ spectrogram (.npz / .pt) converter
 # ──────────────────────────────────────────────────────────────────────────────
-import os, json, time, gc, argparse, logging, random, psutil, signal, sys
+import os
+import json
+import time
+import gc
+import argparse
+import logging
+import random
+import psutil
+import signal
+import sys
 import multiprocessing as mp
 from pathlib import Path
 from typing import Tuple, Dict, List, Any, Optional
 
 import numpy as np
 import librosa
-import librosa.display                       # noqa: F401  (kept for future plots)
+import librosa.display  # noqa: F401  (kept for future plots)
 from tqdm import tqdm
 
 from scipy import ndimage
 import scipy.signal as ss
 
-
-def high_pass_filter(audio_signal, sample_rate=32000, cutoff=512, order=5):
-    """Apply a high-pass filter to the audio signal."""
-    sos = ss.butter(order, cutoff, btype='high', fs=sample_rate, output='sos')
-    return ss.sosfilt(sos, audio_signal, axis=-1)
-
-# ══════════════════════════════════════════════════════════════════════════════
-# helper: STFT → log‑magnitude
-# ══════════════════════════════════════════════════════════════════════════════
 def compute_spectrogram(
-    wav: np.ndarray,
-    sr: int,
-    n_fft: int,
-    hop: int,
-    *,
-    mel: bool,
-    n_mels: int
-) -> tuple[np.ndarray, np.ndarray]:
+    wav: np.ndarray, sr: int, n_fft: int, hop: int, *, mel: bool, n_mels: int, s_ref: float = None
+) -> tuple[np.ndarray, np.ndarray, float]:
     """
     Returns log‑magnitude spectrogram in **dB**.
-    • linear STFT  → shape (n_fft//2 + 1, T)   (default 513 × T for n_fft=1024)  
+    • linear STFT  → shape (n_fft//2 + 1, T)   (default 513 × T for n_fft=1024)
     • mel filter‑bank → shape (n_mels, T)
-    
+
     Optimized version with minimal dtype conversions and efficient power calculation.
     """
     # wav uses default dtype from the loader
@@ -47,7 +41,7 @@ def compute_spectrogram(
             sr=sr,
             n_fft=n_fft,
             hop_length=hop,
-            power=2.0,         # power‑spectrogram
+            power=2.0,  # power‑spectrogram
             n_mels=n_mels,
             fmin=20,
             fmax=sr // 2,
@@ -60,7 +54,7 @@ def compute_spectrogram(
             n_fft=n_fft,
             hop_length=hop,
             window="hann",
-            dtype=np.complex64  # use complex64 for memory efficiency
+            dtype=np.complex64,  # use complex64 for memory efficiency
         )
         # Efficient power calculation using real and imaginary parts
         S = stft_complex.real**2 + stft_complex.imag**2
@@ -69,12 +63,19 @@ def compute_spectrogram(
 
     # Convert to dB with efficient reference calculation
     frame_ms = hop / sr * 1000.0
-    S_db = librosa.power_to_db(S, ref=np.max(S), top_db=None)
-    chirp_intervals, _ , _ = classify_loudness(S_db, frame_ms)
-    return S_db, np.asarray(chirp_intervals, dtype=np.int32).reshape(-1, 2)
 
-def classify_loudness(spec_db: np.ndarray, frame_ms: float, merge_ms: float = 200.0) -> tuple[list[tuple[int, int]], np.ndarray, float]:
-    
+    if s_ref is None:
+        ref = np.max(S)
+    else:
+        ref = s_ref
+
+    S_db = librosa.power_to_db(S, ref=ref, top_db=None)
+    chirp_intervals, _, _ = classify_loudness(S_db, frame_ms)
+    return S_db, np.asarray(chirp_intervals, dtype=np.int32).reshape(-1, 2), ref
+
+def classify_loudness(
+    spec_db: np.ndarray, frame_ms: float, merge_ms: float = 200.0
+) -> tuple[list[tuple[int, int]], np.ndarray, float]:
     def compute_loudness(spec_db: np.ndarray) -> np.ndarray:
         spec_power = np.power(10.0, spec_db / 10.0, dtype=np.float64)
         loudness = np.sum(np.log1p(spec_power), axis=0, dtype=np.float64)
@@ -114,12 +115,12 @@ def classify_loudness(spec_db: np.ndarray, frame_ms: float, merge_ms: float = 20
         mu = np.cumsum(p * (edges[:-1] + edges[1:]) * 0.5)
         mu_t = mu[-1]
         # between-class variance
-        sigma_b2 = (mu_t * w_cum - mu)**2 / (w_cum * (1.0 - w_cum) + 1e-12)
+        sigma_b2 = (mu_t * w_cum - mu) ** 2 / (w_cum * (1.0 - w_cum) + 1e-12)
         k = np.nanargmax(sigma_b2)
         # threshold is bin edge between k and k+1
-        return (edges[k] + edges[k+1]) * 0.5
+        return (edges[k] + edges[k + 1]) * 0.5
 
-    def intervals_from_mask(mask: np.ndarray) -> list[tuple[int,int]]:
+    def intervals_from_mask(mask: np.ndarray) -> list[tuple[int, int]]:
         """Turn a boolean mask (T,) into a list of (start,end) with end exclusive."""
         out = []
         in_run = False
@@ -140,7 +141,7 @@ def classify_loudness(spec_db: np.ndarray, frame_ms: float, merge_ms: float = 20
     thr = otsu_threshold_lower(loudness)
     chirp_intervals = intervals_from_mask((loudness > thr))
 
-    # Merge chirps that are closer than 30 ms apart
+    # Merge chirps that are closer than merge_ms apart
     gap_frames = max(1, int(round(merge_ms / max(frame_ms, 1e-9))))
     # Preserve input order (already sorted); do not sort intervals
     ints = list(chirp_intervals)
@@ -158,9 +159,6 @@ def classify_loudness(spec_db: np.ndarray, frame_ms: float, merge_ms: float = 20
     return merged_chirps, loudness, float(thr)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# stats helpers
-# ──────────────────────────────────────────────────────────────────────────────
 def _reduce_stats(x: np.ndarray) -> dict:
     x = np.asarray(x, dtype=np.float64)
     if x.size == 0:
@@ -206,7 +204,9 @@ def compute_chirp_stats(chirp_intervals: np.ndarray, frame_ms: float) -> dict:
         chirp_intervals = np.empty((0, 2), dtype=np.int32)
     ci = np.asarray(chirp_intervals, dtype=np.int64).reshape(-1, 2)
     # durations per chirp in array positions (columns), including 1 for separator token
-    dur_cols = ((ci[:, 1] - ci[:, 0]).astype(np.int64) + 1).astype(np.float64) if ci.size else np.empty((0,), dtype=np.float64)
+    dur_cols = (
+        ((ci[:, 1] - ci[:, 0]).astype(np.int64) + 1).astype(np.float64) if ci.size else np.empty((0,), dtype=np.float64)
+    )
 
     # Compute max chirp length and its start column
     if dur_cols.size:
@@ -251,44 +251,6 @@ def compute_chirp_stats(chirp_intervals: np.ndarray, frame_ms: float) -> dict:
     return stats
 
 
-def _agg_from_rows(rows: list[dict], key: str) -> dict:
-    """Aggregate count/sum/sumsq/min/max across rows for a given key.
-    Each row[key] is a dict with the same fields.
-    """
-    total_count = 0
-    total_sum = 0.0
-    total_sumsq = 0.0
-    mins = []
-    maxs = []
-    for r in rows:
-        s = r[key]
-        c = int(s["count"]) if np.isfinite(s.get("count", 0)) else 0
-        total_count += c
-        total_sum += float(s.get("sum", 0.0))
-        total_sumsq += float(s.get("sumsq", 0.0))
-        if np.isfinite(s.get("min", np.nan)):
-            mins.append(float(s["min"]))
-        if np.isfinite(s.get("max", np.nan)):
-            maxs.append(float(s["max"]))
-    if total_count == 0:
-        return {
-            "count": 0,
-            "mean": float("nan"),
-            "std": float("nan"),
-            "min": float("nan"),
-            "max": float("nan"),
-        }
-    mu = total_sum / total_count
-    var = max(0.0, total_sumsq / total_count - mu * mu)
-    return {
-        "count": int(total_count),
-        "mean": float(mu),
-        "std": float(np.sqrt(var)),
-        "min": float(np.min(mins)) if mins else float("nan"),
-        "max": float(np.max(maxs)) if maxs else float("nan"),
-    }
-
-
 def aggregate_and_print_summary(summary_rows: list[dict], dst_dir: Path) -> None:
     """Save per-file stats to summary.npy and print global aggregates."""
     # Save rows for later analysis
@@ -302,23 +264,18 @@ def aggregate_and_print_summary(summary_rows: list[dict], dst_dir: Path) -> None
     total_chirps = int(sum(r.get("num_chirps", 0) for r in summary_rows))
     print(f"\nSummary across {total_files} files (total chirps: {total_chirps}):")
 
-    # Single-chirp duration aggregate
-    dur_rows = [{"count": r["dur"]["count"],
-                 "sum": r["dur"]["sum"],
-                 "sumsq": r["dur"]["sumsq"],
-                 "min": r["dur"]["min"],
-                 "max": r["dur"]["max"]} for r in summary_rows]
-    dur_agg = _agg_from_rows([{"count": d["count"], "sum": d["sum"], "sumsq": d["sumsq"], "min": d["min"], "max": d["max"]} for d in dur_rows], key=None) if False else None
     # simpler: directly compute from r["dur"] structures
     total_count = sum(int(r["dur"]["count"]) for r in summary_rows)
     total_sum = sum(float(r["dur"]["sum"]) for r in summary_rows)
     total_sumsq = sum(float(r["dur"]["sumsq"]) for r in summary_rows)
-    mins = [float(r["dur"]["min"]) for r in summary_rows if np.isfinite(r["dur"]["min"]) ]
-    maxs = [float(r["dur"]["max"]) for r in summary_rows if np.isfinite(r["dur"]["max"]) ]
+    mins = [float(r["dur"]["min"]) for r in summary_rows if np.isfinite(r["dur"]["min"])]
+    maxs = [float(r["dur"]["max"]) for r in summary_rows if np.isfinite(r["dur"]["max"])]
     if total_count > 0:
         mu = total_sum / total_count
         var = max(0.0, total_sumsq / total_count - mu * mu)
-        print(f"Single chirp duration (cols): mean={mu:.2f}, std={np.sqrt(var):.2f}, min={np.min(mins) if mins else float('nan'):.2f}, max={np.max(maxs) if maxs else float('nan'):.2f}, count={total_count}")
+        print(
+            f"Single chirp duration (cols): mean={mu:.2f}, std={np.sqrt(var):.2f}, min={np.min(mins) if mins else float('nan'):.2f}, max={np.max(maxs) if maxs else float('nan'):.2f}, count={total_count}"
+        )
     else:
         print("Single chirp duration (cols): no data")
 
@@ -335,18 +292,153 @@ def aggregate_and_print_summary(summary_rows: list[dict], dst_dir: Path) -> None
             continue
         s = sum(float(x["sum"]) for x in rows_L)
         ss = sum(float(x["sumsq"]) for x in rows_L)
-        mins = [float(x["min"]) for x in rows_L if np.isfinite(x["min"]) ]
-        maxs = [float(x["max"]) for x in rows_L if np.isfinite(x["max"]) ]
+        mins = [float(x["min"]) for x in rows_L if np.isfinite(x["min"])]
+        maxs = [float(x["max"]) for x in rows_L if np.isfinite(x["max"])]
         mu = s / c
         var = max(0.0, ss / c - mu * mu)
         mn = np.min(mins) if mins else float('nan')
         mx = np.max(maxs) if maxs else float('nan')
         print(f"{L}\t{mu:.2f}\t{np.sqrt(var):.2f}\t{mn:.2f}\t{mx:.2f}\t{c}")
 
+def _detect_and_load_audio(fp: Path, target_sr: int, channel: int = -1) -> tuple[np.ndarray, int, int]:
+    """
+    Load audio from `fp` and return (wav, actual_sr, channel_count).
+    The logic mirrors the previous implementation to preserve identical behavior.
+    """
 
-# ══════════════════════════════════════════════════════════════════════════════
-# standalone worker function (picklable)
-# ══════════════════════════════════════════════════════════════════════════════
+    def high_pass_filter(audio_signal, sample_rate=32000, cutoff=512, order=5):
+        """Apply a high-pass filter to the audio signal."""
+        sos = ss.butter(order, cutoff, btype='high', fs=sample_rate, output='sos')
+        return ss.sosfilt(sos, audio_signal, axis=-1)
+
+    try:
+        duration_sec = librosa.get_duration(path=fp)
+        if duration_sec * 1000 < 0:  # placeholder, checked again after load with min_len_ms
+            pass
+    except Exception:
+        # Fallback: if duration check fails, proceed with loading
+        pass
+
+    # detect native sample rate without loading audio
+    try:
+        native_sr = librosa.get_samplerate(fp)
+    except Exception:
+        native_sr = None
+    needs_resampling = (native_sr != target_sr) if native_sr else True
+
+    channel_count = librosa.get_channel_count(fp)
+
+    # Load once; let librosa resample if needed. Handle channel selection uniformly.
+    mono = channel == -1
+    wav, actual_sr = librosa.load(fp, sr=target_sr if needs_resampling else None, mono=mono)
+    if not mono:
+        wav = wav[:, channel]
+
+    # If we skipped resampling above but SR still mismatches, resample now.
+    if not needs_resampling and actual_sr != target_sr:
+        wav = librosa.resample(wav, orig_sr=actual_sr, target_sr=target_sr)
+        actual_sr = target_sr
+
+    # Apply high-pass filter before computing spectrogram (unchanged)
+    wav = high_pass_filter(wav, sample_rate=actual_sr, cutoff=512, order=5)
+
+    # Return too_short=False here; caller will decide using min_len_ms
+    return wav, actual_sr, channel_count
+
+
+def _save_outputs_pt_or_npz(
+    fmt: str, dst_dir: Path, stem: str, S: np.ndarray, chirp_intervals: np.ndarray, labels: np.ndarray, chirp_labels: np.ndarray
+) -> None:
+    if fmt == "pt":
+        import torch
+
+        out = dst_dir / (stem + ".pt")
+        torch.save(
+            {
+                "s": torch.from_numpy(S),
+                "chirp_intervals": torch.from_numpy(chirp_intervals),
+                "labels": torch.from_numpy(labels),
+                "chirp_labels": torch.from_numpy(chirp_labels),
+            },
+            out,
+        )
+    else:
+        out = dst_dir / (stem + ".npz")
+        np.savez(out, s=S, chirp_intervals=chirp_intervals, labels=labels, chirp_labels=chirp_labels)
+
+def _process_core(
+    fp: Path,
+    dst_dir: Path,
+    sr: int,
+    n_fft: int,
+    step: int,
+    use_mel: bool,
+    n_mels: int,
+    min_len_ms: int,
+    min_timebins: int,
+    fmt: str,
+    lab_map: Dict[str, List[Tuple[int, int, int]]],
+    remake: bool,
+) -> Optional[dict]:
+    try:
+        # ─── check if output already exists ─────────────────────────
+        out_path = dst_dir / (fp.stem + (".pt" if fmt == "pt" else ".npz"))
+        if out_path.exists() and not remake:
+            return {"file": str(fp), "skipped": True}
+
+        # ─── fast duration check before loading ─────────────────────
+        try:
+            duration_sec = librosa.get_duration(path=fp)
+            if duration_sec * 1000 < min_len_ms:
+                return {"file": str(fp), "skipped": True}
+        except Exception:
+            # Fallback: if duration check fails, proceed with loading
+            pass
+
+        def spectrogram(fp, sr, n_fft, step, use_mel, n_mels, channel=-1, s_ref=None):
+            wav, actual_sr, channel_count = _detect_and_load_audio(fp, sr, channel)
+            S_db, chirps, ref = compute_spectrogram(
+                wav, actual_sr, n_fft, step, mel=use_mel, n_mels=n_mels, s_ref=s_ref
+            )
+            return S_db, chirps, ref, actual_sr, channel_count
+
+        S, chirp_intervals, s_ref, actual_sr, channel_count = spectrogram(fp, sr, n_fft, step, use_mel, n_mels)
+        if channel_count > 1 and (chirp_intervals is not None and len(chirp_intervals) > 0):
+            S0, _, _, _, _ = spectrogram(fp, sr, n_fft, step, use_mel, n_mels, channel=0, s_ref=s_ref)
+            S1, _, _, _, _ = spectrogram(fp, sr, n_fft, step, use_mel, n_mels, channel=1, s_ref=s_ref)
+            P0 = librosa.db_to_power(S0, ref=1.0)
+            P1 = librosa.db_to_power(S1, ref=1.0)
+            chrip_labels = np.zeros((chirp_intervals.shape[0],), dtype=np.int32)
+            for i, (cs, ce) in enumerate(chirp_intervals):
+                e_l = float(np.sum(P0[:, cs:ce], dtype=np.float64))
+                e_r = float(np.sum(P1[:, cs:ce], dtype=np.float64))
+                chrip_labels[i] = 1 if e_r > e_l else 0
+        else:
+            chrip_labels = np.zeros((chirp_intervals.shape[0],), dtype=np.int32)
+
+        if S.shape[1] < min_timebins:
+            return {"file": str(fp), "skipped": True}
+
+        # labels identical to before
+        labels = np.zeros(S.shape[1], dtype=np.int32)
+        for lab, tb_on, tb_off in lab_map.get(fp.stem, []):
+            labels[tb_on:tb_off] = lab
+
+        # stats identical to before
+        frame_ms = 1000.0 * step / actual_sr
+        stats = compute_chirp_stats(chirp_intervals, frame_ms)
+        file_stats = {"file": Path(fp).stem, "path": str(fp), **stats}
+
+        # ─── save outputs ────────────────────────────────────────────
+        _save_outputs_pt_or_npz(fmt, dst_dir, fp.stem, S, chirp_intervals, labels, chrip_labels)
+
+        # free memory fast (local scope GC will handle)
+        return file_stats
+
+    except Exception as e:
+        return {"error": f"{fp}: {e}", "file": str(fp)}
+
+
 def process_audio_file(
     fp: Path,
     dst_dir: Path,
@@ -368,89 +460,23 @@ def process_audio_file(
     If remake is False, skips files that already exist; otherwise overwrites.
     """
     try:
-        # ─── check if output already exists ─────────────────────────
-        if fmt == "pt":
-            out_path = dst_dir / (fp.stem + ".pt")
-        else:
-            out_path = dst_dir / (fp.stem + ".npz")
-
-        if out_path.exists() and not remake:
-            return {"file": str(fp), "skipped": True}
-
-        # ─── fast duration check before loading ─────────────────────
-        try:
-            duration_sec = librosa.get_duration(path=fp)
-            if duration_sec * 1000 < min_len_ms:
-                skipped_counter.value += 1
-                return {"file": str(fp), "skipped": True}
-        except Exception:
-            # Fallback: if duration check fails, proceed with loading
-            pass
-
-        # ─── smart loading with sample rate detection ────────────────
-        # First, detect native sample rate without loading audio
-        try:
-            native_sr = librosa.get_samplerate(fp)
-            needs_resampling = (native_sr != sr)
-        except Exception:
-            # Fallback: assume resampling needed
-            needs_resampling = True
-            native_sr = None
-
-        # Load audio with optimal settings
-        if needs_resampling:
-            wav, actual_sr = librosa.load(fp, sr=sr, mono=True)
-        else:
-            # Load at native rate, avoid unnecessary resampling
-            wav, actual_sr = librosa.load(fp, sr=None, mono=True)
-            if actual_sr != sr:
-                # Resample only if detection was wrong
-                wav = librosa.resample(wav, orig_sr=actual_sr, target_sr=sr)
-                actual_sr = sr
-
-        # Apply high-pass filter before computing spectrogram
-        wav = high_pass_filter(wav, sample_rate=actual_sr, cutoff=512, order=5)
-
-        # Double-check length after loading (in case duration detection was inaccurate)
-        if len(wav) / actual_sr * 1000 < min_len_ms:
+        result = _process_core(
+            fp=fp,
+            dst_dir=dst_dir,
+            sr=sr,
+            n_fft=n_fft,
+            step=step,
+            use_mel=use_mel,
+            n_mels=n_mels,
+            min_len_ms=min_len_ms,
+            min_timebins=min_timebins,
+            fmt=fmt,
+            lab_map=lab_map,
+            remake=remake,
+        )
+        if isinstance(result, dict) and (result.get("skipped") or result.get("error")):
             skipped_counter.value += 1
-            return {"file": str(fp), "skipped": True}
-
-        # ─── spectrogram ─────────────────────────────────────────────
-        S, chirp_intervals = compute_spectrogram(
-            wav, actual_sr, n_fft, step,
-            mel=use_mel, n_mels=n_mels)
-
-        if S.shape[1] < min_timebins:
-            skipped_counter.value += 1
-            return {"file": str(fp), "skipped": True}
-
-        labels = np.zeros(S.shape[1], dtype=np.int32)
-        for lab, tb_on, tb_off in lab_map.get(fp.stem, []):
-            labels[tb_on:tb_off] = lab
-
-        frame_ms = 1000.0 * step / actual_sr
-        stats = compute_chirp_stats(chirp_intervals, frame_ms)
-        file_stats = {"file": Path(fp).stem, "path": str(fp), **stats}
-
-        # ─── optimized output with minimal conversions ───────────────
-        if fmt == "pt":
-            import torch
-            out = dst_dir / (fp.stem + ".pt")
-            # S uses default dtype, avoid unnecessary conversion
-            torch.save({"s": torch.from_numpy(S),
-                        "chirp_intervals": torch.from_numpy(chirp_intervals),
-                        "labels": torch.from_numpy(labels)}, out)
-        else:  # npz (uncompressed)
-            out = dst_dir / (fp.stem + ".npz")
-            # S uses default dtype from compute_spectrogram
-            np.savez(out, s=S, chirp_intervals=chirp_intervals, labels=labels)
-
-        # free memory fast in workers
-        del wav, S, labels
-        gc.collect()
-        return file_stats
-
+        return result
     except Exception as e:
         skipped_counter.value += 1
         return {"error": f"{fp}: {e}", "file": str(fp)}
@@ -463,23 +489,22 @@ def calculate_optimal_workers(total_files: int, avg_file_size_mb: float = 50) ->
     """
     mem = psutil.virtual_memory()
     available_gb = mem.available / (1024**3)
-    
+
     # Reserve 2GB for system + main process
     worker_memory_gb = available_gb - 2.0
     if worker_memory_gb <= 0:
         return 1
-    
+
     # Estimate memory per worker (base overhead + file processing)
     memory_per_worker_mb = 200 + avg_file_size_mb
     max_workers_by_memory = int(worker_memory_gb * 1024 / memory_per_worker_mb)
-    
+
     # Don't exceed CPU cores
     max_workers_by_cpu = mp.cpu_count()
-    
+
     # Use conservative approach
     optimal = min(max_workers_by_memory, max_workers_by_cpu, total_files)
     return max(1, optimal)
-
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -534,7 +559,7 @@ class WavToSpec:
         # Remove unpicklable Manager().Value - will create in run() if needed
 
         self.audio_files = self._gather_files()
-        
+
         # Save audio parameters to destination directory
         self._save_audio_params()
 
@@ -549,11 +574,11 @@ class WavToSpec:
                 # Allow [ {...}, {...} ]    OR    {"filename": ...}    OR   NDJSON
                 to_parse = text.strip()
                 items = []
-                if to_parse.startswith('['):                       # big list
+                if to_parse.startswith('['):  # big list
                     items = json.loads(to_parse)
-                elif to_parse.startswith('{'):                     # single object
+                elif to_parse.startswith('{'):  # single object
                     items = [json.loads(to_parse)]
-                else:                                              # NDJSON
+                else:  # NDJSON
                     items = [json.loads(line) for line in to_parse.splitlines() if line.strip()]
 
                 for jo in items:
@@ -562,10 +587,10 @@ class WavToSpec:
                     tmp = []
                     for lab, spans in jo.get("syllable_labels", {}).items():
                         for on, off in spans:
-                            tb_on  = int(round(on  * 1e3 / hop_ms))
+                            tb_on = int(round(on * 1e3 / hop_ms))
                             tb_off = int(round(off * 1e3 / hop_ms))
                             tmp.append((int(lab), tb_on, tb_off))
-                    self.lab_map[Path(fname).stem] = tmp            # key on *stem*
+                    self.lab_map[Path(fname).stem] = tmp  # key on *stem*
         else:
             self.lab_map = {}
 
@@ -574,20 +599,13 @@ class WavToSpec:
     # ──────────────────────────────────────────────────────────────────────
     def _setup_logging(self) -> None:
         logging.basicConfig(
-            filename="error_log.log",
-            level=logging.ERROR,
-            format="%(asctime)s - %(levelname)s - %(message)s"
+            filename="error_log.log", level=logging.ERROR, format="%(asctime)s - %(levelname)s - %(message)s"
         )
 
     def _save_audio_params(self) -> None:
         """Save audio processing parameters to JSON file in destination directory."""
-        params = {
-            "sr": self.sr,
-            "mels": self.n_mels,
-            "hop_size": self.step,
-            "fft": self.n_fft
-        }
-        
+        params = {"sr": self.sr, "mels": self.n_mels, "hop_size": self.step, "fft": self.n_fft}
+
         params_file = self.dst_dir / "audio_params.json"
         with open(params_file, 'w') as f:
             json.dump(params, f, indent=2)
@@ -597,11 +615,7 @@ class WavToSpec:
             files = [Path(line.strip()) for line in self.file_list.read_text().splitlines() if line.strip()]
         else:
             exts = (".wav", ".mp3", ".ogg", ".flac")
-            files = [
-                Path(root) / f
-                for root, _, fs in os.walk(self.src_dir)
-                for f in fs if f.lower().endswith(exts)
-            ]
+            files = [Path(root) / f for root, _, fs in os.walk(self.src_dir) for f in fs if f.lower().endswith(exts)]
 
         if not files:
             print("no audio files matched ‑ nothing to do.")
@@ -617,7 +631,7 @@ class WavToSpec:
     # ──────────────────────────────────────────────────────────────────────
     def run(self) -> None:
         if not self.audio_files:
-            return                       # exit 0, no fuss
+            return  # exit 0, no fuss
 
         # Set up signal handler for graceful shutdown
         original_sigint_handler = signal.signal(signal.SIGINT, self._signal_handler)
@@ -633,13 +647,22 @@ class WavToSpec:
                 for fp in self.audio_files:
                     result = self._safe_process(fp)
                     if not isinstance(result, dict):
-                        pbar.update(); continue
+                        pbar.update()
+                        continue
                     if result.get("error"):
-                        error_count += 1; skipped_count += 1; logging.error(result["error"]) ; pbar.update(); continue
+                        error_count += 1
+                        skipped_count += 1
+                        logging.error(result["error"])
+                        pbar.update()
+                        continue
                     if result.get("skipped"):
-                        skipped_count += 1; pbar.update(); continue
+                        skipped_count += 1
+                        pbar.update()
+                        continue
                     summary_rows.append(result)
-                    print(f"MAX CHIRP: len={result.get('max_chirp_len_cols', -1)} cols, start_col={result.get('max_chirp_start_col', -1)}, file={result.get('file')}")
+                    print(
+                        f"MAX CHIRP: len={result.get('max_chirp_len_cols', -1)} cols, start_col={result.get('max_chirp_start_col', -1)}, file={result.get('file')}"
+                    )
                     pbar.update()
 
             else:
@@ -647,10 +670,14 @@ class WavToSpec:
                 optimal_workers = calculate_optimal_workers(len(self.audio_files))
                 if self.max_workers is not None:
                     num_workers = min(self.max_workers, optimal_workers)
-                    print(f"Using {num_workers} workers (limited by max_workers={self.max_workers}, optimal would be {optimal_workers})")
+                    print(
+                        f"Using {num_workers} workers (limited by max_workers={self.max_workers}, optimal would be {optimal_workers})"
+                    )
                 else:
                     num_workers = optimal_workers
-                print(f"Workers: {num_workers} (CPU cores: {mp.cpu_count()}, Available RAM: {psutil.virtual_memory().available // (1024**3):.1f}GB)")
+                print(
+                    f"Workers: {num_workers} (CPU cores: {mp.cpu_count()}, Available RAM: {psutil.virtual_memory().available // (1024**3):.1f}GB)"
+                )
 
                 ctx = mp.get_context('spawn')  # Use spawn for better isolation
                 mgr = ctx.Manager()
@@ -658,9 +685,18 @@ class WavToSpec:
 
                 # Prepare worker arguments
                 worker_args = (
-                    self.dst_dir, self.sr, self.n_fft, self.step,
-                    self.use_mel, self.n_mels, self.min_len_ms,
-                    self.min_timebins, self.fmt, self.lab_map, skipped_counter, self.remake
+                    self.dst_dir,
+                    self.sr,
+                    self.n_fft,
+                    self.step,
+                    self.use_mel,
+                    self.n_mels,
+                    self.min_len_ms,
+                    self.min_timebins,
+                    self.fmt,
+                    self.lab_map,
+                    skipped_counter,
+                    self.remake,
                 )
 
                 failed_files = []
@@ -668,16 +704,13 @@ class WavToSpec:
                 with ctx.Pool(
                     processes=num_workers,
                     maxtasksperchild=10,  # Lower value to prevent memory accumulation
-                    initargs=()
+                    initargs=(),
                 ) as pool:
-
                     # Use imap_unordered for better memory control
                     task_args = [(fp,) + worker_args for fp in self.audio_files]
 
                     try:
-                        for i, result in enumerate(pool.imap_unordered(
-                            self._worker_wrapper, task_args, chunksize=1
-                        )):
+                        for i, result in enumerate(pool.imap_unordered(self._worker_wrapper, task_args, chunksize=1)):
                             if isinstance(result, dict):
                                 if result.get("error"):
                                     failed_files.append(result["error"])  # keep string for retry parsing
@@ -685,7 +718,9 @@ class WavToSpec:
                                 elif result.get("skipped"):
                                     pass  # count later from mgr counter
                                 else:
-                                    print(f"MAX CHIRP: len={result.get('max_chirp_len_cols', -1)} cols, start_col={result.get('max_chirp_start_col', -1)}, file={result.get('file')}")
+                                    print(
+                                        f"MAX CHIRP: len={result.get('max_chirp_len_cols', -1)} cols, start_col={result.get('max_chirp_start_col', -1)}, file={result.get('file')}"
+                                    )
                                     summary_rows.append(result)
                             pbar.update()
 
@@ -716,11 +751,15 @@ class WavToSpec:
                             result = self._safe_process(fp)
                             if isinstance(result, dict):
                                 if result.get("error"):
-                                    error_count += 1; skipped_count += 1; logging.error(result["error"])
+                                    error_count += 1
+                                    skipped_count += 1
+                                    logging.error(result["error"])
                                 elif result.get("skipped"):
                                     skipped_count += 1
                                 else:
-                                    print(f"MAX CHIRP: len={result.get('max_chirp_len_cols', -1)} cols, start_col={result.get('max_chirp_start_col', -1)}, file={result.get('file')}")
+                                    print(
+                                        f"MAX CHIRP: len={result.get('max_chirp_len_cols', -1)} cols, start_col={result.get('max_chirp_start_col', -1)}, file={result.get('file')}"
+                                    )
                                     summary_rows.append(result)
                                     skipped_count -= 1  # Successfully processed on retry
 
@@ -738,13 +777,13 @@ class WavToSpec:
         print(f"Total skipped  : {skipped_count}")
         if error_count:
             print(f"Total errors   : {error_count}")
-    
+
     def _signal_handler(self, signum, frame):
         """Handle graceful shutdown on interrupt signals"""
         print(f"\nReceived signal {signum}, initiating graceful shutdown...")
         # The actual cleanup will be handled in the run() method
         raise KeyboardInterrupt()
-    
+
     @staticmethod
     def _worker_wrapper(args):
         """Wrapper function to call the standalone worker function"""
@@ -755,135 +794,55 @@ class WavToSpec:
     # ──────────────────────────────────────────────────────────────────────
     def _safe_process(self, fp: Path) -> Optional[dict]:
         """
-        Single-threaded processing wrapper with optimizations.
-        Returns dict with stats or skip/error info.
+        Single-threaded processing wrapper.
+        Delegates to the shared core to ensure identical behavior to the worker path.
         """
-        try:
-            # ─── check if output already exists ─────────────────────────
-            if self.fmt == "pt":
-                out_path = self.dst_dir / (fp.stem + ".pt")
-            else:
-                out_path = self.dst_dir / (fp.stem + ".npz")
-
-            if out_path.exists() and not self.remake:
-                return {"file": str(fp), "skipped": True}
-
-            # ─── fast duration check before loading ─────────────────────
-            try:
-                duration_sec = librosa.get_duration(path=fp)
-                if duration_sec * 1000 < self.min_len_ms:
-                    return {"file": str(fp), "skipped": True}
-            except Exception:
-                # Fallback: if duration check fails, proceed with loading
-                pass
-
-            # ─── smart loading with sample rate detection ────────────────
-            # First, detect native sample rate without loading audio
-            try:
-                native_sr = librosa.get_samplerate(fp)
-                needs_resampling = (native_sr != self.sr)
-            except Exception:
-                # Fallback: assume resampling needed
-                needs_resampling = True
-                native_sr = None
-
-            # Load audio with optimal settings
-            if needs_resampling:
-                wav, actual_sr = librosa.load(fp, sr=self.sr, mono=True)
-            else:
-                # Load at native rate, avoid unnecessary resampling
-                wav, actual_sr = librosa.load(fp, sr=None, mono=True)
-                if actual_sr != self.sr:
-                    # Resample only if detection was wrong
-                    wav = librosa.resample(wav, orig_sr=actual_sr, target_sr=self.sr)
-                    actual_sr = self.sr
-
-            # Apply high-pass filter before computing spectrogram
-            wav = high_pass_filter(wav, sample_rate=actual_sr, cutoff=512, order=5)
-
-            # Double-check length after loading (in case duration detection was inaccurate)
-            if len(wav) / actual_sr * 1000 < self.min_len_ms:
-                return {"file": str(fp), "skipped": True}
-
-            # ─── spectrogram ─────────────────────────────────────────────
-            S, chirp_intervals = compute_spectrogram(
-                    wav, actual_sr, self.n_fft, self.step,
-                    mel=self.use_mel, n_mels=self.n_mels)
-
-            if S.shape[1] < self.min_timebins:
-                return {"file": str(fp), "skipped": True}
-
-            labels = np.zeros(S.shape[1], dtype=np.int32)
-            for lab, tb_on, tb_off in self.lab_map.get(fp.stem, []):
-                labels[tb_on:tb_off] = lab
-
-            frame_ms = 1000.0 * self.step / actual_sr
-            stats = compute_chirp_stats(chirp_intervals, frame_ms)
-            file_stats = {"file": Path(fp).stem, "path": str(fp), **stats}
-
-            # ─── optimized output with minimal conversions ───────────────
-            if self.fmt == "pt":
-                import torch
-                out = self.dst_dir / (fp.stem + ".pt")
-                # S uses default dtype, avoid unnecessary conversion
-                torch.save({"s": torch.from_numpy(S),
-                            "chirp_intervals": torch.from_numpy(chirp_intervals),
-                            "labels": torch.from_numpy(labels)}, out)
-            else:  # npz (uncompressed)
-                out = self.dst_dir / (fp.stem + ".npz")
-                # S uses default dtype from compute_spectrogram
-                np.savez(out, s=S, chirp_intervals=chirp_intervals, labels=labels)
-
-            # free memory fast
-            del wav, S, labels
-            gc.collect()
-            return file_stats
-
-        except Exception as e:
-            return {"error": f"{fp}: {e}", "file": str(fp)}
+        return _process_core(
+            fp=fp,
+            dst_dir=self.dst_dir,
+            sr=self.sr,
+            n_fft=self.n_fft,
+            step=self.step,
+            use_mel=self.use_mel,
+            n_mels=self.n_mels,
+            min_len_ms=self.min_len_ms,
+            min_timebins=self.min_timebins,
+            fmt=self.fmt,
+            lab_map=self.lab_map,
+            remake=self.remake,
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CLI
 # ══════════════════════════════════════════════════════════════════════════════
 def cli() -> None:
-    p = argparse.ArgumentParser(
-        description="Convert audio → log‑spectrogram .npz (no JSON, no filtering).")
+    p = argparse.ArgumentParser(description="Convert audio → log‑spectrogram .npz (no JSON, no filtering).")
     grp = p.add_mutually_exclusive_group(required=True)
-    grp.add_argument("--src_dir",   type=str,
-                     help="Root folder with wav/mp3/ogg files (searched recursively).")
-    grp.add_argument("--file_list", type=str,
-                     help="Text file with absolute/relative paths, one per line.")
-    p.add_argument("--dst_dir",  type=str, required=True,
-                   help="Where outputs go.")
-    p.add_argument("--format", choices=["pt","npz"], default="pt",
-                   help="output format (default: pt, fp32)")
+    grp.add_argument("--src_dir", type=str, help="Root folder with wav/mp3/ogg files (searched recursively).")
+    grp.add_argument("--file_list", type=str, help="Text file with absolute/relative paths, one per line.")
+    p.add_argument("--dst_dir", type=str, required=True, help="Where outputs go.")
+    p.add_argument("--format", choices=["pt", "npz"], default="pt", help="output format (default: pt, fp32)")
 
-    p.add_argument("--sr", type=int, default=32_000,
-                   help="Sample rate in Hz (default: 32000).")
-    p.add_argument("--step_size", type=int, default=320,
-                   help="STFT hop length (samples at target sample rate).")
-    p.add_argument("--nfft",      type=int, default=1024,
-                   help="FFT size.")
-    p.add_argument("--take_n_random", type=int, default=None,
-                   help="Pick N random files instead of the full set.")
-    p.add_argument("--single_threaded",
-                   choices=["true", "false", "1", "0", "yes", "no"],
-                   default="true",
-                   help="Force single‑thread. Default true.")
+    p.add_argument("--sr", type=int, default=32_000, help="Sample rate in Hz (default: 32000).")
+    p.add_argument("--step_size", type=int, default=320, help="STFT hop length (samples at target sample rate).")
+    p.add_argument("--nfft", type=int, default=1024, help="FFT size.")
+    p.add_argument("--take_n_random", type=int, default=None, help="Pick N random files instead of the full set.")
+    p.add_argument(
+        "--single_threaded",
+        choices=["true", "false", "1", "0", "yes", "no"],
+        default="true",
+        help="Force single‑thread. Default true.",
+    )
     mel_grp = p.add_mutually_exclusive_group()
-    mel_grp.add_argument("--mel", action="store_true",
-                         help="Output log‑mel (default).")
-    mel_grp.add_argument("--linear", action="store_true",
-                         help="Output linear‑frequency STFT bins.")
-    p.add_argument("--n_mels", type=int, default=128,
-                   help="Number of mel bands (default: 128)")
-    p.add_argument("--json_path", type=str, default=None,
-                   help="Directory containing label JSON files (optional)")
-    p.add_argument("--max_workers", type=int, default=None,
-                   help="Maximum number of worker processes (default: auto-detect)")
-    p.add_argument("--remake", action="store_true",
-                   help="Recompute and overwrite outputs even if they already exist.")                   
+    mel_grp.add_argument("--mel", action="store_true", help="Output log‑mel (default).")
+    mel_grp.add_argument("--linear", action="store_true", help="Output linear‑frequency STFT bins.")
+    p.add_argument("--n_mels", type=int, default=128, help="Number of mel bands (default: 128)")
+    p.add_argument("--json_path", type=str, default=None, help="Directory containing label JSON files (optional)")
+    p.add_argument(
+        "--max_workers", type=int, default=None, help="Maximum number of worker processes (default: auto-detect)"
+    )
+    p.add_argument("--remake", action="store_true", help="Recompute and overwrite outputs even if they already exist.")
     args = p.parse_args()
 
     single = args.single_threaded.lower() in {"true", "1", "yes"}
