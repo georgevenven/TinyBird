@@ -174,6 +174,79 @@ def main():
     # Convert losses to numpy for plotting
     losses_np = losses.cpu().numpy()
 
+    # ------------------ New: Aggregate loss vs blocks & marginal gains ------------------
+    import numpy as np
+
+    # losses_np has shape (num_blocks, num_starts) where rows correspond to n_blocks in [block_min, block_max)
+    # From process_file(): block_min=1, block_max=13 → rows represent n_blocks = 1..12
+    block_min, block_max = 1, 13
+    n_blocks_axis = np.arange(block_min, block_max)  # 1..12 inclusive
+
+    # Mean & std across all start positions
+    mean_loss_per_blocks = losses_np.mean(axis=1)
+    std_loss_per_blocks  = losses_np.std(axis=1)
+
+    # Marginal change (delta) when adding one more block: L(k) - L(k-1)
+    # This results in rows aligned to 2..12 (since delta from 1->2 is the first row)
+    deltas = losses_np[1:, :] - losses_np[:-1, :]
+    delta_blocks_axis = np.arange(block_min + 1, block_max)  # 2..12
+    mean_delta_per_add = deltas.mean(axis=1)
+    std_delta_per_add  = deltas.std(axis=1)
+
+    # Relative improvement wrt 1-block baseline: (L(k) - L(1)) / L(1)
+    baseline = losses_np[0:1, :]  # shape (1, num_starts)
+    rel_improve = (losses_np - baseline) / np.maximum(np.abs(baseline), 1e-12)
+    mean_rel_improve = rel_improve.mean(axis=1)
+    std_rel_improve  = rel_improve.std(axis=1)
+
+    # 1) Plot: Mean loss vs number of blocks with ±1 std band
+    fig1, ax1 = plt.subplots(figsize=(8, 5))
+    ax1.plot(n_blocks_axis, mean_loss_per_blocks, marker='o')
+    ax1.fill_between(n_blocks_axis, 
+                     mean_loss_per_blocks - std_loss_per_blocks, 
+                     mean_loss_per_blocks + std_loss_per_blocks, 
+                     alpha=0.2)
+    ax1.set_xlabel('Number of Blocks')
+    ax1.set_ylabel('Mean MSE Loss (across starts)')
+    ax1.set_title(f'Mean Loss vs Blocks\nFile: {filename}')
+    ax1.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+    plt.tight_layout()
+    out1 = f"loss_vs_blocks_{filename}.png"
+    fig1.savefig(out1, dpi=300, bbox_inches='tight')
+    print(f"Saved: {out1}")
+
+    # 2) Plot: Marginal change when adding one more block (negative means improvement)
+    fig2, ax2 = plt.subplots(figsize=(8, 5))
+    ax2.bar(delta_blocks_axis, mean_delta_per_add)
+    ax2.errorbar(delta_blocks_axis, mean_delta_per_add, yerr=std_delta_per_add, fmt='none', capsize=3)
+    ax2.axhline(0.0, linestyle='--', linewidth=1)
+    ax2.set_xlabel('Blocks After Adding One More (k)')
+    ax2.set_ylabel('Mean ΔLoss = L(k) - L(k-1)')
+    ax2.set_title(f'Marginal Gain from Adding a Block\nFile: {filename}')
+    ax2.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+    plt.tight_layout()
+    out2 = f"delta_loss_per_block_{filename}.png"
+    fig2.savefig(out2, dpi=300, bbox_inches='tight')
+    print(f"Saved: {out2}")
+
+    # 3) Plot: Relative improvement vs 1-block baseline with ±1 std band
+    fig3, ax3 = plt.subplots(figsize=(8, 5))
+    ax3.plot(n_blocks_axis, mean_rel_improve, marker='o')
+    ax3.fill_between(n_blocks_axis, 
+                     mean_rel_improve - std_rel_improve, 
+                     mean_rel_improve + std_rel_improve, 
+                     alpha=0.2)
+    ax3.axhline(0.0, linestyle='--', linewidth=1)
+    ax3.set_xlabel('Number of Blocks')
+    ax3.set_ylabel('Relative Improvement vs 1-Block (Δ/|L1|)')
+    ax3.set_title(f'Relative Improvement vs Baseline\nFile: {filename}')
+    ax3.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+    plt.tight_layout()
+    out3 = f"relative_improvement_{filename}.png"
+    fig3.savefig(out3, dpi=300, bbox_inches='tight')
+    print(f"Saved: {out3}")
+    # --------------------------------------------------------------------
+
     # Create heatmap visualization
     print("\nGenerating heatmap visualization...")
     fig, ax = plt.subplots(figsize=(12, 8))
@@ -185,7 +258,7 @@ def main():
     ax.set_title(f'Reconstruction Loss Heatmap\nFile: {filename}', fontsize=14, pad=20)
 
     # Set y-axis ticks to show actual block counts
-    block_min, block_max = 2, 13
+    block_min, block_max = 0, 12
     ax.set_yticks(range(block_max - block_min))
     ax.set_yticklabels(range(block_min, block_max))
 
