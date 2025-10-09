@@ -1,5 +1,3 @@
-  GNU nano 2.9.8                                  pretrain_tinybird.sbatch                                            
-
 #!/bin/bash
 #SBATCH -J tinybird
 #SBATCH -p gpulong
