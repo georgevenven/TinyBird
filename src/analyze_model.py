@@ -18,7 +18,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Analyze TinyBird model on spectrogram data")
     parser.add_argument("--model_path", type=str, required=True, help="Path to the model checkpoint directory (containing config.json and weights/)")  # fmt: skip
     parser.add_argument("--checkpoint", type=str, default=None, help="Specific checkpoint file to load (e.g., model_step_005000.pth). If not specified, loads the latest checkpoint.")  # fmt: skip
-    parser.add_argument("--data_dir", type=str, required=True, help="Path to directory containing .pt spectrogram files")  # fmt: skip
+    parser.add_argument("--data_dir", type=str, default=None, help="Path to directory containing .pt spectrogram files (default: uses val_dir from config.json)")  # fmt: skip
     parser.add_argument("--index", type=int, default=0, help="Index of the spectrogram file to analyze from the dataset (default: 0)")  # fmt: skip
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", choices=["cuda", "cpu"], help="Device to run inference on (default: cuda if available, else cpu)")  # fmt: skip
     return parser.parse_args()
@@ -97,9 +97,18 @@ def main():
     print(f"  Patch size: {config.get('patch_size', 'N/A')}")
     print(f"  Max sequence length: {config.get('max_seq', 'N/A')}")
 
+    # Determine data directory: use command line arg if provided, otherwise use val_dir from config
+    if args.data_dir is not None:
+        data_dir = args.data_dir
+        print(f"\nUsing data directory from command line: {data_dir}")
+    elif 'val_dir' in config:
+        data_dir = config['val_dir']
+        print(f"\nUsing validation directory from config: {data_dir}")
+    else:
+        raise ValueError("No data directory specified. Either provide --data_dir or ensure val_dir is in config.json")
+
     # Load dataset with normalized spectrograms
-    print(f"\nLoading dataset from: {args.data_dir}")
-    dataset = SpectogramDataset(dir=args.data_dir, n_mels=config.get('mels', 128), n_timebins=config.get('num_timebins', 1024), pad_crop=True)  # fmt: skip
+    dataset = SpectogramDataset(dir=data_dir, n_mels=config.get('mels', 128), n_timebins=config.get('num_timebins', 1024), pad_crop=True)  # fmt: skip
     print(f"Dataset size: {len(dataset)} files")
 
     # Load specific sample
