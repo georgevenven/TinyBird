@@ -28,7 +28,7 @@ def process_file(model, dataset, index, device):
     x, x_i, x_l, N, filename = dataset[index]
     x = x.unsqueeze(0).float().to(device)
     x_i = x_i.unsqueeze(0).to(device)
-    N = N.unsqueeze(0).to(device)
+    N = torch.tensor([N], dtype=torch.long, device=device)
 
     x, x_i = model.compactify_data(x.clone(), x_i.clone(), N.clone())
 
