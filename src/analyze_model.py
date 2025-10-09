@@ -60,7 +60,7 @@ def process_file(model, dataset, index, device):
 
     total_iterations = (n_valid_chirps - block_max) * (block_max - block_min)
     with tqdm(total=total_iterations, desc="Computing losses") as pbar:
-        for start in range(block_max, n_valid_chirps):
+        for start in range(0, n_valid_chirps - block_max):
             for n_blocks in range(block_min, block_max):
                 with torch.no_grad():
                     loss = compute_loss(x, x_i, N, start, n_blocks)
@@ -150,9 +150,6 @@ def main():
     output_filename = f"loss_heatmap_{filename}.png"
     plt.savefig(output_filename, dpi=300, bbox_inches='tight')
     print(f"Heatmap saved to: {output_filename}")
-
-    # Display the figure
-    plt.show()
 
     print("\n" + "=" * 60)
     print("Analysis complete!")
