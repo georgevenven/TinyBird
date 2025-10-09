@@ -91,7 +91,7 @@ def process_file(model, dataset, index, device):
 
         if n_blocks == 1:
             x_mean_expanded = x_mean.expand_as(xs)
-            return (x_mean_expanded - xs).pow(2).mean(dim=-1)  # (B, T, P)
+            return (x_mean_expanded - xs).pow(2).mean()  # (B, T, P)
 
         # Initialize masked_blocks and frac based on sequence length
         if xs.shape[-1] > 3000:
