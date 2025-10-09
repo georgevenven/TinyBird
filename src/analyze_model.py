@@ -179,7 +179,7 @@ def main():
 
     # losses_np has shape (num_blocks, num_starts) where rows correspond to n_blocks in [block_min, block_max)
     # From process_file(): block_min=1, block_max=13 → rows represent n_blocks = 1..12
-    block_min, block_max = 0, 11
+    block_min, block_max = 0, 12
     n_blocks_axis = np.arange(block_min, block_max)  # 1..12 inclusive
 
     # Relative improvement wrt 1-block baseline: (L(k) - L(1)) / L(1)
