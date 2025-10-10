@@ -239,15 +239,21 @@ def main():
             plt.close(fig_line)
             print(f"Saved: {out_line}")
 
-            # 2) Heatmap of relative improvement (mask NaNs)
+            # 2) Heatmap: show raw MSE on the baseline (block=0) row, rel. improvement elsewhere
             fig_hm, ax_hm = plt.subplots(figsize=(12, 8))
-            rel_improve_ma = np.ma.masked_invalid(rel_improve)
-            # Symmetric range around zero, with a fixed center color at 0 (white)
-            max_abs = np.nanmax(np.abs(rel_improve_ma))
+            # Build display matrix: copy rel_improve and inject raw baseline MSE at baseline_row
+            display_mat = rel_improve.copy()
+            display_mat[baseline_row, :] = loss_mat_np[baseline_row, :]
+            # Mask invalid entries
+            display_ma = np.ma.masked_invalid(display_mat)
+            # Symmetric diverging norm centered at 0 (white). Include both rel_improve and baseline MSE in range.
+            max_abs_rel = np.nanmax(np.abs(np.ma.masked_invalid(rel_improve)))
+            max_abs_base = np.nanmax(np.abs(display_ma[baseline_row, :]))
+            max_abs = np.nanmax([max_abs_rel, max_abs_base])
             if not np.isfinite(max_abs) or max_abs == 0:
                 max_abs = 1.0
             norm = TwoSlopeNorm(vmin=-max_abs, vcenter=0.0, vmax=max_abs)
-            im_hm = ax_hm.imshow(rel_improve_ma, aspect='auto', cmap='bwr', origin='lower', norm=norm)
+            im_hm = ax_hm.imshow(display_ma, aspect='auto', cmap='bwr', origin='lower', norm=norm)
             ax_hm.set_xlabel('Start Position (block index)')
             ax_hm.set_ylabel('n_blocks')
             ax_hm.set_title(
@@ -256,7 +262,7 @@ def main():
             ax_hm.set_yticks(np.arange(len(y_values)))
             ax_hm.set_yticklabels([str(v) for v in y_values])
             cbar_hm = plt.colorbar(im_hm, ax=ax_hm)
-            cbar_hm.set_label('Relative Improvement  ( (L0 - Lk)/|L0| )', rotation=270, labelpad=20, fontsize=12)
+            cbar_hm.set_label('Rel. Improvement (others) | Baseline row = MSE', rotation=270, labelpad=20, fontsize=12)
             ax_hm.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
             # Optionally, tiny legend/note about missing entries
             ax_hm.annotate('Note: Some rows/columns may have fewer valid samples due to boundaries.',
@@ -270,6 +276,32 @@ def main():
         # Generate both sets
         plot_set(losses_iso_np, tag='isolated')
         plot_set(losses_all_np, tag='allblocks')
+
+        # Line graph of raw loss for blocks 0, +5, and -5 (non-isolated)
+        rows_to_plot = {
+            '0 blocks': baseline_row,
+            '+5 blocks': baseline_row + 5,
+            '-5 blocks': baseline_row - 5,
+        }
+        fig_lines, ax_lines = plt.subplots(figsize=(10, 5))
+        for label, row_idx in rows_to_plot.items():
+            if 0 <= row_idx < losses_all_np.shape[0]:
+                y = losses_all_np[row_idx, :]
+                x = np.arange(y.size)
+                # Skip all-NaN rows gracefully
+                if np.isnan(y).all():
+                    continue
+                ax_lines.plot(x, y, marker='o', linewidth=1.0, label=label)
+        ax_lines.set_xlabel('Start Position (block index)')
+        ax_lines.set_ylabel('Loss (MSE)')
+        ax_lines.set_title(f'Raw Loss vs Start for Blocks 0, +5, -5 (index {i}, allblocks)\nFile: {filename}')
+        ax_lines.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+        ax_lines.legend()
+        plt.tight_layout()
+        lines_out = os.path.join(images_dir, f"loss_lines_allblocks_{i}_{filename}.png")
+        fig_lines.savefig(lines_out, dpi=300, bbox_inches='tight')
+        plt.close(fig_lines)
+        print(f"Saved: {lines_out}")
 
     # If a single index is specified, only process that file; otherwise process all
     if args.index >= 0:
