@@ -8,6 +8,7 @@ This script loads a trained TinyBird model and normalized spectrogram data for a
 import argparse
 import torch
 import matplotlib.pyplot as plt
+from matplotlib.colors import TwoSlopeNorm
 from tqdm import tqdm
 from utils import load_model_from_checkpoint
 from data_loader import SpectogramDataset
@@ -106,14 +107,6 @@ def process_file(model, dataset, index, device):
                 mblock, iblock = 0, n_blocks if isolate_block else -1
 
             xs, x_is = model.sample_data(x.clone(), x_i.clone(), N.clone(), n_blocks=n_blocks + 1, start=window_start)
-
-            # Initialize masked_blocks and frac based on sequence length
-            # if xs.shape[-1] > 3000:
-            #     masked_blocks, frac = 0, 0.5
-            #     mblock, iblock = -1 , -1
-            # else:
-            #     masked_blocks, frac = 1, 0.0
-
             h, idx_restore, bool_mask, bool_pad, T = model.forward_encoder(xs, x_is, mblock=mblock, iblock=iblock)
             pred = model.forward_decoder(h, idx_restore, T, bool_pad=bool_pad)
             loss = model.loss_mse(xs, pred, bool_mask)
@@ -122,7 +115,8 @@ def process_file(model, dataset, index, device):
         block_min, block_max = -12, 12
 
         n_valid_chirps = N.max().item()
-        losses = torch.zeros((block_max - block_min + 1, n_valid_chirps), device=device)
+        # Fill with NaNs so missing entries don't bias averages
+        losses = torch.full((block_max - block_min + 1, n_valid_chirps), float('nan'), device=device)
 
         print(f"\nComputing losses for {losses.numel()} (rows × starts)...")
 
@@ -210,13 +204,22 @@ def main():
 
         # Helper to plot line summary and heatmap for a given matrix
         def plot_set(loss_mat_np, tag: str):
-            baseline = loss_mat_np[baseline_row : baseline_row + 1, :]  # shape (1, n_starts)
-            denom = np.maximum(np.abs(baseline), 1e-12)
-            rel_improve = (baseline - loss_mat_np) / denom  # positive means improvement vs 0-block baseline
+            # NaN-aware baseline and validity mask
+            baseline = loss_mat_np[baseline_row : baseline_row + 1, :]  # (1, n_starts)
+            # Valid where both the row and the baseline for that column exist
+            valid = ~np.isnan(loss_mat_np) & ~np.isnan(baseline)
 
-            # 1) Line plot of mean relative improvement vs n_blocks
-            mean_rel = rel_improve.mean(axis=1)
-            std_rel = rel_improve.std(axis=1)
+            # Compute relative improvement only where valid; elsewhere set NaN
+            numer = baseline - loss_mat_np
+            denom = np.abs(baseline)
+            # Avoid divide-by-zero; where denom==0, mark invalid
+            valid &= denom > 0
+            rel_improve = np.full_like(loss_mat_np, np.nan, dtype=np.float64)
+            rel_improve[valid] = (numer[valid] / denom[valid])
+
+            # 1) Line plot of mean relative improvement vs n_blocks (NaN-aware)
+            mean_rel = np.nanmean(rel_improve, axis=1)
+            std_rel = np.nanstd(rel_improve, axis=1)
 
             fig_line, ax_line = plt.subplots(figsize=(8, 5))
             ax_line.plot(y_values, mean_rel, marker='o')
@@ -226,15 +229,24 @@ def main():
             ax_line.set_ylabel('Relative Improvement vs 0-block baseline')
             ax_line.set_title(f'Mean Relative Improvement vs Baseline (index {i}, {tag})\nFile: {filename}')
             ax_line.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+            # Add note about missing data
+            ax_line.annotate('Note: Some rows/columns may have fewer valid samples due to boundaries.', 
+                             xy=(0.99, 0.01), xycoords='axes fraction', fontsize=8, ha='right', va='bottom')
             plt.tight_layout()
             out_line = os.path.join(images_dir, f"relative_improvement_{tag}_{i}_{filename}.png")
             fig_line.savefig(out_line, dpi=300, bbox_inches='tight')
             plt.close(fig_line)
             print(f"Saved: {out_line}")
 
-            # 2) Heatmap of relative improvement
+            # 2) Heatmap of relative improvement (mask NaNs)
             fig_hm, ax_hm = plt.subplots(figsize=(12, 8))
-            im_hm = ax_hm.imshow(rel_improve, aspect='auto', cmap='viridis', origin='lower')
+            rel_improve_ma = np.ma.masked_invalid(rel_improve)
+            # Symmetric range around zero, with a fixed center color at 0 (white)
+            max_abs = np.nanmax(np.abs(rel_improve_ma))
+            if not np.isfinite(max_abs) or max_abs == 0:
+                max_abs = 1.0
+            norm = TwoSlopeNorm(vmin=-max_abs, vcenter=0.0, vmax=max_abs)
+            im_hm = ax_hm.imshow(rel_improve_ma, aspect='auto', cmap='bwr', origin='lower', norm=norm)
             ax_hm.set_xlabel('Start Position (block index)')
             ax_hm.set_ylabel('n_blocks')
             ax_hm.set_title(
@@ -245,6 +257,9 @@ def main():
             cbar_hm = plt.colorbar(im_hm, ax=ax_hm)
             cbar_hm.set_label('Relative Improvement  ( (L0 - Lk)/|L0| )', rotation=270, labelpad=20, fontsize=12)
             ax_hm.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+            # Optionally, tiny legend/note about missing entries
+            ax_hm.annotate('Note: Some rows/columns may have fewer valid samples due to boundaries.',
+                           xy=(0.99, 0.01), xycoords='axes fraction', fontsize=8, ha='right', va='bottom')
             plt.tight_layout()
             rel_hm_out = os.path.join(images_dir, f"rel_improvement_heatmap_{tag}_{i}_{filename}.png")
             fig_hm.savefig(rel_hm_out, dpi=300, bbox_inches='tight')
