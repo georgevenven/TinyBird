@@ -19,7 +19,7 @@ def parse_args():
     parser.add_argument("--model_path", type=str, required=True, help="Path to the model checkpoint directory (containing config.json and weights/)")  # fmt: skip
     parser.add_argument("--checkpoint", type=str, default=None, help="Specific checkpoint file to load (e.g., model_step_005000.pth). If not specified, loads the latest checkpoint.")  # fmt: skip
     parser.add_argument("--data_dir", type=str, default=None, help="Path to directory containing .pt spectrogram files (default: uses val_dir from config.json)")  # fmt: skip
-    parser.add_argument("--index", type=int, default=0, help="Index of the spectrogram file to analyze from the dataset (default: 0)")  # fmt: skip
+    parser.add_argument("--index", type=int, default=-1, help="Index of the spectrogram file to analyze (>=0). If negative, process ALL files (default: -1)")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", choices=["cuda", "cpu"], help="Device to run inference on (default: cuda if available, else cpu)")  # fmt: skip
     return parser.parse_args()
 
@@ -163,81 +163,72 @@ def main():
     dataset = SpectogramDataset(dir=data_dir, n_mels=config.get('mels', 128), n_timebins=config.get('num_timebins', 1024), pad_crop=True)  # fmt: skip
     print(f"Dataset size: {len(dataset)} files")
 
-    # Load specific sample
-    if args.index >= len(dataset):
-        raise ValueError(f"Index {args.index} out of range. Dataset has {len(dataset)} files.")
-
-    print(f"\nLoading sample at index {args.index}")
-
-    losses, filename = process_file(model, dataset, args.index, device)
-
-    # Convert losses to numpy for plotting
-    losses_np = losses.cpu().numpy()
-
-    # ------------------ New: Aggregate loss vs blocks & marginal gains ------------------
+    import os
     import numpy as np
+    images_dir = "images"
+    os.makedirs(images_dir, exist_ok=True)
 
-    # losses_np has shape (num_blocks, num_starts) where rows correspond to n_blocks in [block_min, block_max)
-    # From process_file(): block_min=1, block_max=13 → rows represent n_blocks = 1..12
-    block_min, block_max = 0, 12
-    n_blocks_axis = np.arange(block_min, block_max)  # 1..12 inclusive
+    def process_and_plot(i: int):
+        print(f"\nLoading sample at index {i}")
+        losses, filename = process_file(model, dataset, i, device)
+        losses_np = losses.cpu().numpy()
 
-    # Relative improvement wrt 1-block baseline: (L(k) - L(1)) / L(1)
-    baseline = losses_np[0:1, :]  # shape (1, num_starts)
-    rel_improve = (losses_np - baseline) / np.maximum(np.abs(baseline), 1e-12)
-    mean_rel_improve = rel_improve.mean(axis=1)
-    std_rel_improve = rel_improve.std(axis=1)
+        # ------------------ Aggregate loss vs blocks & marginal gains ------------------
+        block_min, block_max = 0, 12
+        n_blocks_axis = np.arange(block_min, block_max)
 
-    # 3) Plot: Relative improvement vs 1-block baseline with ±1 std band
-    fig3, ax3 = plt.subplots(figsize=(8, 5))
-    ax3.plot(n_blocks_axis, mean_rel_improve, marker='o')
-    ax3.fill_between(n_blocks_axis, mean_rel_improve - std_rel_improve, mean_rel_improve + std_rel_improve, alpha=0.2)
-    ax3.axhline(0.0, linestyle='--', linewidth=1)
-    ax3.set_xlabel('Number of Blocks')
-    ax3.set_ylabel('Relative Improvement vs 1-Block (Δ/|L1|)')
-    ax3.set_title(f'Relative Improvement vs Baseline\nFile: {filename}')
-    ax3.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
-    plt.tight_layout()
-    out3 = f"relative_improvement_{filename}.png"
-    fig3.savefig(out3, dpi=300, bbox_inches='tight')
-    print(f"Saved: {out3}")
-    # --------------------------------------------------------------------
+        baseline = losses_np[0:1, :]
+        rel_improve = (losses_np - baseline) / np.maximum(np.abs(baseline), 1e-12)
+        mean_rel_improve = rel_improve.mean(axis=1)
+        std_rel_improve = rel_improve.std(axis=1)
 
-    # ------------------ New: Relative-improvement heatmap vs 1-block baseline ------------------
-    print("\nGenerating relative improvement heatmap (baseline = 1 block → shown as 0)...")
+        fig3, ax3 = plt.subplots(figsize=(8, 5))
+        ax3.plot(n_blocks_axis, mean_rel_improve, marker='o')
+        ax3.fill_between(n_blocks_axis, mean_rel_improve - std_rel_improve, mean_rel_improve + std_rel_improve, alpha=0.2)
+        ax3.axhline(0.0, linestyle='--', linewidth=1)
+        ax3.set_xlabel('Number of Blocks')
+        ax3.set_ylabel('Relative Improvement vs 1-Block (Δ/|L1|)')
+        ax3.set_title(f'Relative Improvement vs Baseline (index {i})\nFile: {filename}')
+        ax3.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+        plt.tight_layout()
+        out3 = os.path.join(images_dir, f"relative_improvement_{i}_{filename}.png")
+        fig3.savefig(out3, dpi=300, bbox_inches='tight')
+        plt.close(fig3)
+        print(f"Saved: {out3}")
 
-    # losses_np has shape (num_blocks, num_starts) where rows correspond to n_blocks = 1..12
-    # Define baseline as 1-block loss for each start position
-    baseline = losses_np[0:1, :]  # shape (1, num_starts)
+        # ------------------ Relative-improvement heatmap vs 1-block baseline ------------------
+        print("Generating relative improvement heatmap (baseline = 1 block → shown as 0)...")
+        denom = np.maximum(np.abs(baseline), 1e-12)
+        rel_improve_heat = (baseline - losses_np) / denom
 
-    # Relative improvement: positive values mean *better* (lower loss than baseline)
-    #   RI(k) = (L1 - Lk) / |L1|
-    denom = np.maximum(np.abs(baseline), 1e-12)
-    rel_improve_heat = (baseline - losses_np) / denom  # shape (num_blocks, num_starts)
+        num_blocks, _ = rel_improve_heat.shape
+        y_ticks = np.arange(num_blocks)
 
-    # y-axis labels: show "block = 0..(num_blocks-1)", where label 0 corresponds to 1 actual block
-    num_blocks, num_starts = rel_improve_heat.shape
-    y_ticks = np.arange(num_blocks)  # 0..num_blocks-1
+        fig_hm, ax_hm = plt.subplots(figsize=(12, 8))
+        im_hm = ax_hm.imshow(rel_improve_heat, aspect='auto', cmap='viridis', origin='lower')
+        ax_hm.set_xlabel('Start Position', fontsize=12)
+        ax_hm.set_ylabel('Block (0 means baseline of 1 actual block)', fontsize=12)
+        ax_hm.set_title(f'Relative Improvement Heatmap vs Baseline (index {i})\nFile: {filename}', fontsize=14, pad=20)
+        ax_hm.set_yticks(y_ticks)
+        ax_hm.set_yticklabels([str(y) for y in y_ticks])
+        cbar_hm = plt.colorbar(im_hm, ax=ax_hm)
+        cbar_hm.set_label('Relative Improvement ( (L1 - Lk) / |L1| )', rotation=270, labelpad=20, fontsize=12)
+        ax_hm.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+        plt.tight_layout()
+        rel_hm_out = os.path.join(images_dir, f"rel_improvement_heatmap_{i}_{filename}.png")
+        fig_hm.savefig(rel_hm_out, dpi=300, bbox_inches='tight')
+        plt.close(fig_hm)
+        print(f"Relative improvement heatmap saved to: {rel_hm_out}")
 
-    fig_hm, ax_hm = plt.subplots(figsize=(12, 8))
-    im_hm = ax_hm.imshow(rel_improve_heat, aspect='auto', cmap='viridis', origin='lower')
-
-    ax_hm.set_xlabel('Start Position', fontsize=12)
-    ax_hm.set_ylabel('Block (0 means baseline of 1 actual block)', fontsize=12)
-    ax_hm.set_title(f'Relative Improvement Heatmap vs Baseline (1 Block → label 0)\nFile: {filename}', fontsize=14, pad=20)
-    ax_hm.set_yticks(y_ticks)
-    ax_hm.set_yticklabels([str(y) for y in y_ticks])
-
-    cbar_hm = plt.colorbar(im_hm, ax=ax_hm)
-    cbar_hm.set_label('Relative Improvement ( (L1 - Lk) / |L1| )', rotation=270, labelpad=20, fontsize=12)
-
-    ax_hm.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
-    plt.tight_layout()
-
-    rel_hm_out = f"rel_improvement_heatmap_{filename}.png"
-    fig_hm.savefig(rel_hm_out, dpi=300, bbox_inches='tight')
-    print(f"Relative improvement heatmap saved to: {rel_hm_out}")
-    # --------------------------------------------------------------------------------------------
+    # If a single index is specified, only process that file; otherwise process all
+    if args.index >= 0:
+        if args.index >= len(dataset):
+            raise ValueError(f"Index {args.index} out of range. Dataset has {len(dataset)} files.")
+        process_and_plot(args.index)
+    else:
+        print(f"\nProcessing all {len(dataset)} files in the validation dataset...")
+        for i in range(len(dataset)):
+            process_and_plot(i)
 
     print("\n" + "=" * 60)
     print("Analysis complete!")
