@@ -209,13 +209,14 @@ def main():
             # Valid where both the row and the baseline for that column exist
             valid = ~np.isnan(loss_mat_np) & ~np.isnan(baseline)
 
-            # Compute relative improvement only where valid; elsewhere set NaN
-            numer = baseline - loss_mat_np
-            denom = np.abs(baseline)
-            # Avoid divide-by-zero; where denom==0, mark invalid
-            valid &= denom > 0
-            rel_improve = np.full_like(loss_mat_np, np.nan, dtype=np.float64)
-            rel_improve[valid] = (numer[valid] / denom[valid])
+            # Compute relative improvement with broadcasting; then mask invalid entries
+            numer = baseline - loss_mat_np                 # (rows, cols)
+            denom = np.abs(baseline)                      # (1, cols)
+            # Avoid divide-by-zero: where denom==0, set to NaN so result becomes NaN
+            denom_safe = np.where(denom > 0, denom, np.nan)
+            rel_improve = numer / denom_safe               # broadcasted division
+            # Invalidate anywhere the original values were NaN or denom was 0
+            rel_improve[~valid] = np.nan
 
             # 1) Line plot of mean relative improvement vs n_blocks (NaN-aware)
             mean_rel = np.nanmean(rel_improve, axis=1)
