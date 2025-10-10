@@ -204,37 +204,26 @@ def main():
 
         # Helper to plot line summary and heatmap for a given matrix
         def plot_set(loss_mat_np, tag: str):
-            # NaN-aware baseline and validity mask
-            baseline = loss_mat_np[baseline_row : baseline_row + 1, :]  # (1, n_starts)
-            # Valid where both the row and the baseline for that column exist
-            valid = ~np.isnan(loss_mat_np) & ~np.isnan(baseline)
-
-            # Compute relative improvement with broadcasting; then mask invalid entries
-            numer = baseline - loss_mat_np                 # (rows, cols)
-            denom = np.abs(baseline)                      # (1, cols)
-            # Avoid divide-by-zero: where denom==0, set to NaN so result becomes NaN
-            denom_safe = np.where(denom > 0, denom, np.nan)
-            rel_improve = numer / denom_safe               # broadcasted division
-            # Invalidate anywhere the original values were NaN or denom was 0
-            rel_improve[~valid] = np.nan
-
-            # 1) Line plot of mean relative improvement vs n_blocks (NaN-aware)
-            mean_rel = np.nanmean(rel_improve, axis=1)
-            std_rel = np.nanstd(rel_improve, axis=1)
+            # 1) Line plot of average raw loss (MSE) vs n_blocks, excluding baseline row (0 blocks)
+            mean_loss = np.nanmean(loss_mat_np, axis=1)
+            std_loss = np.nanstd(loss_mat_np, axis=1)
+            # Exclude the baseline row (block = 0 at index baseline_row)
+            y_vals_no0 = [v for idx, v in enumerate(y_values) if idx != baseline_row]
+            mean_no0 = np.array([mean_loss[idx] for idx in range(len(y_values)) if idx != baseline_row])
+            std_no0 = np.array([std_loss[idx] for idx in range(len(y_values)) if idx != baseline_row])
 
             fig_line, ax_line = plt.subplots(figsize=(8, 5))
-            ax_line.plot(y_values, mean_rel, marker='o')
-            ax_line.fill_between(y_values, mean_rel - std_rel, mean_rel + std_rel, alpha=0.2)
-            ax_line.axhline(0.0, linestyle='--', linewidth=1)
+            ax_line.plot(y_vals_no0, mean_no0, marker='o')
+            ax_line.fill_between(y_vals_no0, mean_no0 - std_no0, mean_no0 + std_no0, alpha=0.2)
             ax_line.set_xlabel('n_blocks (negative = left of start, positive = right of start)')
-            ax_line.set_ylabel('Relative Improvement vs 0-block baseline')
-            ax_line.set_title(f'Mean Relative Improvement vs Baseline (index {i}, {tag})\nFile: {filename}')
+            ax_line.set_ylabel('Average Loss (MSE)')
+            ax_line.set_title(f'Average Loss vs n_blocks (excluding 0) (index {i}, {tag})\nFile: {filename}')
             ax_line.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
             # Add note about missing data
             ax_line.annotate('Note: Some rows/columns may have fewer valid samples due to boundaries.', 
                              xy=(0.99, 0.01), xycoords='axes fraction', fontsize=8, ha='right', va='bottom')
             plt.tight_layout()
-            out_line = os.path.join(images_dir, f"relative_improvement_{tag}_{i}_{filename}.png")
+            out_line = os.path.join(images_dir, f"avg_loss_vs_nblocks_{tag}_{i}_{filename}.png")
             fig_line.savefig(out_line, dpi=300, bbox_inches='tight')
             plt.close(fig_line)
             print(f"Saved: {out_line}")
