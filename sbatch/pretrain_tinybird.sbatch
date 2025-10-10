@@ -1,10 +1,10 @@
 #!/bin/bash
 #SBATCH -J tinybird
-#SBATCH -p gpulong
+#SBATCH -p gpu
 #SBATCH --nodes=1
 #SBATCH --gpus=1
 #SBATCH --constraint=gpu-80gb,no-mig
-#SBATCH --time=14-00:00:00
+#SBATCH --time=1-00:00:00
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=200G
 #SBATCH -o logs/tinybird-pretrain-%j.out
@@ -37,7 +37,7 @@ PY
 
 PIRG=$(id -nG | tr ' ' '\n' | sed -n 's/^is\.racs\.pirg\.//p' | head -n1)
 MY_SCRATCH="/scratch/${PIRG}/${USER}"
-SPEC_DIR="${MY_SCRATCH}/specs/XCL/train"
+SPEC_DIR="${MY_SCRATCH}/specs"
 mkdir -p "${SPEC_DIR}" logs
 
 RUN_NAME=tinybird_pretrain_$(date +%Y%m%d_%H%M%S)
