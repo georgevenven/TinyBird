@@ -221,7 +221,7 @@ class TinyBird(nn.Module):
 
         assert masked_blocks < N, f"masked_blocks must be less than N, got {masked_blocks} and {N}"
         assert frac >=0 and frac < 1, f"frac must be between 0 and 1, got {frac}"
-        assert (masked_blocks > 0 ^ frac > 0), f"either masked_blocks or frac must be greater than 0 not both, got {masked_blocks} and {frac}"
+        assert (masked_blocks > 0) ^ (frac > 0), f"either masked_blocks or frac must be greater than 0 not both, got {masked_blocks} and {frac}"
 
         starts = xi[:, :, 0].to(torch.long).clamp(min=0, max=W)   # (B, N)
         ends   = xi[:, :, 1].to(torch.long).clamp(min=0, max=W)   # (B, N)
