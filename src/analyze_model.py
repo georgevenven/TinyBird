@@ -204,6 +204,15 @@ def main():
 
         # Helper to plot line summary and heatmap for a given matrix
         def plot_set(loss_mat_np, tag: str):
+            # Compute relative improvement matrix needed for the heatmap
+            baseline = loss_mat_np[baseline_row : baseline_row + 1, :]  # (1, n_starts)
+            valid = ~np.isnan(loss_mat_np) & ~np.isnan(baseline)
+            numer = baseline - loss_mat_np                 # (rows, cols)
+            denom = np.abs(baseline)                      # (1, cols)
+            denom_safe = np.where(denom > 0, denom, np.nan)
+            rel_improve = numer / denom_safe               # broadcasted division
+            rel_improve[~valid] = np.nan
+
             # 1) Line plot of average raw loss (MSE) vs n_blocks, excluding baseline row (0 blocks)
             mean_loss = np.nanmean(loss_mat_np, axis=1)
             std_loss = np.nanstd(loss_mat_np, axis=1)
