@@ -278,15 +278,20 @@ def main():
         plot_set(losses_all_np, tag='allblocks')
 
         # Line graph of raw loss for blocks -1..-5 (non-isolated)
-        neg_rows = {f"{k} blocks": baseline_row - k for k in range(1, 6)}  # -1..-5
         fig_neg, ax_neg = plt.subplots(figsize=(10, 5))
-        for label, row_idx in neg_rows.items():
+        for k in range(1, 6):  # -1..-5
+            row_idx = baseline_row - k
             if 0 <= row_idx < losses_all_np.shape[0]:
                 y = losses_all_np[row_idx, :]
                 x = np.arange(y.size)
                 if np.isnan(y).all():
                     continue
-                ax_neg.plot(x, y, marker='o', linewidth=1.0, label=label)
+                is_boundary = (k == 1) or (k == 5)
+                label = f"-{k} blocks" if is_boundary else "_nolegend_"
+                lw = 1.6 if is_boundary else 0.8
+                alpha = 1.0 if is_boundary else 0.35
+                marker = 'o' if is_boundary else None
+                ax_neg.plot(x, y, marker=marker, linewidth=lw, alpha=alpha, label=label)
         ax_neg.set_xlabel('Start Position (block index)')
         ax_neg.set_ylabel('Loss (MSE)')
         ax_neg.set_title(f'Raw Loss vs Start for Blocks -1..-5 (index {i}, allblocks)\nFile: {filename}')
@@ -299,15 +304,20 @@ def main():
         print(f"Saved: {neg_out}")
 
         # Line graph of raw loss for blocks +1..+5 (non-isolated)
-        pos_rows = {f"+{k} blocks": baseline_row + k for k in range(1, 6)}  # +1..+5
         fig_pos, ax_pos = plt.subplots(figsize=(10, 5))
-        for label, row_idx in pos_rows.items():
+        for k in range(1, 6):  # +1..+5
+            row_idx = baseline_row + k
             if 0 <= row_idx < losses_all_np.shape[0]:
                 y = losses_all_np[row_idx, :]
                 x = np.arange(y.size)
                 if np.isnan(y).all():
                     continue
-                ax_pos.plot(x, y, marker='o', linewidth=1.0, label=label)
+                is_boundary = (k == 1) or (k == 5)
+                label = f"+{k} blocks" if is_boundary else "_nolegend_"
+                lw = 1.6 if is_boundary else 0.8
+                alpha = 1.0 if is_boundary else 0.35
+                marker = 'o' if is_boundary else None
+                ax_pos.plot(x, y, marker=marker, linewidth=lw, alpha=alpha, label=label)
         ax_pos.set_xlabel('Start Position (block index)')
         ax_pos.set_ylabel('Loss (MSE)')
         ax_pos.set_title(f'Raw Loss vs Start for Blocks +1..+5 (index {i}, allblocks)\nFile: {filename}')
