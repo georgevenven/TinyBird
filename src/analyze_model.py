@@ -40,7 +40,7 @@ def process_file(model, dataset, index, device):
 
     def mean_column_over_intervals(x: torch.Tensor, xi: torch.Tensor, N: torch.Tensor):
         assert x.dim() == 4, f"x must be (B,C,H,W), got {tuple(x.shape)}"
-        assert xi.dim() == 3 and xi.size(-1) == 2, f"xi must be (B,N_max,2), got {tuple(x.shape)}"
+        assert xi.dim() == 3 and xi.size(-1) == 2, f"xi must be (B,N_max,2), got {tuple(xi.shape)}"
 
         B, C, H, W = x.shape
         device = x.device
@@ -86,40 +86,66 @@ def process_file(model, dataset, index, device):
 
     x_mean = mean_column_over_intervals(x, x_i, N)
 
-    def compute_loss(x, x_i, N, start, x_mean, n_blocks):
-        xs, x_is = model.sample_data(x.clone(), x_i.clone(), N.clone(), n_blocks=n_blocks, start=start)
 
-        if n_blocks == 1:
-            x_mean_expanded = x_mean.expand_as(xs)
-            return (x_mean_expanded - xs).pow(2).mean()  # (B, T, P)
+    def compute_losses(x, x_i, N, x_mean, isolate_block = False ):
 
-        # Initialize masked_blocks and frac based on sequence length
-        if xs.shape[-1] > 3000:
-            masked_blocks, frac = 0, 0.5
-        else:
-            masked_blocks, frac = 1, 0.0
+        def compute_loss(x, x_i, N, start, x_mean, n_blocks, isolate_block ):
 
-        h, idx_restore, bool_mask, bool_pad, T = model.forward_encoder(xs, x_is, masked_blocks=masked_blocks, frac=frac)
-        pred = model.forward_decoder(h, idx_restore, T, bool_pad=bool_pad)
-        loss = model.loss_mse(xs, pred, bool_mask)
-        return loss
+            if ( n_blocks == 0 ) : 
+                xs, x_is = model.sample_data(x.clone(), x_i.clone(), N.clone(), n_blocks=1, start=start)
+                x_mean_expanded = x_mean.expand_as(xs)
+                return (x_mean_expanded - xs).pow(2).mean()
+            elif ( n_blocks < 0 ) :
+                n_blocks        = -n_blocks
+                window_start    = start - n_blocks
+                iblock, mblock  = 0, n_blocks if isolate_block else -1 
+            else :
+                window_start    = start
+                mblock, iblock  = 0, n_blocks if isolate_block else -1 
 
-    block_min, block_max = 1, 13
-    n_valid_chirps = N.max().item()
-    losses = torch.zeros((block_max - block_min, n_valid_chirps - block_max), device=device)
+            xs, x_is = model.sample_data(x.clone(), x_i.clone(), N.clone(), n_blocks=n_blocks+1, start=window_start)
 
-    print(f"\nComputing losses for {n_valid_chirps - block_max} starting positions...")
+            # Initialize masked_blocks and frac based on sequence length
+            # if xs.shape[-1] > 3000:
+            #     masked_blocks, frac = 0, 0.5
+            #     mblock, iblock = -1 , -1
+            # else:
+            #     masked_blocks, frac = 1, 0.0
 
-    total_iterations = (n_valid_chirps - block_max) * (block_max - block_min)
-    with tqdm(total=total_iterations, desc="Computing losses") as pbar:
-        for start in range(0, n_valid_chirps - block_max):
-            for n_blocks in range(block_min, block_max):
-                with torch.no_grad():
-                    loss = compute_loss(x, x_i, N, start, x_mean, n_blocks)
-                losses[n_blocks - block_min, start] = loss.item()
-                pbar.update(1)
+            h, idx_restore, bool_mask, bool_pad, T = model.forward_encoder(xs, x_is, mblock=mblock, iblock=iblock )
+            pred = model.forward_decoder(h, idx_restore, T, bool_pad=bool_pad)
+            loss = model.loss_mse(xs, pred, bool_mask)
+            return loss
 
-    return losses, filename
+
+        block_min, block_max = -12 , 12
+
+        n_valid_chirps = N.max().item()
+        losses = torch.zeros((block_max - block_min + 1, n_valid_chirps), device=device)
+
+        print(f"\nComputing losses for {losses.numel()} (rows × starts)...")
+
+        # Compute an accurate total for the progress bar
+        total_iterations = 0
+        for start_i in range(n_valid_chirps):
+            bmin_i = min(max(0, start_i + block_min), n_valid_chirps) - start_i
+            bmax_i = min(n_valid_chirps, start_i + block_max + 1) - start_i
+            total_iterations += max(0, bmax_i - bmin_i)
+        with tqdm(total=total_iterations, desc="Computing losses") as pbar:
+            for start in range(0, n_valid_chirps):
+                bmin = min( max(0, start + block_min) , n_valid_chirps) - start
+                bmax = min( n_valid_chirps, start + block_max + 1) - start
+                for n_blocks in range(bmin, bmax ):
+                    with torch.no_grad():
+                        loss = compute_loss(x, x_i, N, start, x_mean, n_blocks, isolate_block)
+                    losses[n_blocks + block_max , start ] = loss.item()
+                    pbar.update(1)
+        return losses
+
+    losses            = compute_losses(x, x_i, N, x_mean, isolate_block = True )
+    losses_all_blocks = compute_losses(x, x_i, N, x_mean, isolate_block = False )
+
+    return losses, losses_all_blocks, filename
 
 
 def main():
@@ -170,55 +196,60 @@ def main():
 
     def process_and_plot(i: int):
         print(f"\nLoading sample at index {i}")
-        losses, filename = process_file(model, dataset, i, device)
-        losses_np = losses.cpu().numpy()
+        losses_iso, losses_all, filename = process_file(model, dataset, i, device)
+        losses_iso_np = losses_iso.cpu().numpy()
+        losses_all_np = losses_all.cpu().numpy()
 
-        # ------------------ Aggregate loss vs blocks & marginal gains ------------------
-        block_min, block_max = 0, 12
-        n_blocks_axis = np.arange(block_min, block_max)
+        # Common axes/meta
+        block_min, block_max = -12, 12
+        y_values = list(range(block_min, block_max + 1))   # rows map to n_blocks in [block_min..block_max]
+        baseline_row = block_max                           # n_blocks == 0 maps to index block_max
+        n_starts = losses_iso_np.shape[1]
 
-        baseline = losses_np[0:1, :]
-        rel_improve = (losses_np - baseline) / np.maximum(np.abs(baseline), 1e-12)
-        mean_rel_improve = rel_improve.mean(axis=1)
-        std_rel_improve = rel_improve.std(axis=1)
+        # Helper to plot line summary and heatmap for a given matrix
+        def plot_set(loss_mat_np, tag: str):
+            baseline = loss_mat_np[baseline_row:baseline_row + 1, :]                 # shape (1, n_starts)
+            denom = np.maximum(np.abs(baseline), 1e-12)
+            rel_improve = (baseline - loss_mat_np) / denom                           # positive means improvement vs 0-block baseline
 
-        fig3, ax3 = plt.subplots(figsize=(8, 5))
-        ax3.plot(n_blocks_axis, mean_rel_improve, marker='o')
-        ax3.fill_between(n_blocks_axis, mean_rel_improve - std_rel_improve, mean_rel_improve + std_rel_improve, alpha=0.2)
-        ax3.axhline(0.0, linestyle='--', linewidth=1)
-        ax3.set_xlabel('Number of Blocks')
-        ax3.set_ylabel('Relative Improvement vs 1-Block (Δ/|L1|)')
-        ax3.set_title(f'Relative Improvement vs Baseline (index {i})\nFile: {filename}')
-        ax3.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
-        plt.tight_layout()
-        out3 = os.path.join(images_dir, f"relative_improvement_{i}_{filename}.png")
-        fig3.savefig(out3, dpi=300, bbox_inches='tight')
-        plt.close(fig3)
-        print(f"Saved: {out3}")
+            # 1) Line plot of mean relative improvement vs n_blocks
+            mean_rel = rel_improve.mean(axis=1)
+            std_rel = rel_improve.std(axis=1)
 
-        # ------------------ Relative-improvement heatmap vs 1-block baseline ------------------
-        print("Generating relative improvement heatmap (baseline = 1 block → shown as 0)...")
-        denom = np.maximum(np.abs(baseline), 1e-12)
-        rel_improve_heat = (baseline - losses_np) / denom
+            fig_line, ax_line = plt.subplots(figsize=(8, 5))
+            ax_line.plot(y_values, mean_rel, marker='o')
+            ax_line.fill_between(y_values, mean_rel - std_rel, mean_rel + std_rel, alpha=0.2)
+            ax_line.axhline(0.0, linestyle='--', linewidth=1)
+            ax_line.set_xlabel('n_blocks (negative = left of start, positive = right of start)')
+            ax_line.set_ylabel('Relative Improvement vs 0-block baseline')
+            ax_line.set_title(f'Mean Relative Improvement vs Baseline (index {i}, {tag})\nFile: {filename}')
+            ax_line.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+            plt.tight_layout()
+            out_line = os.path.join(images_dir, f"relative_improvement_{tag}_{i}_{filename}.png")
+            fig_line.savefig(out_line, dpi=300, bbox_inches='tight')
+            plt.close(fig_line)
+            print(f"Saved: {out_line}")
 
-        num_blocks, _ = rel_improve_heat.shape
-        y_ticks = np.arange(num_blocks)
+            # 2) Heatmap of relative improvement
+            fig_hm, ax_hm = plt.subplots(figsize=(12, 8))
+            im_hm = ax_hm.imshow(rel_improve, aspect='auto', cmap='viridis', origin='lower')
+            ax_hm.set_xlabel('Start Position (block index)')
+            ax_hm.set_ylabel('n_blocks')
+            ax_hm.set_title(f'Relative Improvement Heatmap vs Baseline (index {i}, {tag})\nFile: {filename}', fontsize=14, pad=20)
+            ax_hm.set_yticks(np.arange(len(y_values)))
+            ax_hm.set_yticklabels([str(v) for v in y_values])
+            cbar_hm = plt.colorbar(im_hm, ax=ax_hm)
+            cbar_hm.set_label('Relative Improvement  ( (L0 - Lk)/|L0| )', rotation=270, labelpad=20, fontsize=12)
+            ax_hm.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+            plt.tight_layout()
+            rel_hm_out = os.path.join(images_dir, f"rel_improvement_heatmap_{tag}_{i}_{filename}.png")
+            fig_hm.savefig(rel_hm_out, dpi=300, bbox_inches='tight')
+            plt.close(fig_hm)
+            print(f"Saved: {rel_hm_out}")
 
-        fig_hm, ax_hm = plt.subplots(figsize=(12, 8))
-        im_hm = ax_hm.imshow(rel_improve_heat, aspect='auto', cmap='viridis', origin='lower')
-        ax_hm.set_xlabel('Start Position', fontsize=12)
-        ax_hm.set_ylabel('Block (0 means baseline of 1 actual block)', fontsize=12)
-        ax_hm.set_title(f'Relative Improvement Heatmap vs Baseline (index {i})\nFile: {filename}', fontsize=14, pad=20)
-        ax_hm.set_yticks(y_ticks)
-        ax_hm.set_yticklabels([str(y) for y in y_ticks])
-        cbar_hm = plt.colorbar(im_hm, ax=ax_hm)
-        cbar_hm.set_label('Relative Improvement ( (L1 - Lk) / |L1| )', rotation=270, labelpad=20, fontsize=12)
-        ax_hm.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
-        plt.tight_layout()
-        rel_hm_out = os.path.join(images_dir, f"rel_improvement_heatmap_{i}_{filename}.png")
-        fig_hm.savefig(rel_hm_out, dpi=300, bbox_inches='tight')
-        plt.close(fig_hm)
-        print(f"Relative improvement heatmap saved to: {rel_hm_out}")
+        # Generate both sets
+        plot_set(losses_iso_np, tag='isolated')
+        plot_set(losses_all_np, tag='allblocks')
 
     # If a single index is specified, only process that file; otherwise process all
     if args.index >= 0:

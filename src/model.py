@@ -191,7 +191,7 @@ class TinyBird(nn.Module):
         return x_out, xi_out
 
     
-    def build_column_mask(self, xi:torch.Tensor,  hw: (None,None), masked_blocks: int = 0, frac: float = 0.0):
+    def build_column_mask(self, xi:torch.Tensor,  hw: (None,None), masked_blocks: int = 0, frac: float = 0.0, mblock: int = -1, iblock: int = -1):
         """
         Generate column-wise masking pattern for spectrogram patches.
         
@@ -200,7 +200,8 @@ class TinyBird(nn.Module):
             hw: Spatial dimensions (H, W)
             masked_blocks: Number of chirp blocks to mask (or 0)
             frac: Fraction of columns to mask 0.0-1.0 (or 0.0)
-        
+            mblock: Index of chirp block to mask (or -1) (if specified, sets masked_blocks and frac to 1 and 0)
+            iblock: Index of chirp block to isolate (or -1) (mblock and iblock are exclusive, and mblock must be set if iblock is set)
         Returns:
             Boolean mask (B, H*W) where True = masked patches
         
@@ -210,10 +211,17 @@ class TinyBird(nn.Module):
         H, W = hw
         device = xi.device
         B, N, _ = xi.shape
+
+        if mblock >= 0 and mblock < N :
+            masked_blocks, frac = 1, 0.0
+
+        if iblock >= 0 and iblock < N :
+            assert mblock >= 0 and mblock < N, f"mblock must be set if iblock is set, got {mblock} and {iblock}"
+            assert mblock != iblock, f"mblock and iblock must be different, got {mblock} and {iblock}"
+
         assert masked_blocks < N, f"masked_blocks must be less than N, got {masked_blocks} and {N}"
         assert frac >=0 and frac < 1, f"frac must be between 0 and 1, got {frac}"
-        assert not(masked_blocks > 0 and frac > 0), f"either masked_blocks or frac must be greater than 0 not both, got {masked_blocks} and {frac}"
-        assert masked_blocks == 0 or frac == 0, f"masked_blocks or frac must be greater than 0, got {masked_blocks} and {frac}"
+        assert (masked_blocks > 0 ^ frac > 0), f"either masked_blocks or frac must be greater than 0 not both, got {masked_blocks} and {frac}"
 
         starts = xi[:, :, 0].to(torch.long).clamp(min=0, max=W)   # (B, N)
         ends   = xi[:, :, 1].to(torch.long).clamp(min=0, max=W)   # (B, N)
@@ -221,11 +229,14 @@ class TinyBird(nn.Module):
 
         # get n_block random blocks between 0 and N ensure there are no duplicates
         blocks = []
-        if masked_blocks > 0:
-           blocks = torch.randperm(N, device=device)[:masked_blocks]  # randomly select n_blocks blocks
-           m_w = max([ int(widths[b, blocks].sum().item()) for b in range(B) ]) # max width of the blocks
+        if mblock >= 0 and mblock < N :
+            blocks = torch.tensor([mblock], device=device, dtype=torch.long)
+            m_w = max([ int(widths[b, blocks].sum().item()) for b in range(B) ]) # max width of the blocks
+        elif masked_blocks > 0:
+            blocks = torch.randperm(N, device=device)[:masked_blocks]  # randomly select n_blocks blocks
+            m_w = max([ int(widths[b, blocks].sum().item()) for b in range(B) ]) # max width of the blocks
         else :  # frac > 0
-           m_w = max(0, min(W - 1, int(round(float(frac) * W)))) # width of the mask, no block selected
+            m_w = max(0, min(W - 1, int(round(float(frac) * W)))) # width of the mask, no block selected
 
 
         pad2d  = torch.zeros(B, W, dtype=torch.bool, device=device) # pad2d is boolean padding of the spectrogram
@@ -233,11 +244,23 @@ class TinyBird(nn.Module):
         for b in range(B):
             pad2d[b, 0             : starts[b].min() ] = True
             pad2d[b, ends[b].max() : W               ] = True
-            for block in blocks:
-                mask2d[b, starts[b, block]:ends[b, block]] = True
+
+            #ensure that "remaining" can't include the isolated block
+            if iblock >= 0 and iblock < N :
+                pad2d[b, starts[b, iblock]:ends[b, iblock] ] = True # this will be reset to False later
+
+            for blk in blocks:
+                mask2d[b, starts[b, blk]:ends[b, blk]] = True
             remaining = ( (~mask2d[b]) & (~pad2d[b]) ).nonzero(as_tuple=False).squeeze(1)
             remaining = remaining[torch.randperm(remaining.numel(), device=device)[:m_w - int(mask2d[b].sum().item())]] # randomly select remaining columns to keep mask width constant for each item in the batch
             mask2d[b, remaining] = True
+
+            if iblock >= 0 and iblock < N :
+                #pad2d should be True everywhere except the isolated block and where the mask is true
+                pad2d[b, :] = True # start fully padded
+                pad2d[b, starts[b, iblock]:ends[b, iblock]] = False # keep iblock visible
+                pad2d[b, mask2d[b]] = False  # do not pad masked columns
+
 
         pad2d  = pad2d.unsqueeze(1).expand(-1, H, -1).flatten(1,2).to(device=device,dtype=torch.bool) # (B,W) -> (B, H, W) -> (B, H*W) 
         mask2d = mask2d.unsqueeze(1).expand(-1, H, -1).flatten(1,2).to(device=device,dtype=torch.bool) # (B,W) -> (B, H, W) -> (B, H*W) 
@@ -278,7 +301,7 @@ class TinyBird(nn.Module):
         return z_keep, idx_restore
 
 
-    def forward_encoder(self, x: torch.Tensor, xi : torch.Tensor, masked_blocks: int = 1, frac: float = 0.0):
+    def forward_encoder(self, x: torch.Tensor, xi : torch.Tensor, **column_mask_args ):
         """
         Patchify → add positional encodings → build a **column-wise** mask from chirp boundaries →
         keep only unmasked tokens → encode with the Transformer encoder.
@@ -286,6 +309,12 @@ class TinyBird(nn.Module):
         Args:
             x:  (B, 1, H, W) spectrograms after any upstream compaction/windowing.
             xi: (B, N, 2) chirp [start, end) boundaries **in the current W frame**.
+
+            column_mask_args:
+            masked_blocks: Number of chirp blocks to randomly mask (or 0)
+            frac: Fraction of columns to mask 0.0-1.0 (or 0.0) [ masked_blocks and frac are exclusive]
+            mblock: Index of chirp block to mask (or -1) (if specified, sets masked_blocks to 1 and frac to 0)
+            iblock: Index of chirp block to isolate (or -1) (mblock and iblock are exclusive, and mblock must be set if iblock is set)
 
         Returns:
             h:           (B, keep, D_enc) encoder outputs for **kept** (unmasked) tokens only.
@@ -308,7 +337,7 @@ class TinyBird(nn.Module):
         z, H, W = self.tokenize_spectrogram(x)         # (B, T, D_enc), H, W
         z = self.apply_position_encoding(z)            # (B, T, D_enc)
 
-        bool_pad,bool_mask  = self.build_column_mask(xi, hw=(H, W), masked_blocks=masked_blocks, frac=frac )  
+        bool_pad,bool_mask  = self.build_column_mask(xi, hw=(H, W), **column_mask_args)  
         # bool_pad  : (B, H*W), True = padded (column-wise across H)
         # bool_mask : (B, H*W), True = masked (column-wise across H) pad_mask & bool_mask are exclusive
 
@@ -371,7 +400,6 @@ class TinyBird(nn.Module):
         # 1) Match channel sizes: project encoder tokens (D_enc) to decoder width (D_dec).
         y = self.encoder_to_decoder(h)                 # (B, T_enc, D_dec)
         D_dec = self.decoder_to_pixel.in_features
-        keep = y.size(1)
 
         # 2) Insert learned mask tokens for the missing (masked) positions, then unshuffle back to original order.
         #    Learned mask token (defined in __init__) provides a consistent placeholder embedding for masked slots.
