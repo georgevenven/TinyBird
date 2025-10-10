@@ -200,7 +200,7 @@ def main():
         block_min, block_max = -12, 12
         y_values = list(range(block_min, block_max + 1))  # rows map to n_blocks in [block_min..block_max]
         baseline_row = block_max  # n_blocks == 0 maps to index block_max
-        n_starts = losses_iso_np.shape[1]
+
 
         # Helper to plot line summary and heatmap for a given matrix
         def plot_set(loss_mat_np, tag: str):
@@ -277,31 +277,47 @@ def main():
         plot_set(losses_iso_np, tag='isolated')
         plot_set(losses_all_np, tag='allblocks')
 
-        # Line graph of raw loss for blocks 0, +5, and -5 (non-isolated)
-        rows_to_plot = {
-            '0 blocks': baseline_row,
-            '+5 blocks': baseline_row + 5,
-            '-5 blocks': baseline_row - 5,
-        }
-        fig_lines, ax_lines = plt.subplots(figsize=(10, 5))
-        for label, row_idx in rows_to_plot.items():
+        # Line graph of raw loss for blocks -1..-5 (non-isolated)
+        neg_rows = {f"{k} blocks": baseline_row - k for k in range(1, 6)}  # -1..-5
+        fig_neg, ax_neg = plt.subplots(figsize=(10, 5))
+        for label, row_idx in neg_rows.items():
             if 0 <= row_idx < losses_all_np.shape[0]:
                 y = losses_all_np[row_idx, :]
                 x = np.arange(y.size)
-                # Skip all-NaN rows gracefully
                 if np.isnan(y).all():
                     continue
-                ax_lines.plot(x, y, marker='o', linewidth=1.0, label=label)
-        ax_lines.set_xlabel('Start Position (block index)')
-        ax_lines.set_ylabel('Loss (MSE)')
-        ax_lines.set_title(f'Raw Loss vs Start for Blocks 0, +5, -5 (index {i}, allblocks)\nFile: {filename}')
-        ax_lines.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
-        ax_lines.legend()
+                ax_neg.plot(x, y, marker='o', linewidth=1.0, label=label)
+        ax_neg.set_xlabel('Start Position (block index)')
+        ax_neg.set_ylabel('Loss (MSE)')
+        ax_neg.set_title(f'Raw Loss vs Start for Blocks -1..-5 (index {i}, allblocks)\nFile: {filename}')
+        ax_neg.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+        ax_neg.legend()
         plt.tight_layout()
-        lines_out = os.path.join(images_dir, f"loss_lines_allblocks_{i}_{filename}.png")
-        fig_lines.savefig(lines_out, dpi=300, bbox_inches='tight')
-        plt.close(fig_lines)
-        print(f"Saved: {lines_out}")
+        neg_out = os.path.join(images_dir, f"loss_lines_allblocks_neg_{i}_{filename}.png")
+        fig_neg.savefig(neg_out, dpi=300, bbox_inches='tight')
+        plt.close(fig_neg)
+        print(f"Saved: {neg_out}")
+
+        # Line graph of raw loss for blocks +1..+5 (non-isolated)
+        pos_rows = {f"+{k} blocks": baseline_row + k for k in range(1, 6)}  # +1..+5
+        fig_pos, ax_pos = plt.subplots(figsize=(10, 5))
+        for label, row_idx in pos_rows.items():
+            if 0 <= row_idx < losses_all_np.shape[0]:
+                y = losses_all_np[row_idx, :]
+                x = np.arange(y.size)
+                if np.isnan(y).all():
+                    continue
+                ax_pos.plot(x, y, marker='o', linewidth=1.0, label=label)
+        ax_pos.set_xlabel('Start Position (block index)')
+        ax_pos.set_ylabel('Loss (MSE)')
+        ax_pos.set_title(f'Raw Loss vs Start for Blocks +1..+5 (index {i}, allblocks)\nFile: {filename}')
+        ax_pos.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+        ax_pos.legend()
+        plt.tight_layout()
+        pos_out = os.path.join(images_dir, f"loss_lines_allblocks_pos_{i}_{filename}.png")
+        fig_pos.savefig(pos_out, dpi=300, bbox_inches='tight')
+        plt.close(fig_pos)
+        print(f"Saved: {pos_out}")
 
     # If a single index is specified, only process that file; otherwise process all
     if args.index >= 0:
