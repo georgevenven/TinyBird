@@ -203,34 +203,41 @@ def main():
     print(f"Saved: {out3}")
     # --------------------------------------------------------------------
 
-    # Create heatmap visualization
-    print("\nGenerating heatmap visualization...")
-    fig, ax = plt.subplots(figsize=(12, 8))
-    im = ax.imshow(losses_np, aspect='auto', cmap='viridis', origin='lower')
+    # ------------------ New: Relative-improvement heatmap vs 1-block baseline ------------------
+    print("\nGenerating relative improvement heatmap (baseline = 1 block → shown as 0)...")
 
-    # Set labels and title
-    ax.set_xlabel('Start Position', fontsize=12)
-    ax.set_ylabel('Number of Blocks', fontsize=12)
-    ax.set_title(f'Reconstruction Loss Heatmap\nFile: {filename}', fontsize=14, pad=20)
+    # losses_np has shape (num_blocks, num_starts) where rows correspond to n_blocks = 1..12
+    # Define baseline as 1-block loss for each start position
+    baseline = losses_np[0:1, :]  # shape (1, num_starts)
 
-    # Set y-axis ticks to show actual block counts
-    block_min, block_max = 0, 12
-    ax.set_yticks(range(block_max - block_min))
-    ax.set_yticklabels(range(block_min, block_max))
+    # Relative improvement: positive values mean *better* (lower loss than baseline)
+    #   RI(k) = (L1 - Lk) / |L1|
+    denom = np.maximum(np.abs(baseline), 1e-12)
+    rel_improve_heat = (baseline - losses_np) / denom  # shape (num_blocks, num_starts)
 
-    # Add colorbar
-    cbar = plt.colorbar(im, ax=ax)
-    cbar.set_label('MSE Loss', rotation=270, labelpad=20, fontsize=12)
+    # y-axis labels: show "block = 0..(num_blocks-1)", where label 0 corresponds to 1 actual block
+    num_blocks, num_starts = rel_improve_heat.shape
+    y_ticks = np.arange(num_blocks)  # 0..num_blocks-1
 
-    # Add grid for better readability
-    ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+    fig_hm, ax_hm = plt.subplots(figsize=(12, 8))
+    im_hm = ax_hm.imshow(rel_improve_heat, aspect='auto', cmap='viridis', origin='lower')
 
+    ax_hm.set_xlabel('Start Position', fontsize=12)
+    ax_hm.set_ylabel('Block (0 means baseline of 1 actual block)', fontsize=12)
+    ax_hm.set_title(f'Relative Improvement Heatmap vs Baseline (1 Block → label 0)\nFile: {filename}', fontsize=14, pad=20)
+    ax_hm.set_yticks(y_ticks)
+    ax_hm.set_yticklabels([str(y) for y in y_ticks])
+
+    cbar_hm = plt.colorbar(im_hm, ax=ax_hm)
+    cbar_hm.set_label('Relative Improvement ( (L1 - Lk) / |L1| )', rotation=270, labelpad=20, fontsize=12)
+
+    ax_hm.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
     plt.tight_layout()
 
-    # Save the figure
-    output_filename = f"loss_heatmap_{filename}.png"
-    plt.savefig(output_filename, dpi=300, bbox_inches='tight')
-    print(f"Heatmap saved to: {output_filename}")
+    rel_hm_out = f"rel_improvement_heatmap_{filename}.png"
+    fig_hm.savefig(rel_hm_out, dpi=300, bbox_inches='tight')
+    print(f"Relative improvement heatmap saved to: {rel_hm_out}")
+    # --------------------------------------------------------------------------------------------
 
     print("\n" + "=" * 60)
     print("Analysis complete!")
