@@ -8,7 +8,6 @@ This script loads a trained TinyBird model and normalized spectrogram data for a
 import argparse
 import torch
 import matplotlib.pyplot as plt
-from matplotlib.colors import TwoSlopeNorm
 from tqdm import tqdm
 from utils import load_model_from_checkpoint
 from data_loader import SpectogramDataset
@@ -204,15 +203,6 @@ def main():
 
         # Helper to plot line summary and heatmap for a given matrix
         def plot_set(loss_mat_np, tag: str):
-            # Compute relative improvement matrix needed for the heatmap
-            baseline = loss_mat_np[baseline_row : baseline_row + 1, :]  # (1, n_starts)
-            valid = ~np.isnan(loss_mat_np) & ~np.isnan(baseline)
-            numer = baseline - loss_mat_np                 # (rows, cols)
-            denom = np.abs(baseline)                      # (1, cols)
-            denom_safe = np.where(denom > 0, denom, np.nan)
-            rel_improve = numer / denom_safe               # broadcasted division
-            rel_improve[~valid] = np.nan
-
             # 1) Line plot of average raw loss (MSE) vs n_blocks, excluding baseline row (0 blocks)
             mean_loss = np.nanmean(loss_mat_np, axis=1)
             std_loss = np.nanstd(loss_mat_np, axis=1)
@@ -237,39 +227,32 @@ def main():
             plt.close(fig_line)
             print(f"Saved: {out_line}")
 
-            # 2) Heatmap: show raw MSE on the baseline (block=0) row, rel. improvement elsewhere
+            # 2) Heatmap: raw Loss (MSE)
             fig_hm, ax_hm = plt.subplots(figsize=(12, 8))
-            # Build display matrix: copy rel_improve and inject raw baseline MSE at baseline_row
-            display_mat = rel_improve.copy()
-            display_mat[baseline_row, :] = loss_mat_np[baseline_row, :]
-            # Mask invalid entries
-            display_ma = np.ma.masked_invalid(display_mat)
-            # Symmetric diverging norm centered at 0 (white). Include both rel_improve and baseline MSE in range.
-            max_abs_rel = np.nanmax(np.abs(np.ma.masked_invalid(rel_improve)))
-            max_abs_base = np.nanmax(np.abs(display_ma[baseline_row, :]))
-            max_abs = np.nanmax([max_abs_rel, max_abs_base])
-            if not np.isfinite(max_abs) or max_abs == 0:
-                max_abs = 1.0
-            norm = TwoSlopeNorm(vmin=-max_abs, vcenter=0.0, vmax=max_abs)
-            im_hm = ax_hm.imshow(display_ma, aspect='auto', cmap='bwr', origin='lower', norm=norm)
+            loss_ma = np.ma.masked_invalid(loss_mat_np)
+            # Set color scale to data range (ignoring NaNs)
+            vmin = np.nanmin(loss_ma)
+            vmax = np.nanmax(loss_ma)
+            if not np.isfinite(vmin):
+                vmin = 0.0
+            if not np.isfinite(vmax) or vmax == vmin:
+                vmax = vmin + 1.0
+            im_hm = ax_hm.imshow(loss_ma, aspect='auto', cmap='viridis', origin='lower', vmin=vmin, vmax=vmax)
             ax_hm.set_xlabel('Start Position (block index)')
             ax_hm.set_ylabel('n_blocks')
-            ax_hm.set_title(
-                f'Relative Improvement Heatmap vs Baseline (index {i}, {tag})\nFile: {filename}', fontsize=14, pad=20
-            )
+            ax_hm.set_title(f'Loss (MSE) Heatmap (index {i}, {tag})\nFile: {filename}', fontsize=14, pad=20)
             ax_hm.set_yticks(np.arange(len(y_values)))
             ax_hm.set_yticklabels([str(v) for v in y_values])
             cbar_hm = plt.colorbar(im_hm, ax=ax_hm)
-            cbar_hm.set_label('Rel. Improvement (others) | Baseline row = MSE', rotation=270, labelpad=20, fontsize=12)
+            cbar_hm.set_label('Loss (MSE)', rotation=270, labelpad=20, fontsize=12)
             ax_hm.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
-            # Optionally, tiny legend/note about missing entries
             ax_hm.annotate('Note: Some rows/columns may have fewer valid samples due to boundaries.',
                            xy=(0.99, 0.01), xycoords='axes fraction', fontsize=8, ha='right', va='bottom')
             plt.tight_layout()
-            rel_hm_out = os.path.join(images_dir, f"rel_improvement_heatmap_{tag}_{i}_{filename}.png")
-            fig_hm.savefig(rel_hm_out, dpi=300, bbox_inches='tight')
+            loss_hm_out = os.path.join(images_dir, f"loss_heatmap_{tag}_{i}_{filename}.png")
+            fig_hm.savefig(loss_hm_out, dpi=300, bbox_inches='tight')
             plt.close(fig_hm)
-            print(f"Saved: {rel_hm_out}")
+            print(f"Saved: {loss_hm_out}")
 
         # Generate both sets
         plot_set(losses_iso_np, tag='isolated')
