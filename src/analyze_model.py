@@ -19,7 +19,12 @@ def parse_args():
     parser.add_argument("--model_path", type=str, required=True, help="Path to the model checkpoint directory (containing config.json and weights/)")  # fmt: skip
     parser.add_argument("--checkpoint", type=str, default=None, help="Specific checkpoint file to load (e.g., model_step_005000.pth). If not specified, loads the latest checkpoint.")  # fmt: skip
     parser.add_argument("--data_dir", type=str, default=None, help="Path to directory containing .pt spectrogram files (default: uses val_dir from config.json)")  # fmt: skip
-    parser.add_argument("--index", type=int, default=-1, help="Index of the spectrogram file to analyze (>=0). If negative, process ALL files (default: -1)")
+    parser.add_argument(
+        "--index",
+        type=int,
+        default=-1,
+        help="Index of the spectrogram file to analyze (>=0). If negative, process ALL files (default: -1)",
+    )
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", choices=["cuda", "cpu"], help="Device to run inference on (default: cuda if available, else cpu)")  # fmt: skip
     return parser.parse_args()
 
@@ -86,24 +91,21 @@ def process_file(model, dataset, index, device):
 
     x_mean = mean_column_over_intervals(x, x_i, N)
 
-
-    def compute_losses(x, x_i, N, x_mean, isolate_block = False ):
-
-        def compute_loss(x, x_i, N, start, x_mean, n_blocks, isolate_block ):
-
-            if ( n_blocks == 0 ) : 
+    def compute_losses(x, x_i, N, x_mean, isolate_block=False):
+        def compute_loss(x, x_i, N, start, x_mean, n_blocks, isolate_block):
+            if n_blocks == 0:
                 xs, x_is = model.sample_data(x.clone(), x_i.clone(), N.clone(), n_blocks=1, start=start)
                 x_mean_expanded = x_mean.expand_as(xs)
                 return (x_mean_expanded - xs).pow(2).mean()
-            elif ( n_blocks < 0 ) :
-                n_blocks        = -n_blocks
-                window_start    = start - n_blocks
-                iblock, mblock  = 0, n_blocks if isolate_block else -1 
-            else :
-                window_start    = start
-                mblock, iblock  = 0, n_blocks if isolate_block else -1 
+            elif n_blocks < 0:
+                n_blocks = -n_blocks
+                window_start = start - n_blocks
+                iblock, mblock = 0 if isolate_block else -1, n_blocks
+            else:
+                window_start = start
+                mblock, iblock = 0, n_blocks if isolate_block else -1
 
-            xs, x_is = model.sample_data(x.clone(), x_i.clone(), N.clone(), n_blocks=n_blocks+1, start=window_start)
+            xs, x_is = model.sample_data(x.clone(), x_i.clone(), N.clone(), n_blocks=n_blocks + 1, start=window_start)
 
             # Initialize masked_blocks and frac based on sequence length
             # if xs.shape[-1] > 3000:
@@ -112,13 +114,12 @@ def process_file(model, dataset, index, device):
             # else:
             #     masked_blocks, frac = 1, 0.0
 
-            h, idx_restore, bool_mask, bool_pad, T = model.forward_encoder(xs, x_is, mblock=mblock, iblock=iblock )
+            h, idx_restore, bool_mask, bool_pad, T = model.forward_encoder(xs, x_is, mblock=mblock, iblock=iblock)
             pred = model.forward_decoder(h, idx_restore, T, bool_pad=bool_pad)
             loss = model.loss_mse(xs, pred, bool_mask)
             return loss
 
-
-        block_min, block_max = -12 , 12
+        block_min, block_max = -12, 12
 
         n_valid_chirps = N.max().item()
         losses = torch.zeros((block_max - block_min + 1, n_valid_chirps), device=device)
@@ -133,17 +134,17 @@ def process_file(model, dataset, index, device):
             total_iterations += max(0, bmax_i - bmin_i)
         with tqdm(total=total_iterations, desc="Computing losses") as pbar:
             for start in range(0, n_valid_chirps):
-                bmin = min( max(0, start + block_min) , n_valid_chirps) - start
-                bmax = min( n_valid_chirps, start + block_max + 1) - start
-                for n_blocks in range(bmin, bmax ):
+                bmin = min(max(0, start + block_min), n_valid_chirps) - start
+                bmax = min(n_valid_chirps, start + block_max + 1) - start
+                for n_blocks in range(bmin, bmax):
                     with torch.no_grad():
                         loss = compute_loss(x, x_i, N, start, x_mean, n_blocks, isolate_block)
-                    losses[n_blocks + block_max , start ] = loss.item()
+                    losses[n_blocks + block_max, start] = loss.item()
                     pbar.update(1)
         return losses
 
-    losses            = compute_losses(x, x_i, N, x_mean, isolate_block = True )
-    losses_all_blocks = compute_losses(x, x_i, N, x_mean, isolate_block = False )
+    losses = compute_losses(x, x_i, N, x_mean, isolate_block=True)
+    losses_all_blocks = compute_losses(x, x_i, N, x_mean, isolate_block=False)
 
     return losses, losses_all_blocks, filename
 
@@ -191,6 +192,7 @@ def main():
 
     import os
     import numpy as np
+
     images_dir = "images"
     os.makedirs(images_dir, exist_ok=True)
 
@@ -202,15 +204,15 @@ def main():
 
         # Common axes/meta
         block_min, block_max = -12, 12
-        y_values = list(range(block_min, block_max + 1))   # rows map to n_blocks in [block_min..block_max]
-        baseline_row = block_max                           # n_blocks == 0 maps to index block_max
+        y_values = list(range(block_min, block_max + 1))  # rows map to n_blocks in [block_min..block_max]
+        baseline_row = block_max  # n_blocks == 0 maps to index block_max
         n_starts = losses_iso_np.shape[1]
 
         # Helper to plot line summary and heatmap for a given matrix
         def plot_set(loss_mat_np, tag: str):
-            baseline = loss_mat_np[baseline_row:baseline_row + 1, :]                 # shape (1, n_starts)
+            baseline = loss_mat_np[baseline_row : baseline_row + 1, :]  # shape (1, n_starts)
             denom = np.maximum(np.abs(baseline), 1e-12)
-            rel_improve = (baseline - loss_mat_np) / denom                           # positive means improvement vs 0-block baseline
+            rel_improve = (baseline - loss_mat_np) / denom  # positive means improvement vs 0-block baseline
 
             # 1) Line plot of mean relative improvement vs n_blocks
             mean_rel = rel_improve.mean(axis=1)
@@ -235,7 +237,9 @@ def main():
             im_hm = ax_hm.imshow(rel_improve, aspect='auto', cmap='viridis', origin='lower')
             ax_hm.set_xlabel('Start Position (block index)')
             ax_hm.set_ylabel('n_blocks')
-            ax_hm.set_title(f'Relative Improvement Heatmap vs Baseline (index {i}, {tag})\nFile: {filename}', fontsize=14, pad=20)
+            ax_hm.set_title(
+                f'Relative Improvement Heatmap vs Baseline (index {i}, {tag})\nFile: {filename}', fontsize=14, pad=20
+            )
             ax_hm.set_yticks(np.arange(len(y_values)))
             ax_hm.set_yticklabels([str(v) for v in y_values])
             cbar_hm = plt.colorbar(im_hm, ax=ax_hm)
