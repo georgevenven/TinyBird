@@ -1,4 +1,4 @@
-import argparse 
+import argparse
 import os
 import json
 import shutil
@@ -24,11 +24,16 @@ import time
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
+
 def human_bytes(n: int) -> str:
-    units = ["B","KB","MB","GB","TB"]
-    x = float(n); i=0
-    while x>=1024 and i<len(units)-1: x/=1024.0; i+=1
+    units = ["B", "KB", "MB", "GB", "TB"]
+    x = float(n)
+    i = 0
+    while x >= 1024 and i < len(units) - 1:
+        x /= 1024.0
+        i += 1
     return f"{x:.2f} {units[i]}"
+
 
 @contextlib.contextmanager
 def cuda_mem_scope(device, step=None):
@@ -41,10 +46,12 @@ def cuda_mem_scope(device, step=None):
         dur = time.time() - start
         if torch.cuda.is_available():
             alloc = torch.cuda.max_memory_allocated(device)
-            resv  = torch.cuda.max_memory_reserved(device)
+            resv = torch.cuda.max_memory_reserved(device)
             free_b, total_b = torch.cuda.mem_get_info()
-            print(f"alloc={human_bytes(alloc)}  reserved={human_bytes(resv)}  "
-                  f"free={human_bytes(free_b)}  total={human_bytes(total_b)}  dur={dur:.3f}s")
+            print(
+                f"alloc={human_bytes(alloc)}  reserved={human_bytes(resv)}  "
+                f"free={human_bytes(free_b)}  total={human_bytes(total_b)}  dur={dur:.3f}s"
+            )
             # also log to W&B
             try:
                 payload = {
@@ -57,23 +64,28 @@ def cuda_mem_scope(device, step=None):
             except Exception:
                 pass
 
-def log_batch_shapes(tag, step_num, x, x_i, N, n_blocks, masked_blocks, frac, patch_size=(32,1)):
+
+def log_batch_shapes(tag, step_num, x, x_i, N, n_blocks, frac, patch_size=(32, 1)):
     H, W = int(x.size(2)), int(x.size(3))
     ph, pw = patch_size
     num_tokens = (H // ph) * (W // pw)
-    print(f"x={tuple(x.shape)}, x_i={tuple(x_i.shape)}, N={tuple(N.shape)}, n_blocks={n_blocks}, masked_blocks={masked_blocks}, frac={frac}")
+    print(f"x={tuple(x.shape)}, x_i={tuple(x_i.shape)}, N={tuple(N.shape)}, n_blocks={n_blocks}, frac={frac}")
     try:
-        wandb.log({
-            f"{tag}/B": int(x.size(0)),
-            f"{tag}/H": H,
-            f"{tag}/W": W,
-            f"{tag}/num_tokens": int(num_tokens),
-            f"{tag}/n_blocks": int(n_blocks),
-            f"{tag}/masked_blocks": int(masked_blocks),
-            f"{tag}/frac": float(frac),
-        }, step=int(step_num) if step_num is not None else None, commit=False)
+        wandb.log(
+            {
+                f"{tag}/B": int(x.size(0)),
+                f"{tag}/H": H,
+                f"{tag}/W": W,
+                f"{tag}/num_tokens": int(num_tokens),
+                f"{tag}/n_blocks": int(n_blocks),
+                f"{tag}/frac": float(frac),
+            },
+            step=int(step_num) if step_num is not None else None,
+            commit=False,
+        )
     except Exception:
         pass
+
 
 def dump_cuda_summary():
     if torch.cuda.is_available():
@@ -83,15 +95,14 @@ def dump_cuda_summary():
             print(f"[cuda] memory_summary failed: {e}")
 
 
-
-class Trainer():
+class Trainer:
     def __init__(self, config, pretrained_model=None):
         self.config = config
 
         # Setup device
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Using device: {self.device}")
-        
+
         # Handle continue mode vs new training
         if config.get('is_continuing', False):
             # Continue training mode - use existing run directory
@@ -101,17 +112,17 @@ class Trainer():
             else:
                 runs_base = os.path.join("..", "runs")
                 self.run_path = os.path.join(runs_base, continue_from)
-            
+
             if not os.path.exists(self.run_path):
                 raise FileNotFoundError(f"Continue directory not found: {self.run_path}")
-            
+
             print(f"Continuing training from: {self.run_path}")
-            
+
         else:
             # New training mode - setup run directory
             runs_base = os.path.join("..", "runs")
             os.makedirs(runs_base, exist_ok=True)
-            
+
             self.run_path = os.path.join(runs_base, config["run_name"])
             if os.path.exists(self.run_path):
                 archive_dir = os.path.join(runs_base, "archive")
@@ -120,9 +131,9 @@ class Trainer():
                 archived_path = os.path.join(archive_dir, f"{config['run_name']}_{timestamp}")
                 shutil.move(self.run_path, archived_path)
                 print(f"Moved existing run directory to: {archived_path}")
-            
+
             os.makedirs(self.run_path, exist_ok=True)
-        
+
         # Create subdirectories
         self.weights_path = os.path.join(self.run_path, "weights")
         self.imgs_path = os.path.join(self.run_path, "imgs")
@@ -139,8 +150,8 @@ class Trainer():
             audio_params = {
                 "sr": 32000,  # sample rate
                 "mels": config["mels"],  # number of mel bins
-                "hop_size": 160,  # hop length 
-                "n_fft": 1024  # FFT size
+                "hop_size": 160,  # hop length
+                "n_fft": 1024,  # FFT size
             }
             audio_params_path = os.path.join(self.run_path, "audio_params.json")
             with open(audio_params_path, 'w') as f:
@@ -179,8 +190,9 @@ class Trainer():
                 x /= 1024.0
                 i += 1
             return f"{x:.2f} {units[i]}"
+
         self._human_bytes = _human_bytes
-        
+
         # Initialize model
         if pretrained_model is not None:
             # Use the loaded model from continue mode
@@ -199,35 +211,35 @@ class Trainer():
         wandb.watch(self.tinybird, log="gradients", log_freq=200)
         # Print parameter counts
         count_parameters(self.tinybird)
-        
+
         # Initialize optimizer
         self.optimizer = AdamW(self.tinybird.parameters(), lr=config["lr"], weight_decay=config["weight_decay"])
-        
+
         # Initialize cosine annealing scheduler
         self.scheduler = CosineAnnealingLR(self.optimizer, T_max=config["steps"])
-        
+
         # Initialize AMP scaler if AMP is enabled
         self.use_amp = bool(config.get("amp", False)) and torch.cuda.is_available()
 
         self.scaler = torch.amp.GradScaler('cuda') if self.use_amp else None
-        
+
         # Loss tracking
         self.ema_train_loss = None
         self.ema_val_loss = None
         self.ema_alpha = 0.99
-        
+
         # Loss history for plotting
         self.train_loss_history = []
         self.val_loss_history = []
         self.train_steps = []
         self.val_steps = []
-        
+
         # Initialize step tracking
         self.starting_step = 0
         if config.get('is_continuing', False):
             # Load existing step count and loss history
             self._load_training_state()
-        
+
         # Setup loss logging file
         self.loss_log_path = os.path.join(self.run_path, "loss_log.txt")
         if not config.get('is_continuing', False):
@@ -247,20 +259,20 @@ class Trainer():
                 # Read CSV manually to avoid pandas dependency
                 with open(self.loss_log_path, 'r') as f:
                     lines = f.readlines()[1:]  # Skip header
-                
+
                 if lines:
                     # Parse the last line to get the last step
                     last_line = lines[-1].strip().split(',')
                     last_step = int(last_line[0])
                     self.starting_step = last_step + self.config.get('eval_every', 500)
-                    
+
                     # Load all loss history
                     steps = []
                     train_losses = []
                     val_losses = []
                     ema_train_losses = []
                     ema_val_losses = []
-                    
+
                     for line in lines:
                         parts = line.strip().split(',')
                         if len(parts) >= 5:
@@ -269,22 +281,22 @@ class Trainer():
                             ema_train_losses.append(float(parts[2]))
                             val_losses.append(float(parts[3]))
                             ema_val_losses.append(float(parts[4]))
-                    
+
                     # Store loss history
                     self.train_steps = steps
                     self.train_loss_history = train_losses
                     self.val_steps = steps
                     self.val_loss_history = val_losses
-                    
+
                     # Set EMA losses to last values
                     if ema_train_losses and ema_val_losses:
                         self.ema_train_loss = ema_train_losses[-1]
                         self.ema_val_loss = ema_val_losses[-1]
-                    
+
                     print(f"Loaded training state. Continuing from step {self.starting_step}")
                     print(f"Previous EMA train loss: {self.ema_train_loss:.6f}")
                     print(f"Previous EMA val loss: {self.ema_val_loss:.6f}")
-                    
+
                     # Advance scheduler to correct step
                     for _ in range(self.starting_step):
                         self.scheduler.step()
@@ -296,14 +308,14 @@ class Trainer():
         else:
             print("No loss log found, starting from step 0")
 
-    def step(self, step_num,batch, is_training=True):
+    def step(self, step_num, batch, is_training=True):
         """
         Perform one forward pass and optionally backward pass.
-        
+
         Args:
             batch: Input batch (spectrograms, chirp_intervals, N, filenames)
             is_training: If True, perform gradient update. If False, no gradients.
-            
+
         Returns:
             loss: Scalar loss value
         """
@@ -312,59 +324,67 @@ class Trainer():
         if torch.cuda.is_available() and not self._mem_reported:
             torch.cuda.reset_peak_memory_stats(self.device)
 
-
-        spectrograms, chirp_intervals, _ , N , _ = batch
-        x   = spectrograms.to(self.device, non_blocking=True).float()     # (B, 1, H, W)
+        spectrograms, chirp_intervals, _, N, _ = batch
+        x = spectrograms.to(self.device, non_blocking=True).float()  # (B, 1, H, W)
         x_i = chirp_intervals.to(self.device, non_blocking=True)  # (B, N, 2)
-        N   = N.to(self.device, non_blocking=True)                # (B, 1) # number of chirp intervals
+        N = N.to(self.device, non_blocking=True)  # (B, 1) # number of chirp intervals
 
         mblock, iblock, frac, n_blocks = [], [], 0.0, 11
-        if random.random() < 0.75 :
-            mblock   = [ n_blocks-1 ]
-            start    = random.randint(5, mblock[0]-1)
-            if random.random() < .5 :
-                iblock   = [ start ]
-            else :
-                iblock   = list(range(start, mblock[0]))
-        else :
-            frac = .5
+        if random.random() < 0.75:
+            mblock = [n_blocks - 1]
+            start = random.randint(5, mblock[0] - 1)
+            if random.random() < 0.5:
+                iblock = [start]
+            else:
+                iblock = list(range(start, mblock[0]))
+        else:
+            frac = 0.5
 
-        attend_to_padded = True if random.random() < .25 else False
-
+        attend_to_padded = True if random.random() < 0.25 else False
 
         if is_training:
             self.tinybird.train()
             self.optimizer.zero_grad(set_to_none=True)
         else:
             self.tinybird.eval()
-        
+
         # Forward pass through encoder-decoder
         with cuda_mem_scope(self.device, step=step_num):
             with torch.set_grad_enabled(is_training):
                 if self.use_amp:
                     with torch.amp.autocast('cuda'):
-                        x, x_i  = self.tinybird.compactify_data(x, x_i, N)
-                        x, x_i  = self.tinybird.sample_data(x, x_i, N, n_blocks=n_blocks)
+                        x, x_i = self.tinybird.compactify_data(x, x_i, N)
+                        x, x_i = self.tinybird.sample_data(x, x_i, N, n_blocks=n_blocks)
 
                         if x.shape[-1] > 3000:
-                            masked_blocks, frac = 0,.5
+                            masked_blocks, frac = 0, 0.5
 
-                        log_batch_shapes("train_batch", step_num,x, x_i, N, n_blocks, masked_blocks, frac, patch_size=self.config["patch_size"])
-                        h, idx_restore, bool_mask, bool_pad, T = self.tinybird.forward_encoder(x, x_i, frac=frac, mblock=mblock, iblock=iblock)
-                        pred = self.tinybird.forward_decoder(h, idx_restore, T, bool_pad = bool_pad, attend_to_padded=attend_to_padded)
+                        log_batch_shapes(
+                            "train_batch", step_num, x, x_i, N, n_blocks, frac, patch_size=self.config["patch_size"]
+                        )
+                        h, idx_restore, bool_mask, bool_pad, T = self.tinybird.forward_encoder(
+                            x, x_i, frac=frac, mblock=mblock, iblock=iblock
+                        )
+                        pred = self.tinybird.forward_decoder(
+                            h, idx_restore, T, bool_pad=bool_pad, attend_to_padded=attend_to_padded
+                        )
                         loss = self.tinybird.loss_mse(x, pred, bool_mask)
                 else:
-                    x, x_i  = self.tinybird.compactify_data(x, x_i, N)
-                    x, x_i  = self.tinybird.sample_data(x, x_i, N, n_blocks=n_blocks)
+                    x, x_i = self.tinybird.compactify_data(x, x_i, N)
+                    x, x_i = self.tinybird.sample_data(x, x_i, N, n_blocks=n_blocks)
 
                     if x.shape[-1] > 3000:
-                        masked_blocks, frac = 0,.5
+                        masked_blocks, frac = 0, 0.5
 
-                    log_batch_shapes("train_batch", step_num,x, x_i, N, n_blocks, masked_blocks, frac, patch_size=self.config["patch_size"])
-                    h, idx_restore, bool_mask, bool_pad, T = self.tinybird.forward_encoder(x, x_i, masked_blocks=masked_blocks, frac=frac)
-                    pred = self.tinybird.forward_decoder(h, idx_restore, T, bool_pad = bool_pad)
+                    log_batch_shapes(
+                        "train_batch", step_num, x, x_i, N, n_blocks, frac, patch_size=self.config["patch_size"]
+                    )
+                    h, idx_restore, bool_mask, bool_pad, T = self.tinybird.forward_encoder(
+                        x, x_i, masked_blocks=masked_blocks, frac=frac
+                    )
+                    pred = self.tinybird.forward_decoder(h, idx_restore, T, bool_pad=bool_pad)
                     loss = self.tinybird.loss_mse(x, pred, bool_mask)
-            
+
         # Backward pass only for training
         if is_training:
             if self.use_amp:
@@ -374,10 +394,10 @@ class Trainer():
             else:
                 loss.backward()
                 self.optimizer.step()
-            
+
             # Update learning rate scheduler
             self.scheduler.step()
-            
+
             # Update EMA train loss
             if self.ema_train_loss is None:
                 self.ema_train_loss = loss.item()
@@ -389,7 +409,7 @@ class Trainer():
                 self.ema_val_loss = loss.item()
             else:
                 self.ema_val_loss = self.ema_alpha * self.ema_val_loss + (1 - self.ema_alpha) * loss.item()
-        
+
         # --- Memory tracking: report once after the first completed training step ---
         if not self._mem_reported:
             rss_after = self._process.memory_info().rss
@@ -422,27 +442,26 @@ class Trainer():
 
     def save_reconstruction(self, batch, step_num):
         """Save reconstruction visualization comparing input and output spectrograms."""
-        spectrograms, chirp_intervals, _ , N, _ = batch
-        x = spectrograms.to(self.device, non_blocking=True).float()       # (B, 1, H, W)
+        spectrograms, chirp_intervals, _, N, _ = batch
+        x = spectrograms.to(self.device, non_blocking=True).float()  # (B, 1, H, W)
         x_i = chirp_intervals.to(self.device, non_blocking=True)  # (B, N, 2)
-        N = N.to(self.device, non_blocking=True)                  # (B, 1) # number of chirp intervals
+        N = N.to(self.device, non_blocking=True)  # (B, 1) # number of chirp intervals
 
-        
         # Get model prediction
         self.tinybird.eval()
         with torch.no_grad():
             if self.use_amp:
                 with torch.amp.autocast('cuda'):
-                    x, x_i  = self.tinybird.compactify_data(x, x_i, N)
-                    x, x_i  = self.tinybird.sample_data(x, x_i, N, n_blocks=3)
+                    x, x_i = self.tinybird.compactify_data(x, x_i, N)
+                    x, x_i = self.tinybird.sample_data(x, x_i, N, n_blocks=3)
                     h, idx_restore, bool_mask, bool_pad, T = self.tinybird.forward_encoder(x, x_i)
-                    pred = self.tinybird.forward_decoder(h, idx_restore, T, bool_pad = bool_pad)
+                    pred = self.tinybird.forward_decoder(h, idx_restore, T, bool_pad=bool_pad)
             else:
-                x, x_i  = self.tinybird.compactify_data(x, x_i, N)
-                x, x_i  = self.tinybird.sample_data(x, x_i, N, n_blocks=3)
+                x, x_i = self.tinybird.compactify_data(x, x_i, N)
+                x, x_i = self.tinybird.sample_data(x, x_i, N, n_blocks=3)
                 h, idx_restore, bool_mask, bool_pad, T = self.tinybird.forward_encoder(x, x_i)
-                pred = self.tinybird.forward_decoder(h, idx_restore, T, bool_pad = bool_pad)
-        
+                pred = self.tinybird.forward_decoder(h, idx_restore, T, bool_pad=bool_pad)
+
         # Depatchify prediction to get back (B, 1, H, W) format
         def depatchify(pred_patches):
             """pred_patches: (B, T, P) → (B, 1, H, W) using the CURRENT x dims."""
@@ -450,7 +469,7 @@ class Trainer():
             patch_size = self.config["patch_size"]
             fold = nn.Fold(output_size=(H, W), kernel_size=patch_size, stride=patch_size)
             return fold(pred_patches.transpose(1, 2))
-        
+
         # Denormalize predictions to match original patch scale
         def denormalize_predictions(x_patches, pred_patches):
             # x_patches: (B, T, P), pred_patches: (B, T, P)
@@ -460,24 +479,24 @@ class Trainer():
             # Denormalize: pred_denorm = pred * std + mean
             pred_denorm = pred_patches * (target_std + 1e-6) + target_mean
             return pred_denorm
-        
+
         # Create overlay: unmasked original + masked predictions
         def create_overlay(x_patches, pred_patches, bool_mask):
             # x_patches: (B, T, P), pred_patches: (B, T, P), bool_mask: (B, T)
             overlay_patches = x_patches.clone()
             overlay_patches[bool_mask] = pred_patches[bool_mask]
             return overlay_patches
-        
+
         # Convert input to patches for overlay
         unfold = nn.Unfold(kernel_size=self.config["patch_size"], stride=self.config["patch_size"])
         x_patches = unfold(x).transpose(1, 2)  # (B, T, P)
-        
+
         # Denormalize predictions to original scale
         pred_denorm = denormalize_predictions(x_patches, pred)
-        
+
         # Create overlay patches
         overlay_patches = create_overlay(x_patches, pred_denorm, bool_mask)
-        
+
         # Create masked original: original with black (zero) where masked
         def create_masked_original(x_patches, bool_mask):
             # x_patches: (B, T, P), bool_mask: (B, T)
@@ -486,52 +505,52 @@ class Trainer():
             min_val = masked_patches.min()
             masked_patches[bool_mask] = min_val - 1.0
             return masked_patches
-        
+
         # Save reconstruction comparison
         x_img = x[0, 0].detach().cpu().numpy()  # First sample, first channel
         masked_img = depatchify(create_masked_original(x_patches, bool_mask))[0, 0].detach().cpu().numpy()
         overlay_img = depatchify(overlay_patches)[0, 0].detach().cpu().numpy()
-        
+
         fig = plt.figure(figsize=(12, 4.5))  # Taller figure for 3 rows
-        
+
         ax1 = plt.subplot(3, 1, 1)
         ax1.imshow(x_img, origin="lower", aspect="auto")
         ax1.set_title("Input Spectrogram")
         ax1.axis("off")
-        
+
         ax2 = plt.subplot(3, 1, 2)
         ax2.imshow(masked_img, origin="lower", aspect="auto", cmap="viridis")
         ax2.set_title("Original with Mask (black = masked patches)")
         ax2.axis("off")
-        
+
         ax3 = plt.subplot(3, 1, 3)
         ax3.imshow(overlay_img, origin="lower", aspect="auto")
         ax3.set_title("Overlay: Unmasked Original + Masked Predictions")
         ax3.axis("off")
-        
+
         fig.tight_layout()
         recon_path = os.path.join(self.imgs_path, f"recon_step_{step_num:06d}.png")
         fig.savefig(recon_path, dpi=150)
         plt.close(fig)
         # W&B: log recon images
-        wandb.log({
-            "recon/input": wandb.Image(x_img, caption=f"step={step_num} input"),
-            "recon/masked": wandb.Image(masked_img, caption=f"step={step_num} masked"),
-            "recon/overlay": wandb.Image(overlay_img, caption=f"step={step_num} overlay"),
-        }, step=int(step_num), commit=False )
+        wandb.log(
+            {
+                "recon/input": wandb.Image(x_img, caption=f"step={step_num} input"),
+                "recon/masked": wandb.Image(masked_img, caption=f"step={step_num} masked"),
+                "recon/overlay": wandb.Image(overlay_img, caption=f"step={step_num} overlay"),
+            },
+            step=int(step_num),
+            commit=False,
+        )
 
     def train(self):
         # Initialize datasets
         train_dataset = SpectogramDataset(
-            dir=self.config["train_dir"],
-            n_mels=self.config["mels"],
-            n_timebins=self.config["num_timebins"]
+            dir=self.config["train_dir"], n_mels=self.config["mels"], n_timebins=self.config["num_timebins"]
         )
 
         val_dataset = SpectogramDataset(
-            dir=self.config["val_dir"],
-            n_mels=self.config["mels"],
-            n_timebins=self.config["num_timebins"]
+            dir=self.config["val_dir"], n_mels=self.config["mels"], n_timebins=self.config["num_timebins"]
         )
 
         # Initialize dataloaders
@@ -541,16 +560,12 @@ class Trainer():
             shuffle=True,
             num_workers=4,
             pin_memory=True,
-            drop_last=True  # Ensure no undersized batches
+            drop_last=True,  # Ensure no undersized batches
         )
         # train_loader = ChunkingLoader(base_loader)
 
         val_loader = DataLoader(
-            val_dataset,
-            batch_size=self.config["batch_size"],
-            shuffle=False,
-            num_workers=4,
-            pin_memory=True
+            val_dataset, batch_size=self.config["batch_size"], shuffle=False, num_workers=4, pin_memory=True
         )
 
         # Training loop
@@ -567,7 +582,7 @@ class Trainer():
             train_batch = next(train_iter)
 
             try:
-                train_loss = self.step(step_num, train_batch,is_training=True)
+                train_loss = self.step(step_num, train_batch, is_training=True)
             except RuntimeError as e:
                 if "out of memory" in str(e).lower():
                     print("\n[OOM] CUDA out of memory caught. Dumping diagnostics...")
@@ -599,13 +614,17 @@ class Trainer():
                 self.val_steps.append(step_num)
 
                 # Print progress
-                print(f"Step {step_num}: Train Loss = {train_loss:.6f}, "
-                      f"EMA Train = {self.ema_train_loss:.6f}, "
-                      f"Val Loss = {val_loss:.6f}, "
-                      f"EMA Val = {self.ema_val_loss:.6f}, "
-                      f"LR = {current_lr:.2e}")
+                print(
+                    f"Step {step_num}: Train Loss = {train_loss:.6f}, "
+                    f"EMA Train = {self.ema_train_loss:.6f}, "
+                    f"Val Loss = {val_loss:.6f}, "
+                    f"EMA Val = {self.ema_val_loss:.6f}, "
+                    f"LR = {current_lr:.2e}"
+                )
                 with open(self.loss_log_path, 'a') as f:
-                    f.write(f"{step_num},{train_loss:.6f},{self.ema_train_loss:.6f},{val_loss:.6f},{self.ema_val_loss:.6f}\n")
+                    f.write(
+                        f"{step_num},{train_loss:.6f},{self.ema_train_loss:.6f},{val_loss:.6f},{self.ema_val_loss:.6f}\n"
+                    )
 
                 # Save model weights
                 weight_path = os.path.join(self.weights_path, f"model_step_{step_num:06d}.pth")
@@ -613,20 +632,28 @@ class Trainer():
 
                 # Save reconstruction visualization
                 self.save_reconstruction(val_batch, step_num)
-                wandb.log({
-                    "lr": float(current_lr),
-                    "train/loss": float(train_loss),
-                    "train/ema_loss": float(self.ema_train_loss if self.ema_train_loss is not None else train_loss),
-                    "val/loss": float(val_loss),
-                    "val/ema_loss": float(self.ema_val_loss),
-                }, step=int(step_num), commit=True)
-            else :
-                wandb.log({
-                    "lr": float(current_lr),
-                    "train/loss": float(train_loss),
-                    "train/ema_loss": float(self.ema_train_loss if self.ema_train_loss is not None else train_loss),
-                }, step=int(step_num), commit=True)
- 
+                wandb.log(
+                    {
+                        "lr": float(current_lr),
+                        "train/loss": float(train_loss),
+                        "train/ema_loss": float(self.ema_train_loss if self.ema_train_loss is not None else train_loss),
+                        "val/loss": float(val_loss),
+                        "val/ema_loss": float(self.ema_val_loss),
+                    },
+                    step=int(step_num),
+                    commit=True,
+                )
+            else:
+                wandb.log(
+                    {
+                        "lr": float(current_lr),
+                        "train/loss": float(train_loss),
+                        "train/ema_loss": float(self.ema_train_loss if self.ema_train_loss is not None else train_loss),
+                    },
+                    step=int(step_num),
+                    commit=True,
+                )
+
         # Save final model weights
         final_step = self.starting_step + self.config['steps'] - 1
         final_weight_path = os.path.join(self.weights_path, f"model_step_{final_step:06d}.pth")
@@ -641,11 +668,16 @@ class Trainer():
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
 
         # First panel: All losses
-        ax1.plot(self.train_steps, self.train_loss_history,
-                label='Training Loss', alpha=0.7, linewidth=1, color='blue')
-        ax1.plot(self.val_steps, self.val_loss_history,
-                label='Validation Loss', marker='o', markersize=3,
-                linewidth=2, color='red')
+        ax1.plot(self.train_steps, self.train_loss_history, label='Training Loss', alpha=0.7, linewidth=1, color='blue')
+        ax1.plot(
+            self.val_steps,
+            self.val_loss_history,
+            label='Validation Loss',
+            marker='o',
+            markersize=3,
+            linewidth=2,
+            color='red',
+        )
         ax1.set_xlabel('Training Steps')
         ax1.set_ylabel('Loss')
         ax1.set_title('Training and Validation Loss')
@@ -675,11 +707,16 @@ class Trainer():
                 ema_val = ema_alpha * ema_val + (1 - ema_alpha) * loss
             ema_val_history.append(ema_val)
 
-        ax2.plot(self.train_steps, ema_train_history,
-                label='EMA Training Loss', linewidth=2, color='darkblue')
-        ax2.plot(self.val_steps, ema_val_history,
-                label='EMA Validation Loss', marker='o', markersize=3,
-                linewidth=2, color='darkred')
+        ax2.plot(self.train_steps, ema_train_history, label='EMA Training Loss', linewidth=2, color='darkblue')
+        ax2.plot(
+            self.val_steps,
+            ema_val_history,
+            label='EMA Validation Loss',
+            marker='o',
+            markersize=3,
+            linewidth=2,
+            color='darkred',
+        )
         ax2.set_xlabel('Training Steps')
         ax2.set_ylabel('EMA Loss')
         ax2.set_title('Exponential Moving Average Loss')
@@ -697,7 +734,11 @@ class Trainer():
         print(f"Loss plot saved to: {plot_path}")
         print(f"Loss log saved to: {self.loss_log_path}")
         # W&B: log final loss curves and attach the CSV
-        wandb.log({"final/loss_plot": wandb.Image(plot_path)}, step=int(self.starting_step + self.config['steps'] - 1), commit=True)
+        wandb.log(
+            {"final/loss_plot": wandb.Image(plot_path)},
+            step=int(self.starting_step + self.config['steps'] - 1),
+            commit=True,
+        )
         if os.path.exists(self.loss_log_path):
             dest = os.path.join(wandb.run.dir, "loss_log.txt")
             os.makedirs(os.path.dirname(dest), exist_ok=True)
@@ -713,7 +754,7 @@ if __name__ == "__main__":
     parser.add_argument("--val_dir", type=str, help="validation directory")
     parser.add_argument("--run_name", type=str, help="directory name inside /runs to store train run details")
 
-    # Defaults 
+    # Defaults
     parser.add_argument("--steps", type=int, default=500_000, help="number of training steps")
     parser.add_argument("--lr", type=float, default=2e-4, help="learning rate")
     parser.add_argument("--batch_size", type=int, default=256, help="batch size")
@@ -726,10 +767,16 @@ if __name__ == "__main__":
     parser.add_argument("--eval_every", type=int, default=500, help="evaluate every N steps")
     parser.add_argument("--amp", action="store_true", help="enable automatic mixed precision training")
     parser.add_argument("--weight_decay", type=float, default=0, help="weight decay")
-    parser.add_argument("--continue_from", type=str, help="continue training from existing run directory (path to run dir)")
-    parser.add_argument("--fallback_random", action="store_true", help="if checkpoint not found when continuing, initialize with random weights instead of raising error")
+    parser.add_argument(
+        "--continue_from", type=str, help="continue training from existing run directory (path to run dir)"
+    )
+    parser.add_argument(
+        "--fallback_random",
+        action="store_true",
+        help="if checkpoint not found when continuing, initialize with random weights instead of raising error",
+    )
 
-    # Encoder 
+    # Encoder
     parser.add_argument("--enc_hidden_d", type=int, default=384, help="encoder hidden dimension")
     parser.add_argument("--enc_n_head", type=int, default=6, help="encoder number of attention heads")
     parser.add_argument("--enc_n_layer", type=int, default=6, help="encoder number of transformer layers")
@@ -744,30 +791,32 @@ if __name__ == "__main__":
     # W&B configuration (Step 1)
     parser.add_argument("--wandb_project", type=str, default="tinybird", help="Weights & Biases project")
     parser.add_argument("--wandb_entity", type=str, default=None, help="Weights & Biases entity (team/user)")
-    parser.add_argument("--wandb_mode", type=str, default="online", help="Weights & Biases mode: online|offline|disabled")
+    parser.add_argument(
+        "--wandb_mode", type=str, default="online", help="Weights & Biases mode: online|offline|disabled"
+    )
 
     parser.add_argument("--config_json", type=str, default=None, help="config json file")
     parser.add_argument("--detect_anomaly", action="store_true", help="detect anomalies in the training loop")
-    
+
     args = parser.parse_args()
 
     warnings.filterwarnings("ignore", category=UserWarning, module="torch.nn.modules.transformer")
-    
+
     # Handle continue mode vs new training
     if args.continue_from:
         # Continue training mode - load config from existing run
-        
+
         # Load existing config and model
         model, config = load_model_from_checkpoint(args.continue_from, fallback_to_random=args.fallback_random)
-        
+
         # Override with any command line args that were provided
         for key, value in vars(args).items():
             if value is not None and key not in ['continue_from']:
                 config[key] = value
-                
+
         config['continue_from'] = args.continue_from
         config['is_continuing'] = True
-        
+
     else:
         if args.config_json:
             print(f"Loading config from {args.config_json}")
@@ -780,7 +829,7 @@ if __name__ == "__main__":
                 # Only override if the CLI value differs from the parser default
                 if v is not None and v != parser.get_default(k):
                     config[k] = v
-                    
+
             # validate required fields after merge
             for req in ["train_dir", "val_dir", "run_name"]:
                 assert req in config and config[req], f"--{req} is required (via JSON or CLI)"
@@ -790,19 +839,22 @@ if __name__ == "__main__":
             config = vars(args)
         config['is_continuing'] = False
 
+    # Calculate seq_len from num_timebins and patch dimensions
+    assert (
+        config["num_timebins"] % config["patch_width"] == 0
+    ), f"num_timebins ({config['num_timebins']}) must be divisible by patch_width ({config['patch_width']})"
+    assert (
+        config["mels"] % config["patch_height"] == 0
+    ), f"mels ({config['mels']}) must be divisible by patch_height ({config['patch_height']})"
 
-    # Calculate seq_len from num_timebins and patch dimensions  
-    assert config["num_timebins"] % config["patch_width"] == 0, f"num_timebins ({config['num_timebins']}) must be divisible by patch_width ({config['patch_width']})"
-    assert config["mels"] % config["patch_height"] == 0, f"mels ({config['mels']}) must be divisible by patch_height ({config['patch_height']})"
-    
     # Configure patch size and max sequence length for model
     config["patch_size"] = (config["patch_height"], config["patch_width"])
     config["max_seq"] = (config["num_timebins"] // config["patch_width"]) * (config["mels"] // config["patch_height"])
-    
+
     # Create trainer with loaded model if continuing
     if config.get('is_continuing', False):
         trainer = Trainer(config, pretrained_model=model)
     else:
         trainer = Trainer(config)
-    
+
     trainer.train()
