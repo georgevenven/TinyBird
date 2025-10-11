@@ -101,7 +101,7 @@ def process_file(model, dataset, index, device):
 
             mblock = [windowed_blocks - 1]
             if isolate_block:
-                iblock = [mblock - (n_blocks - 1)]
+                iblock = [ mblock[0] - (n_blocks - 1)]
             else:
                 iblock = [-1]
 
