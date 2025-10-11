@@ -217,7 +217,6 @@ class TinyBird(nn.Module):
 
         if iblock >= 0 and iblock < N :
             assert mblock >= 0 and mblock < N, f"mblock must be set if iblock is set, got {mblock} and {iblock}"
-            assert mblock != iblock, f"mblock and iblock must be different, got {mblock} and {iblock}"
 
         assert masked_blocks < N, f"masked_blocks must be less than N, got {masked_blocks} and {N}"
         assert frac >=0 and frac < 1, f"frac must be between 0 and 1, got {frac}"
@@ -258,7 +257,8 @@ class TinyBird(nn.Module):
             if iblock >= 0 and iblock < N :
                 #pad2d should be True everywhere except the isolated block and where the mask is true
                 pad2d[b, :] = True # start fully padded
-                pad2d[b, starts[b, iblock]:ends[b, iblock]] = False # keep iblock visible
+                if mblock != iblock : 
+                    pad2d[b, starts[b, iblock]:ends[b, iblock]] = False # keep iblock visible
                 pad2d[b, mask2d[b]] = False  # do not pad masked columns
 
 

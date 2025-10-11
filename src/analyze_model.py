@@ -92,20 +92,25 @@ def process_file(model, dataset, index, device):
     x_mean = mean_column_over_intervals(x, x_i, N)
 
     def compute_losses(x, x_i, N, x_mean, isolate_block=False):
-        def compute_loss(x, x_i, N, start, x_mean, n_blocks, isolate_block):
-            if n_blocks == 0:
+        def compute_loss(x, x_i, N, start, x_mean, n_blocks, isolate_block, max_blocks=12):
+            if not isolate_block and n_blocks == 0:
                 xs, x_is = model.sample_data(x.clone(), x_i.clone(), N.clone(), n_blocks=1, start=start)
                 x_mean_expanded = x_mean.expand_as(xs)
                 return (x_mean_expanded - xs).pow(2).mean()
-            elif n_blocks < 0:
-                n_blocks = -n_blocks
+
+            windowed_blocks = max_blocks if isolate_block else abs(n_blocks) + 1
+
+            if n_blocks < 0:
+                n_blocks = abs(n_blocks)
                 window_start = start - n_blocks
                 iblock, mblock = 0 if isolate_block else -1, n_blocks
             else:
                 window_start = start
                 mblock, iblock = 0, n_blocks if isolate_block else -1
 
-            xs, x_is = model.sample_data(x.clone(), x_i.clone(), N.clone(), n_blocks=n_blocks + 1, start=window_start)
+            xs, x_is = model.sample_data(
+                x.clone(), x_i.clone(), N.clone(), n_blocks=windowed_blocks, start=window_start
+            )
             h, idx_restore, bool_mask, bool_pad, T = model.forward_encoder(xs, x_is, mblock=mblock, iblock=iblock)
             pred = model.forward_decoder(h, idx_restore, T, bool_pad=bool_pad)
             loss = model.loss_mse(xs, pred, bool_mask)
@@ -130,8 +135,9 @@ def process_file(model, dataset, index, device):
                 bmin = min(max(0, start + block_min), n_valid_chirps) - start
                 bmax = min(n_valid_chirps, start + block_max + 1) - start
                 for n_blocks in range(bmin, bmax):
+                    max_blocks = abs(bmin) if n_blocks <= 0 else abs(bmax)
                     with torch.no_grad():
-                        loss = compute_loss(x, x_i, N, start, x_mean, n_blocks, isolate_block)
+                        loss = compute_loss(x, x_i, N, start, x_mean, n_blocks, isolate_block, max_blocks=max_blocks)
                     losses[n_blocks + block_max, start] = loss.item()
                     pbar.update(1)
         return losses
@@ -200,7 +206,6 @@ def main():
         y_values = list(range(block_min, block_max + 1))  # rows map to n_blocks in [block_min..block_max]
         baseline_row = block_max  # n_blocks == 0 maps to index block_max
 
-
         # Helper to plot line summary and heatmap for a given matrix
         def plot_set(loss_mat_np, tag: str):
             # 1) Line plot of average raw loss (MSE) vs n_blocks, excluding baseline row (0 blocks)
@@ -219,8 +224,14 @@ def main():
             ax_line.set_title(f'Average Loss vs n_blocks (excluding 0) (index {i}, {tag})\nFile: {filename}')
             ax_line.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
             # Add note about missing data
-            ax_line.annotate('Note: Some rows/columns may have fewer valid samples due to boundaries.', 
-                             xy=(0.99, 0.01), xycoords='axes fraction', fontsize=8, ha='right', va='bottom')
+            ax_line.annotate(
+                'Note: Some rows/columns may have fewer valid samples due to boundaries.',
+                xy=(0.99, 0.01),
+                xycoords='axes fraction',
+                fontsize=8,
+                ha='right',
+                va='bottom',
+            )
             plt.tight_layout()
             out_line = os.path.join(images_dir, f"avg_loss_vs_nblocks_{tag}_{i}_{filename}.png")
             fig_line.savefig(out_line, dpi=300, bbox_inches='tight')
@@ -246,8 +257,14 @@ def main():
             cbar_hm = plt.colorbar(im_hm, ax=ax_hm)
             cbar_hm.set_label('Loss (MSE)', rotation=270, labelpad=20, fontsize=12)
             ax_hm.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
-            ax_hm.annotate('Note: Some rows/columns may have fewer valid samples due to boundaries.',
-                           xy=(0.99, 0.01), xycoords='axes fraction', fontsize=8, ha='right', va='bottom')
+            ax_hm.annotate(
+                'Note: Some rows/columns may have fewer valid samples due to boundaries.',
+                xy=(0.99, 0.01),
+                xycoords='axes fraction',
+                fontsize=8,
+                ha='right',
+                va='bottom',
+            )
             plt.tight_layout()
             loss_hm_out = os.path.join(images_dir, f"loss_heatmap_{tag}_{i}_{filename}.png")
             fig_hm.savefig(loss_hm_out, dpi=300, bbox_inches='tight')
