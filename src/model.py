@@ -276,9 +276,9 @@ class TinyBird(nn.Module):
             # if iblock is set, ensure iblock is not padded and that the pad does not ovelap with the mask
             if len(iblock) > 0:
                 # pad2d should be True everywhere except the isolated block and where the mask is true
-                pad2d[b, :] = True  # start fully padded
-                for ib in iblock:
-                    pad2d[b, st_i[ib] : end_i[ib]] = False  # do not pad isolated blocks
+                for blk in range(N):
+                    if (blk not in iblock) and (blk not in mask_blocks):
+                        pad2d[b, st_i[ib] : end_i[ib]] = True  # do not pad isolated blocks
             else:
                 # iblock is not set, pad the parital blocks
                 pad2d[b, 0 : min(st_i)] = True  # pad partial blocks if iblock is not set
