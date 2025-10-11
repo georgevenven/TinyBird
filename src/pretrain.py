@@ -296,7 +296,7 @@ class Trainer():
         else:
             print("No loss log found, starting from step 0")
 
-    def step(self, step_num,batch, is_training=True, n_blocks: int = 3):
+    def step(self, step_num,batch, is_training=True):
         """
         Perform one forward pass and optionally backward pass.
         
@@ -313,16 +313,24 @@ class Trainer():
             torch.cuda.reset_peak_memory_stats(self.device)
 
 
-
         spectrograms, chirp_intervals, _ , N , _ = batch
         x   = spectrograms.to(self.device, non_blocking=True).float()     # (B, 1, H, W)
         x_i = chirp_intervals.to(self.device, non_blocking=True)  # (B, N, 2)
         N   = N.to(self.device, non_blocking=True)                # (B, 1) # number of chirp intervals
 
+        mblock, iblock, frac, n_blocks = [], [], 0.0, 11
+        if random.random() < 0.75 :
+            mblock   = [ n_blocks-1 ]
+            start    = random.randint(5, mblock[0]-1)
+            if random.random() < .5 :
+                iblock   = [ start ]
+            else :
+                iblock   = list(range(start, mblock[0]))
+        else :
+            frac = .5
 
-        r = random.random()
-        masked_blocks = 1   if r < 0.5 else 0
-        frac          = 0.0 if r < 0.5 else 0.5
+        attend_to_padded = True if random.random() < .25 else False
+
 
         if is_training:
             self.tinybird.train()
@@ -342,8 +350,8 @@ class Trainer():
                             masked_blocks, frac = 0,.5
 
                         log_batch_shapes("train_batch", step_num,x, x_i, N, n_blocks, masked_blocks, frac, patch_size=self.config["patch_size"])
-                        h, idx_restore, bool_mask, bool_pad, T = self.tinybird.forward_encoder(x, x_i, masked_blocks=masked_blocks, frac=frac)
-                        pred = self.tinybird.forward_decoder(h, idx_restore, T, bool_pad = bool_pad)
+                        h, idx_restore, bool_mask, bool_pad, T = self.tinybird.forward_encoder(x, x_i, frac=frac, mblock=mblock, iblock=iblock)
+                        pred = self.tinybird.forward_decoder(h, idx_restore, T, bool_pad = bool_pad, attend_to_padded=attend_to_padded)
                         loss = self.tinybird.loss_mse(x, pred, bool_mask)
                 else:
                     x, x_i  = self.tinybird.compactify_data(x, x_i, N)
@@ -527,7 +535,7 @@ class Trainer():
         )
 
         # Initialize dataloaders
-        base_loader = DataLoader(
+        train_loader = DataLoader(
             train_dataset,
             batch_size=self.config["batch_size"],
             shuffle=True,
@@ -535,7 +543,7 @@ class Trainer():
             pin_memory=True,
             drop_last=True  # Ensure no undersized batches
         )
-        train_loader = ChunkingLoader(base_loader)
+        # train_loader = ChunkingLoader(base_loader)
 
         val_loader = DataLoader(
             val_dataset,
@@ -556,23 +564,16 @@ class Trainer():
         print(f"Training from step {self.starting_step} to {end_step}")
 
         for step_num in range(self.starting_step, end_step):
-            train_batch, k = next(train_iter)
+            train_batch = next(train_iter)
 
             try:
-                train_loss = self.step(step_num, train_batch,is_training=True, n_blocks=int(k))
+                train_loss = self.step(step_num, train_batch,is_training=True)
             except RuntimeError as e:
                 if "out of memory" in str(e).lower():
                     print("\n[OOM] CUDA out of memory caught. Dumping diagnostics...")
                     dump_cuda_summary()
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
-                    # optional: quick mitigation — drop half the batch once and retry
-                    spectrograms, chirp_intervals, _ , N, filenames = train_batch
-                    if spectrograms.size(0) > 1:
-                        half = spectrograms.size(0) // 2
-                        train_batch = (spectrograms[:half], chirp_intervals[:half], N[:half], filenames[:half])
-                        print(f"[OOM] Retrying with smaller micro-batch: B={half}")
-                        train_loss = self.step(step_num, train_batch, is_training=True, n_blocks=int(max(1, k//2)))
                     else:
                         raise
                 else:

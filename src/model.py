@@ -193,7 +193,15 @@ class TinyBird(nn.Module):
 
         return x_out, xi_out
 
-    def build_column_mask(self,xi: torch.Tensor,hw: (None, None),masked_blocks: int = 0, frac: float = 0.0,mblock: list = [],iblock: list = []):
+    def build_column_mask(
+        self,
+        xi: torch.Tensor,
+        hw: (None, None),
+        masked_blocks: int = 0,
+        frac: float = 0.0,
+        mblock: list = [],
+        iblock: list = [],
+    ):
         """
         Generate column-wise masking pattern for spectrogram patches.
 
@@ -214,21 +222,21 @@ class TinyBird(nn.Module):
         device = xi.device
         B, N, _ = xi.shape
 
-        if len(mblock) > 0 :
+        if len(mblock) > 0:
             assert all((0 <= i < N) for i in mblock), f"invalid mblock indices N={N}, got {mblock}"
-            masked_blocks, frac = 0, 0.0 #disable masked_blocks and frac behavior if mblock is set
-        else :
+            masked_blocks, frac = 0, 0.0  # disable masked_blocks and frac behavior if mblock is set
+        else:
             # if mblock is not set, ensure masked_blocks and frac are valid
             assert masked_blocks < N, f"masked_blocks must be less than N, got {masked_blocks} and {N}"
             assert frac >= 0 and frac < 1, f"frac must be between 0 and 1, got {frac}"
-            assert (masked_blocks > 0) ^ (frac > 0), f"either masked_blocks or frac must be greater than 0 not both, got {masked_blocks} and {frac}"
+            assert (masked_blocks > 0) ^ (
+                frac > 0
+            ), f"either masked_blocks or frac must be greater than 0 not both, got {masked_blocks} and {frac}"
 
         if len(iblock) > 0:
             # if iblock is set, ensure mblock is set
             assert all((0 <= i < N) for i in iblock), f"invalid iblock indices N={N}, got {iblock}"
             assert len(mblock) > 0, f"mblock len={len(mblock)}. mblock must be set if iblock is set"
-
-
 
         starts = xi[:, :, 0].to(torch.long).clamp(min=0, max=W)  # (B, N)
         ends = xi[:, :, 1].to(torch.long).clamp(min=0, max=W)  # (B, N)
@@ -248,11 +256,10 @@ class TinyBird(nn.Module):
         pad2d = torch.zeros(B, W, dtype=torch.bool, device=device)  # pad2d is boolean padding of the spectrogram
         mask2d = torch.zeros(B, W, dtype=torch.bool, device=device)  # mask2d is a boolean mask of the spectrogram
         for b in range(B):
-            st_i   = [int(v) for v in starts[b].tolist()]
-            end_i  = [int(v) for v in ends[b].tolist()]
+            st_i = [int(v) for v in starts[b].tolist()]
+            end_i = [int(v) for v in ends[b].tolist()]
 
-
-            # ensure that "remaining" can't include the isolated blocks, as this is where information comes from. 
+            # ensure that "remaining" can't include the isolated blocks, as this is where information comes from.
             if len(iblock) > 0:
                 for ib in iblock:
                     pad2d[b, st_i[ib] : end_i[ib]] = True  # this will be reset to False later
@@ -263,9 +270,7 @@ class TinyBird(nn.Module):
 
             # randomly select remaining columns to keep mask width constant for each item in the batch
             remaining = ((~mask2d[b]) & (~pad2d[b])).nonzero(as_tuple=False).squeeze(1)
-            remaining = remaining[
-                torch.randperm(remaining.numel(), device=device)[: m_w - int(mask2d[b].sum().item())]
-            ]  
+            remaining = remaining[torch.randperm(remaining.numel(), device=device)[: m_w - int(mask2d[b].sum().item())]]
             mask2d[b, remaining] = True
 
             # if iblock is set, ensure iblock is not padded and that the pad does not ovelap with the mask
@@ -273,14 +278,13 @@ class TinyBird(nn.Module):
                 # pad2d should be True everywhere except the isolated block and where the mask is true
                 pad2d[b, :] = True  # start fully padded
                 for ib in iblock:
-                    pad2d[b, st_i[ib] : end_i[ib]] = False  #do not pad isolated blocks
+                    pad2d[b, st_i[ib] : end_i[ib]] = False  # do not pad isolated blocks
             else:
-                #iblock is not set, pad the parital blocks 
-                pad2d[b, 0 : min(st_i)] = True #pad partial blocks if iblock is not set
-                pad2d[b, max(end_i) : W]   = True #pad partial blocks if iblock is not set
+                # iblock is not set, pad the parital blocks
+                pad2d[b, 0 : min(st_i)] = True  # pad partial blocks if iblock is not set
+                pad2d[b, max(end_i) : W] = True  # pad partial blocks if iblock is not set
 
-            pad2d[b, mask2d[b]] = False #any masked columns will not be padded
-    
+            pad2d[b, mask2d[b]] = False  # any masked columns will not be padded
 
         pad2d = (
             pad2d.unsqueeze(1).expand(-1, H, -1).flatten(1, 2).to(device=device, dtype=torch.bool)
@@ -384,7 +388,14 @@ class TinyBird(nn.Module):
         z = self.apply_position_encoding(z)  # (B, T, D_enc)
         return self.encoder(z)  # (B, T, D_enc)
 
-    def forward_decoder(self, h: torch.Tensor, idx_restore: torch.Tensor, T: int, bool_pad: torch.Tensor = None):
+    def forward_decoder(
+        self,
+        h: torch.Tensor,
+        idx_restore: torch.Tensor,
+        T: int,
+        bool_pad: torch.Tensor = None,
+        attend_to_padded: bool = True,
+    ):
         """
         Project encoder outputs to decoder width → insert learned mask tokens → unshuffle back to the
         original token order → add decoder positional encodings → run the Transformer decoder → predict
@@ -438,7 +449,10 @@ class TinyBird(nn.Module):
         )  # (1, T, D_dec) decoder pos-encs derived by projecting encoder pos-encs
         y_full = y_full + pos_dec
 
-        d = self.decoder(y_full)  # (B, T, D_dec)
+        if attend_to_padded:
+            d = self.decoder(y_full)  # (B, T, D_dec)
+        else:
+            d = self.decoder(y_full, src_key_padding_mask=bool_pad)
         pred = self.decoder_to_pixel(d)  # Final per-token patch prediction: (B, T, P). P is pixels per patch
         return pred
 
