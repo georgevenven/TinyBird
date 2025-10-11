@@ -256,6 +256,7 @@ class TinyBird(nn.Module):
 
         pad2d = torch.zeros(B, W, dtype=torch.bool, device=device)  # pad2d is boolean padding of the spectrogram
         mask2d = torch.zeros(B, W, dtype=torch.bool, device=device)  # mask2d is a boolean mask of the spectrogram
+
         for b in range(B):
             st_i = [int(v) for v in starts[b].tolist()]
             end_i = [int(v) for v in ends[b].tolist()]
@@ -264,9 +265,8 @@ class TinyBird(nn.Module):
             pad2d[b, max(end_i) : W] = True  # pad partial blocks if iblock is not set
 
             # ensure that "remaining" can't include the isolated blocks, as this is where information comes from.
-            if len(iblock) > 0:
-                for ib in iblock:
-                    pad2d[b, st_i[ib] : end_i[ib]] = True  # this will be reset to False later
+            for ib in iblock:
+                pad2d[b, st_i[ib] : end_i[ib]] = True  # this will be reset to False later
 
             # Specified mask block will not be padded, it will be masked even if iblock was set
             for blk in mask_blocks:
@@ -277,12 +277,13 @@ class TinyBird(nn.Module):
             remaining = remaining[torch.randperm(remaining.numel(), device=device)[: m_w - int(mask2d[b].sum().item())]]
             mask2d[b, remaining] = True
 
-            if len(iblock) > 0:
-                for blk in range(N):
-                    if (blk not in iblock) and (blk not in mask_blocks):
-                        pad2d[b, st_i[blk] : end_i[blk]] = True  # not in an iblock or a mask_block so pad
-                    else:
-                        pad2d[b, st_i[blk] : end_i[blk]] = False  # in an iblock or a mask_block so don't pad
+            for blk in range(N):
+                if (blk not in iblock) and (blk not in mask_blocks):
+                    pad2d[b, st_i[blk] : end_i[blk]] = True  # not in an iblock or a mask_block so pad
+                else:
+                    pad2d[b, st_i[blk] : end_i[blk]] = False  # in an iblock or a mask_block so don't pad
+
+            pad2d[b, remaining] = False
 
         pad2d = (
             pad2d.unsqueeze(1).expand(-1, H, -1).flatten(1, 2).to(device=device, dtype=torch.bool)
