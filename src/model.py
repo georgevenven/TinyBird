@@ -288,8 +288,8 @@ class TinyBird(nn.Module):
 
         print("================================================")
         print(f"mblock={mblock}, iblock={iblock}, frac={frac}")
-        print(f"pad2d[0,0,:]={pad2d[0,0,:]}")
-        print(f"mask2d[0,0,:]={mask2d[0,0,:]}")
+        print(f"pad2d[0,W]={pad2d[0,:]}")
+        print(f"mask2d[0,W]={mask2d[0,:]}")
         print("================================================")
 
         pad2d = (
