@@ -98,6 +98,7 @@ def process_file(model, dataset, index, device):
             )
 
             windowed_blocks = max_blocks if isolate_block else abs(n_blocks)
+            windowed_start = start - windowed_blocks
 
             if windowed_blocks <= 1:
                 return torch.zeros(x.shape[0], device=x.device, dtype=x.dtype)
@@ -108,7 +109,9 @@ def process_file(model, dataset, index, device):
             else:
                 iblock = -1
 
-            xs, x_is = model.sample_data(x.clone(), x_i.clone(), N.clone(), n_blocks=windowed_blocks, start=start)
+            xs, x_is = model.sample_data(
+                x.clone(), x_i.clone(), N.clone(), n_blocks=windowed_blocks, start=windowed_start
+            )
             h, idx_restore, bool_mask, bool_pad, T = model.forward_encoder(xs, x_is, mblock=mblock, iblock=iblock)
             pred = model.forward_decoder(h, idx_restore, T, bool_pad=bool_pad)
             loss = model.loss_mse(xs, pred, bool_mask)
