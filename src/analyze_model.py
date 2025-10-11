@@ -98,7 +98,7 @@ def process_file(model, dataset, index, device):
                 x_mean_expanded = x_mean.expand_as(xs)
                 return (x_mean_expanded - xs).pow(2).mean()
 
-            windowed_blocks = max_blocks if isolate_block else abs(n_blocks) + 1
+            windowed_blocks = max_blocks + 1 if isolate_block else abs(n_blocks) + 1
 
             if n_blocks < 0:
                 n_blocks = abs(n_blocks)
