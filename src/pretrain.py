@@ -332,7 +332,7 @@ class Trainer:
         mblock, iblock, frac, n_blocks = [], [], 0.0, 11
         if random.random() < 0.75:
             mblock = [n_blocks - 1]
-            start = random.randint(5, mblock[0] - 1)
+            start  = random.randint(5, mblock[0] - 1)
             if random.random() < 0.5:
                 iblock = [start]
             else:
@@ -362,6 +362,7 @@ class Trainer:
                         log_batch_shapes(
                             "train_batch", step_num, x, x_i, N, n_blocks, frac, patch_size=self.config["patch_size"]
                         )
+                        print(f"mblock: {mblock}, iblock: {iblock}, frac: {frac}")
                         h, idx_restore, bool_mask, bool_pad, T = self.tinybird.forward_encoder(
                             x, x_i, frac=frac, mblock=mblock, iblock=iblock
                         )
