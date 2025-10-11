@@ -294,6 +294,12 @@ class TinyBird(nn.Module):
         )  # (B,W) -> (B, H, W) -> (B, H*W)
         assert not (pad2d & mask2d).any(), "pad2d and mask2d overlap (both True at some positions)"
 
+        print("================================================")
+        print(f"mblock={mblock}, iblock={iblock}, frac={frac}")
+        print(f"pad2d[0,0,:]={pad2d[0,0,:]}")
+        print(f"mask2d[0,0,:]={mask2d[0,0,:]}")
+        print("================================================")
+
         return pad2d, mask2d
 
     def mask(self, z: torch.Tensor, bool_mask: torch.Tensor):
