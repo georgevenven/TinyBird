@@ -281,7 +281,7 @@ class TinyBird(nn.Module):
                 pad2d[b, :] = False
                 for blk in range(N):
                     if (blk not in iblock) and (blk not in mask_blocks):
-                        pad2d[b, st_i[ib] : end_i[ib]] = True  # do not pad isolated blocks
+                        pad2d[b, st_i[blk] : end_i[blk]] = True  # do not pad isolated blocks
                 # iblock is not set, pad the parital blocks
 
         print("================================================")
