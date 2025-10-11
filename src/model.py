@@ -1,3 +1,4 @@
+from numpy._core.numeric import False_
 import torch, math
 from torch import nn
 
@@ -276,13 +277,12 @@ class TinyBird(nn.Module):
             remaining = remaining[torch.randperm(remaining.numel(), device=device)[: m_w - int(mask2d[b].sum().item())]]
             mask2d[b, remaining] = True
 
-            # if iblock is set, ensure iblock is not padded and that the pad does not ovelap with the mask
             if len(iblock) > 0:
-                pad2d[b, :] = False
                 for blk in range(N):
                     if (blk not in iblock) and (blk not in mask_blocks):
-                        pad2d[b, st_i[blk] : end_i[blk]] = True  # do not pad isolated blocks
-                # iblock is not set, pad the parital blocks
+                        pad2d[b, st_i[blk] : end_i[blk]] = True  # not in an iblock or a mask_block so pad
+                    else:
+                        pad2d[b, st_i[blk] : end_i[blk]] = False  # in an iblock or a mask_block so don't pad
 
         pad2d = (
             pad2d.unsqueeze(1).expand(-1, H, -1).flatten(1, 2).to(device=device, dtype=torch.bool)
