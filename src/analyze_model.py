@@ -103,7 +103,7 @@ def process_file(model, dataset, index, device):
             if isolate_block:
                 iblock = [mblock[0] - (n_blocks - 1)]
             else:
-                iblock = []
+                iblock = list(range(mblock[0] - (n_blocks - 1), mblock[0]))
 
             xs, x_is = model.sample_data(
                 x.clone(), x_i.clone(), N.clone(), n_blocks=windowed_blocks, start=windowed_start
@@ -113,7 +113,7 @@ def process_file(model, dataset, index, device):
             loss = model.loss_mse(xs, pred, bool_mask)
             return loss
 
-        block_max = 12
+        block_max = 11
         n_valid_chirps = N.max().item()
         # Fill with NaNs so missing entries don't bias averages
         losses = torch.full((block_max, n_valid_chirps), float('nan'), device=device)
