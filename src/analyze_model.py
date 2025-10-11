@@ -93,6 +93,10 @@ def process_file(model, dataset, index, device):
 
     def compute_losses(x, x_i, N, x_mean, isolate_block=False):
         def compute_loss(x, x_i, N, start, x_mean, n_blocks, isolate_block, max_blocks=12):
+            print(
+                "start", start, "n_blocks", n_blocks, "isolate_block", isolate_block, "max_blocks", max_blocks, "N", N
+            )
+
             windowed_blocks = max_blocks if isolate_block else abs(n_blocks)
 
             if windowed_blocks <= 1:
