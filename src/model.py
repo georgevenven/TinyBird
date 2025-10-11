@@ -227,11 +227,11 @@ class TinyBird(nn.Module):
             masked_blocks, frac = 0, 0.0  # disable masked_blocks and frac behavior if mblock is set
         else:
             # if mblock is not set, ensure masked_blocks and frac are valid
-            assert masked_blocks < N, f"masked_blocks must be less than N, got {masked_blocks} and {N}"
-            assert frac >= 0 and frac < 1, f"frac must be between 0 and 1, got {frac}"
             assert (masked_blocks > 0) ^ (
                 frac > 0
             ), f"either masked_blocks or frac must be greater than 0 not both, got {masked_blocks} and {frac}"
+            assert masked_blocks < N, f"masked_blocks must be less than N, got {masked_blocks} and {N}"
+            assert frac < 1, f"frac must be between 0 and 1, got {frac}"
 
         if len(iblock) > 0:
             # if iblock is set, ensure mblock is set
