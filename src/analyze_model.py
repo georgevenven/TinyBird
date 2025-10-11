@@ -101,7 +101,7 @@ def process_file(model, dataset, index, device):
             windowed_blocks = max_blocks if isolate_block else abs(n_blocks) + 1
 
             if windowed_blocks <= 1:
-                return torch.zeros(x.shape[0], x.device, dtype=x.dtype)
+                return torch.zeros(x.shape[0], device=x.device, dtype=x.dtype)
 
             if n_blocks < 0:
                 n_blocks = abs(n_blocks)
