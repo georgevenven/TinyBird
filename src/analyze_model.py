@@ -98,7 +98,7 @@ def process_file(model, dataset, index, device):
                 x_mean_expanded = x_mean.expand_as(xs)
                 return (x_mean_expanded - xs).pow(2).mean()
 
-            windowed_blocks = max_blocks + 1 if isolate_block else abs(n_blocks) + 1
+            windowed_blocks = max_blocks if isolate_block else abs(n_blocks) + 1
 
             if n_blocks < 0:
                 n_blocks = abs(n_blocks)
@@ -135,7 +135,7 @@ def process_file(model, dataset, index, device):
                 bmin = min(max(0, start + block_min), n_valid_chirps) - start
                 bmax = min(n_valid_chirps, start + block_max + 1) - start
                 for n_blocks in range(bmin, bmax):
-                    max_blocks = abs(bmin) if n_blocks <= 0 else abs(bmax)
+                    max_blocks = abs(bmin) if n_blocks < 0 else abs(bmax)
                     with torch.no_grad():
                         loss = compute_loss(x, x_i, N, start, x_mean, n_blocks, isolate_block, max_blocks=max_blocks)
                     losses[n_blocks + block_max, start] = loss.item()
