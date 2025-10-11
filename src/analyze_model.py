@@ -60,7 +60,7 @@ def process_file(model, dataset, index, device):
             return loss
 
         total_blocks = 11
-        block_max = 5
+        block_max = 6
         n_valid_chirps = N.max().item()
         # Fill with NaNs so missing entries don't bias averages
         losses = torch.full((block_max, n_valid_chirps), float('nan'), device=device)
@@ -138,13 +138,7 @@ def main():
 
         # Infer rows and baseline dynamically from the matrix shape
         rows = int(losses_iso_np.shape[0])
-        # If rows is odd, assume a centered baseline row; else assume 0..K (no negatives)
-        if rows % 2 == 1:
-            baseline_row = rows // 2
-            y_values = list(range(-baseline_row, rows - baseline_row))
-        else:
-            baseline_row = 0
-            y_values = list(range(rows))
+        y_values = list(range(1, rows + 1))  # blocks 1..rows
 
         # Helper to plot line summary and heatmap for a given matrix
         def plot_set(loss_mat_np, tag: str):
@@ -152,12 +146,8 @@ def main():
             mean_loss = np.nanmean(loss_mat_np, axis=1)
             std_loss = np.nanstd(loss_mat_np, axis=1)
 
-            # Exclude the baseline row only if it exists (rows odd); otherwise plot all rows
-            if rows % 2 == 1:
-                idxs = [i for i in range(rows) if i != baseline_row]
-            else:
-                idxs = list(range(rows))
-            y_vals_plot = [y_values[i] for i in idxs]
+            idxs = list(range(rows))
+            y_vals_plot = y_values
             mean_plot = mean_loss[idxs]
             std_plot = std_loss[idxs]
 
@@ -194,9 +184,6 @@ def main():
             if not np.isfinite(vmax) or vmax == vmin:
                 vmax = vmin + 1.0
             im_hm = ax_hm.imshow(loss_ma, aspect='auto', cmap='viridis', origin='lower', vmin=vmin, vmax=vmax)
-            ax_hm.set_xlabel('Start Position (block index)')
-            ax_hm.set_ylabel('n_blocks')
-            ax_hm.set_title(f'Loss (MSE) Heatmap (index {i}, {tag})\nFile: {filename}', fontsize=14, pad=20)
             ax_hm.set_yticks(np.arange(rows))
             ax_hm.set_yticklabels([str(v) for v in y_values])
             cbar_hm = plt.colorbar(im_hm, ax=ax_hm)
@@ -220,63 +207,30 @@ def main():
         plot_set(losses_iso_np, tag='isolated')
         plot_set(losses_all_np, tag='allblocks')
 
-        # Line graph of raw loss for rows baseline_row-1 .. baseline_row-5 (interpreted as -1..-5 when baseline exists)
-        fig_neg, ax_neg = plt.subplots(figsize=(10, 5))
-        for k in range(1, 6):
-            row_idx = baseline_row - k
-            if 0 <= row_idx < losses_all_np.shape[0]:
-                y = losses_all_np[row_idx, :]
-                x = np.arange(y.size)
-                if np.isnan(y).all():
-                    continue
-                is_boundary = (k == 1) or (k == 5)
-                label = f"{y_values[row_idx]} blocks" if is_boundary else "_nolegend_"
-                lw = 1.6 if is_boundary else 0.8
-                alpha = 1.0 if is_boundary else 0.35
-                marker = 'o' if is_boundary else None
-                ax_neg.plot(x, y, marker=marker, linewidth=lw, alpha=alpha, label=label)
-        ax_neg.set_xlabel('Start Position (block index)')
-        ax_neg.set_ylabel('Loss (MSE)')
-        ax_neg.set_title(
-            f'Raw Loss vs Start for {"-1..-5" if rows % 2 == 1 else "lower rows"} (index {i}, allblocks)\nFile: {filename}'
-        )
-        ax_neg.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
-        if len(ax_neg.lines) > 0:
-            ax_neg.legend()
+        # Line graph of raw loss for each block row (1..rows), labeled by block count
+        fig_all, ax_all = plt.subplots(figsize=(10, 5))
+        for k in range(rows):  # k: 0..rows-1 corresponds to 1..rows blocks
+            row_idx = k
+            y = losses_all_np[row_idx, :]
+            x = np.arange(y.size)
+            if np.isnan(y).all():
+                continue
+            label = f"{y_values[row_idx]} blocks"
+            lw = 1.6 if (row_idx == 0 or row_idx == rows - 1) else 1.0
+            alpha = 1.0 if (row_idx == 0 or row_idx == rows - 1) else 0.7
+            marker = 'o' if (row_idx == 0 or row_idx == rows - 1) else None
+            ax_all.plot(x, y, marker=marker, linewidth=lw, alpha=alpha, label=label)
+        ax_all.set_xlabel('Start Position (block index)')
+        ax_all.set_ylabel('Loss (MSE)')
+        ax_all.set_title(f'Raw Loss vs Start by n_blocks (index {i}, allblocks)\nFile: {filename}')
+        ax_all.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+        if len(ax_all.lines) > 0:
+            ax_all.legend(title='n_blocks')
         plt.tight_layout()
-        neg_out = os.path.join(images_dir, f"loss_lines_allblocks_neg_{i}_{filename}.png")
-        fig_neg.savefig(neg_out, dpi=300, bbox_inches='tight')
-        plt.close(fig_neg)
-        print(f"Saved: {neg_out}")
-
-        # Line graph of raw loss for rows baseline_row+1 .. baseline_row+5 (interpreted as +1..+5 when baseline exists)
-        fig_pos, ax_pos = plt.subplots(figsize=(10, 5))
-        for k in range(1, 6):
-            row_idx = baseline_row + k
-            if 0 <= row_idx < losses_all_np.shape[0]:
-                y = losses_all_np[row_idx, :]
-                x = np.arange(y.size)
-                if np.isnan(y).all():
-                    continue
-                is_boundary = (k == 1) or (k == 5)
-                label = f"{y_values[row_idx]} blocks" if is_boundary else "_nolegend_"
-                lw = 1.6 if is_boundary else 0.8
-                alpha = 1.0 if is_boundary else 0.35
-                marker = 'o' if is_boundary else None
-                ax_pos.plot(x, y, marker=marker, linewidth=lw, alpha=alpha, label=label)
-        ax_pos.set_xlabel('Start Position (block index)')
-        ax_pos.set_ylabel('Loss (MSE)')
-        ax_pos.set_title(
-            f'Raw Loss vs Start for {"+1..+5" if rows % 2 == 1 else "+ rows"} (index {i}, allblocks)\nFile: {filename}'
-        )
-        ax_pos.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
-        if len(ax_pos.lines) > 0:
-            ax_pos.legend()
-        plt.tight_layout()
-        pos_out = os.path.join(images_dir, f"loss_lines_allblocks_pos_{i}_{filename}.png")
-        fig_pos.savefig(pos_out, dpi=300, bbox_inches='tight')
-        plt.close(fig_pos)
-        print(f"Saved: {pos_out}")
+        all_out = os.path.join(images_dir, f"loss_lines_allblocks_by_blocks_{i}_{filename}.png")
+        fig_all.savefig(all_out, dpi=300, bbox_inches='tight')
+        plt.close(fig_all)
+        print(f"Saved: {all_out}")
 
     # If a single index is specified, only process that file; otherwise process all
     if args.index >= 0:
