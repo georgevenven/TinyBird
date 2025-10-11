@@ -99,11 +99,11 @@ def process_file(model, dataset, index, device):
             if windowed_blocks <= 1:
                 return torch.zeros(x.shape[0], device=x.device, dtype=x.dtype)
 
-            mblock = windowed_blocks - 1
+            mblock = [windowed_blocks - 1]
             if isolate_block:
-                iblock = mblock - (n_blocks - 1)
+                iblock = [mblock - (n_blocks - 1)]
             else:
-                iblock = -1
+                iblock = [-1]
 
             xs, x_is = model.sample_data(
                 x.clone(), x_i.clone(), N.clone(), n_blocks=windowed_blocks, start=windowed_start
@@ -121,7 +121,7 @@ def process_file(model, dataset, index, device):
         print(f"\nComputing losses for {losses.numel()} (rows × starts)...")
 
         # Compute an accurate total for the progress ba
-        with tqdm(total=n_valid_chirps, desc="Computing losses") as pbar:
+        with tqdm(total=n_valid_chirps * (block_max - 1), desc="Computing losses") as pbar:
             for start in range(block_max, n_valid_chirps):
                 for n_blocks in range(1, block_max):
                     with torch.no_grad():
