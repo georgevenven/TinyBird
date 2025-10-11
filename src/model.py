@@ -197,8 +197,8 @@ class TinyBird(nn.Module):
         self,
         xi: torch.Tensor,
         hw: (None, None),
-        masked_blocks: int = 0,
-        frac: float = 0.0,
+        masked_blocks: int = -1,
+        frac: float = -1.0,
         mblock: list = [],
         iblock: list = [],
     ):
