@@ -43,77 +43,24 @@ def process_file(model, dataset, index, device):
     print(f"  Chirp labels shape: {x_l.shape}")
     print(f"  Number of valid chirps: {N.item()}")
 
-    def mean_column_over_intervals(x: torch.Tensor, xi: torch.Tensor, N: torch.Tensor):
-        assert x.dim() == 4, f"x must be (B,C,H,W), got {tuple(x.shape)}"
-        assert xi.dim() == 3 and xi.size(-1) == 2, f"xi must be (B,N_max,2), got {tuple(xi.shape)}"
+    def compute_losses(x, x_i, N, isolate_block=False):
+        def compute_loss(x, x_i, N, start, n_blocks, isolate_block, total_blocks=11):
+            windowed_start = start - total_blocks
 
-        B, C, H, W = x.shape
-        device = x.device
-
-        # Normalize N shape to (B,) long
-        if N.dim() == 2 and N.size(1) == 1:
-            N = N.view(B)
-        N = N.to(device=device, dtype=torch.long)
-
-        # Boolean mask over columns per item: True where the column is inside any interval
-        mask = torch.zeros(B, W, dtype=torch.bool, device=device)
-
-        # Clamp interval bounds to [0, W] to be safe
-        starts = xi[..., 0].clamp(min=0, max=W)
-        ends = xi[..., 1].clamp(min=0, max=W)
-
-        # Fill mask per-batch item for valid intervals
-        for b in range(B):
-            n_valid = int(N[b].item())
-            if n_valid <= 0:
-                continue
-            s_b = starts[b, :n_valid].to(torch.long)
-            e_b = ends[b, :n_valid].to(torch.long)
-            # Mark each [s,e) as True
-            for s, e in zip(s_b.tolist(), e_b.tolist()):
-                if e > s:  # skip empty/invalid
-                    mask[b, s:e] = True
-
-        # Count selected columns per item; avoid div-by-zero
-        counts = mask.sum(dim=1).clamp_min(1).view(B, 1, 1, 1).to(dtype=x.dtype)
-
-        # Broadcast mask to (B,C,H,W) and compute masked mean across W -> keepdim True for width=1
-        mask_bc = mask.view(B, 1, 1, W).to(dtype=x.dtype)
-        summed = (x * mask_bc).sum(dim=3, keepdim=True)  # (B,C,H,1)
-        mean_x = summed / counts  # (B,C,H,1)
-
-        # For any item with zero selected columns, force zeros (already handled via counts=1 but be explicit)
-        zero_items = mask.sum(dim=1) == 0
-        if zero_items.any():
-            mean_x[zero_items, ...] = 0
-
-        return mean_x
-
-    x_mean = mean_column_over_intervals(x, x_i, N)
-
-    def compute_losses(x, x_i, N, x_mean, isolate_block=False):
-        def compute_loss(x, x_i, N, start, x_mean, n_blocks, isolate_block, max_blocks=12):
-            windowed_blocks = max_blocks if isolate_block else abs(n_blocks)
-            windowed_start = start - windowed_blocks
-
-            if windowed_blocks <= 1:
-                return torch.zeros(x.shape[0], device=x.device, dtype=x.dtype)
-
-            mblock = [windowed_blocks - 1]
+            mblock = [total_blocks - 1]
             if isolate_block:
-                iblock = [mblock[0] - (n_blocks - 1)]
+                iblock = [mblock[0] - n_blocks]
             else:
-                iblock = list(range(mblock[0] - (n_blocks - 1), mblock[0]))
+                iblock = list(range(mblock[0] - n_blocks, mblock[0]))
 
-            xs, x_is = model.sample_data(
-                x.clone(), x_i.clone(), N.clone(), n_blocks=windowed_blocks, start=windowed_start
-            )
+            xs, x_is = model.sample_data(x.clone(), x_i.clone(), N.clone(), n_blocks=total_blocks, start=windowed_start)
             h, idx_restore, bool_mask, bool_pad, T = model.forward_encoder(xs, x_is, mblock=mblock, iblock=iblock)
             pred = model.forward_decoder(h, idx_restore, T, bool_pad=bool_pad)
             loss = model.loss_mse(xs, pred, bool_mask)
             return loss
 
-        block_max = 11
+        total_blocks = 11
+        block_max = 5
         n_valid_chirps = N.max().item()
         # Fill with NaNs so missing entries don't bias averages
         losses = torch.full((block_max, n_valid_chirps), float('nan'), device=device)
@@ -125,13 +72,13 @@ def process_file(model, dataset, index, device):
             for start in range(block_max, n_valid_chirps):
                 for n_blocks in range(1, block_max):
                     with torch.no_grad():
-                        loss = compute_loss(x, x_i, N, start, x_mean, n_blocks, isolate_block, max_blocks=block_max)
+                        loss = compute_loss(x, x_i, N, start, n_blocks, isolate_block, total_blocks=total_blocks)
                     losses[n_blocks - 1, start] = loss.item()
                     pbar.update(1)
         return losses
 
-    losses = compute_losses(x, x_i, N, x_mean, isolate_block=True)
-    losses_all_blocks = compute_losses(x, x_i, N, x_mean, isolate_block=False)
+    losses = compute_losses(x, x_i, N, isolate_block=True)
+    losses_all_blocks = compute_losses(x, x_i, N, isolate_block=False)
 
     return losses, losses_all_blocks, filename
 
