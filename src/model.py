@@ -215,7 +215,7 @@ class TinyBird(nn.Module):
         B, N, _ = xi.shape
 
         if len(mblock) > 0 :
-            assert (mblock >= 0).all() and (mblock < N).all(), f"invalid mblock indices {mblock}"
+            assert all((0 <= i < N) for i in mblock), f"invalid mblock indices N={N}, got {mblock}"
             masked_blocks, frac = 0, 0.0 #disable masked_blocks and frac behavior if mblock is set
         else :
             # if mblock is not set, ensure masked_blocks and frac are valid
@@ -225,8 +225,9 @@ class TinyBird(nn.Module):
 
         if len(iblock) > 0:
             # if iblock is set, ensure mblock is set
-            assert (iblock >= 0).all() and (iblock < N).all(), f"invalid iblock indices {iblock}"
-            assert len(mblock) > 0, f"mblock len={len(mblock)}. mblock must be valid if iblock is set"
+            assert all((0 <= i < N) for i in iblock), f"invalid iblock indices N={N}, got {iblock}"
+            assert len(mblock) > 0, f"mblock len={len(mblock)}. mblock must be set if iblock is set"
+
 
 
         starts = xi[:, :, 0].to(torch.long).clamp(min=0, max=W)  # (B, N)
