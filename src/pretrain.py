@@ -340,7 +340,7 @@ class Trainer:
         else:
             frac = 0.5
 
-        attend_to_padded = True if random.random() < 0.25 else False
+        attend_to_padded = False  # True if random.random() < 0.25 else False
 
         if is_training:
             self.tinybird.train()

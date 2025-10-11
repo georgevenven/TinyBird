@@ -284,12 +284,6 @@ class TinyBird(nn.Module):
                         pad2d[b, st_i[blk] : end_i[blk]] = True  # do not pad isolated blocks
                 # iblock is not set, pad the parital blocks
 
-        print("================================================")
-        print(f"mblock={mblock}, iblock={iblock}, frac={frac}")
-        print(f"pad2d[0,W]={pad2d[0,:]}")
-        print(f"mask2d[0,W]={mask2d[0,:]}")
-        print("================================================")
-
         pad2d = (
             pad2d.unsqueeze(1).expand(-1, H, -1).flatten(1, 2).to(device=device, dtype=torch.bool)
         )  # (B,W) -> (B, H, W) -> (B, H*W)
