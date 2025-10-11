@@ -100,6 +100,9 @@ def process_file(model, dataset, index, device):
 
             windowed_blocks = max_blocks if isolate_block else abs(n_blocks) + 1
 
+            if windowed_blocks <= 1:
+                return 0
+
             if n_blocks < 0:
                 n_blocks = abs(n_blocks)
                 window_start = start - n_blocks
