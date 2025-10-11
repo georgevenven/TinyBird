@@ -286,6 +286,12 @@ class TinyBird(nn.Module):
 
             pad2d[b, mask2d[b]] = False  # any masked columns will not be padded
 
+        print("================================================")
+        print(f"mblock={mblock}, iblock={iblock}, frac={frac}")
+        print(f"pad2d[0,0,:]={pad2d[0,0,:]}")
+        print(f"mask2d[0,0,:]={mask2d[0,0,:]}")
+        print("================================================")
+
         pad2d = (
             pad2d.unsqueeze(1).expand(-1, H, -1).flatten(1, 2).to(device=device, dtype=torch.bool)
         )  # (B,W) -> (B, H, W) -> (B, H*W)
@@ -293,12 +299,6 @@ class TinyBird(nn.Module):
             mask2d.unsqueeze(1).expand(-1, H, -1).flatten(1, 2).to(device=device, dtype=torch.bool)
         )  # (B,W) -> (B, H, W) -> (B, H*W)
         assert not (pad2d & mask2d).any(), "pad2d and mask2d overlap (both True at some positions)"
-
-        print("================================================")
-        print(f"mblock={mblock}, iblock={iblock}, frac={frac}")
-        print(f"pad2d[0,0,:]={pad2d[0,0,:]}")
-        print(f"mask2d[0,0,:]={mask2d[0,0,:]}")
-        print("================================================")
 
         return pad2d, mask2d
 
