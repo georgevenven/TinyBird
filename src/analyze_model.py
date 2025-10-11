@@ -136,9 +136,9 @@ def process_file(model, dataset, index, device):
         with tqdm(total=total_iterations, desc="Computing losses") as pbar:
             for start in range(1, n_valid_chirps - 1):
                 bmin = min(max(0, start + block_min), n_valid_chirps) - start
-                bmax = min(n_valid_chirps, start + block_max + 1) - start
+                bmax = min(n_valid_chirps, start + block_max) - start
                 for n_blocks in range(bmin, bmax):
-                    max_blocks = (abs(bmin) + 1) if n_blocks < 0 else abs(bmax)
+                    max_blocks = (abs(bmin) + 1) if n_blocks < 0 else (abs(bmax) + 1)
                     with torch.no_grad():
                         loss = compute_loss(x, x_i, N, start, x_mean, n_blocks, isolate_block, max_blocks=max_blocks)
                     losses[n_blocks + block_max, start] = loss.item()
