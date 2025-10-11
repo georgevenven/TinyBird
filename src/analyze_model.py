@@ -76,9 +76,8 @@ def process_file(model, dataset, index, device):
                     losses[n_blocks - 1, start] = loss.item()
                     pbar.update(1)
         return losses
-
-    losses = None
-    # losses = compute_losses(x, x_i, N, isolate_block=True)
+        
+    losses = compute_losses(x, x_i, N, isolate_block=True)
     losses_all_blocks = compute_losses(x, x_i, N, isolate_block=False)
 
     return losses, losses_all_blocks, filename
