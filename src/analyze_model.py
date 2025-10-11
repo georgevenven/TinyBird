@@ -123,7 +123,7 @@ def process_file(model, dataset, index, device):
                 for n_blocks in range(1, block_max):
                     with torch.no_grad():
                         loss = compute_loss(x, x_i, N, start, x_mean, n_blocks, isolate_block, max_blocks=block_max)
-                    losses[n_blocks + block_max, start] = loss.item()
+                    losses[n_blocks - 1, start] = loss.item()
                     pbar.update(1)
         return losses
 
