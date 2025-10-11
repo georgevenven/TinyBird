@@ -580,7 +580,11 @@ class Trainer:
         print(f"Training from step {self.starting_step} to {end_step}")
 
         for step_num in range(self.starting_step, end_step):
-            train_batch = next(train_iter)
+            try:
+                train_batch = next(train_iter)
+            except StopIteration:
+                train_iter = iter(train_loader)
+                train_batch = next(train_iter)
 
             try:
                 train_loss = self.step(step_num, train_batch, is_training=True)
