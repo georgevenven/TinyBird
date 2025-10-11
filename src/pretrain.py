@@ -332,7 +332,7 @@ class Trainer:
         mblock, iblock, frac, n_blocks = [], [], 0.0, 11
         if random.random() < 0.75:
             mblock = [n_blocks - 1]
-            start  = random.randint(5, mblock[0] - 1)
+            start = random.randint(5, mblock[0] - 1)
             if random.random() < 0.5:
                 iblock = [start]
             else:
@@ -455,12 +455,12 @@ class Trainer:
                 with torch.amp.autocast('cuda'):
                     x, x_i = self.tinybird.compactify_data(x, x_i, N)
                     x, x_i = self.tinybird.sample_data(x, x_i, N, n_blocks=3)
-                    h, idx_restore, bool_mask, bool_pad, T = self.tinybird.forward_encoder(x, x_i)
+                    h, idx_restore, bool_mask, bool_pad, T = self.tinybird.forward_encoder(x, x_i, frac=0.5)
                     pred = self.tinybird.forward_decoder(h, idx_restore, T, bool_pad=bool_pad)
             else:
                 x, x_i = self.tinybird.compactify_data(x, x_i, N)
                 x, x_i = self.tinybird.sample_data(x, x_i, N, n_blocks=3)
-                h, idx_restore, bool_mask, bool_pad, T = self.tinybird.forward_encoder(x, x_i)
+                h, idx_restore, bool_mask, bool_pad, T = self.tinybird.forward_encoder(x, x_i, frac=0.5)
                 pred = self.tinybird.forward_decoder(h, idx_restore, T, bool_pad=bool_pad)
 
         # Depatchify prediction to get back (B, 1, H, W) format
