@@ -216,7 +216,7 @@ class TinyBird(nn.Module):
             masked_blocks, frac = 1, 0.0
 
         if iblock >= 0 and iblock < N :
-            assert mblock >= 0 and mblock < N, f"mblock must be set if iblock is set, got {mblock} and {iblock}"
+            assert mblock >= 0 and mblock < N, f"mblock must be set if iblock is set, got {mblock} and {N}"
 
         assert masked_blocks < N, f"masked_blocks must be less than N, got {masked_blocks} and {N}"
         assert frac >=0 and frac < 1, f"frac must be between 0 and 1, got {frac}"

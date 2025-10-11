@@ -135,7 +135,7 @@ def process_file(model, dataset, index, device):
             total_iterations += max(0, bmax_i - bmin_i)
         with tqdm(total=total_iterations, desc="Computing losses") as pbar:
             for start in range(1, n_valid_chirps - 1):
-                bmin = min(max(0, start + block_min), n_valid_chirps) - start
+                bmin = min(max(0, start + block_min + 1), n_valid_chirps) - start
                 bmax = min(n_valid_chirps, start + block_max + 1) - start
                 for n_blocks in range(bmin, bmax):
                     max_blocks = abs(bmin) if n_blocks < 0 else abs(bmax)
