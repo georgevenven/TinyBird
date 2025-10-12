@@ -247,12 +247,12 @@ class TinyBird(nn.Module):
         mask_blocks = []
         if len(mblock) > 0:
             mask_blocks = mblock
-            m_w = max([int(widths[b, mask_blocks].sum().item() // 2) for b in range(B)])  # max width of the blocks
+            m_w = min([int(widths[b, mask_blocks].sum().item()) for b in range(B)])  # max width of the blocks
         elif masked_blocks > 0:
             mask_blocks = torch.randperm(N, device=device)[:masked_blocks].tolist()  # randomly select n_blocks blocks
-            m_w = max([int(widths[b, mask_blocks].sum().item() // 2) for b in range(B)])  # max width of the blocks
+            m_w = min([int(widths[b, mask_blocks].sum().item()) for b in range(B)])  # max width of the blocks
         else:  # frac > 0
-            m_w = max(0, min(W - 1, int(round(float(frac) * W))))  # width of the mask, no block selected
+            m_w = min(0, min(W - 1, int(round(float(frac) * W))))  # width of the mask, no block selected
 
         pad2d = torch.zeros(B, W, dtype=torch.bool, device=device)  # pad2d is boolean padding of the spectrogram
         mask2d = torch.zeros(B, W, dtype=torch.bool, device=device)  # mask2d is a boolean mask of the spectrogram
@@ -270,12 +270,12 @@ class TinyBird(nn.Module):
 
             # Specified mask block will not be padded, it will be masked even if iblock was set
             for blk in mask_blocks:
-                mask2d[b, (st_i[blk] + end_i[blk]) // 2 : end_i[blk]] = True
+                mask2d[b, end_i[blk] - m_w : end_i[blk]] = True
 
             # randomly select remaining columns to keep mask width constant for each item in the batch
-            remaining = ((~mask2d[b]) & (~pad2d[b])).nonzero(as_tuple=False).squeeze(1)
-            remaining = remaining[torch.randperm(remaining.numel(), device=device)[: m_w - int(mask2d[b].sum().item())]]
-            mask2d[b, remaining] = True
+            # remaining = ((~mask2d[b]) & (~pad2d[b])).nonzero(as_tuple=False).squeeze(1)
+            # remaining = remaining[torch.randperm(remaining.numel(), device=device)[: m_w - int(mask2d[b].sum().item())]]
+            # mask2d[b, remaining] = True
 
             for blk in range(N):
                 if (blk not in iblock) and (blk not in mask_blocks):
@@ -283,7 +283,7 @@ class TinyBird(nn.Module):
                 else:
                     pad2d[b, st_i[blk] : end_i[blk]] = False  # in an iblock or a mask_block so don't pad
 
-            pad2d[b, remaining] = False
+            # pad2d[b, remaining] = False
 
         pad2d = (
             pad2d.unsqueeze(1).expand(-1, H, -1).flatten(1, 2).to(device=device, dtype=torch.bool)

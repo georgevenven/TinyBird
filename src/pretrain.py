@@ -330,15 +330,15 @@ class Trainer:
         N = N.to(self.device, non_blocking=True)  # (B, 1) # number of chirp intervals
 
         mblock, iblock, frac, n_blocks = [], [], 0.0, 11
-        if random.random() < 0.75:
-            mblock = [n_blocks - 1]
-            start = random.randint(3, mblock[0] - 1)
-            if random.random() < 0.25:
-                iblock = [start]
-            else:
-                iblock = list(range(start, mblock[0]))
+        # if random.random() < 0.75:
+        mblock = [n_blocks - 1]
+        start = random.randint(3, mblock[0] - 1)
+        if random.random() < 0.25:
+            iblock = [start]
         else:
-            frac = 0.5
+            iblock = list(range(start, mblock[0]))
+        # else:
+        #     frac = 0.5
 
         attend_to_padded = False  # True if random.random() < 0.25 else False
 
@@ -356,8 +356,8 @@ class Trainer:
                         x, x_i = self.tinybird.compactify_data(x, x_i, N)
                         x, x_i = self.tinybird.sample_data(x, x_i, N, n_blocks=n_blocks)
 
-                        if x.shape[-1] > 3000:
-                            masked_blocks, frac = 0, 0.5
+                        # if x.shape[-1] > 3000:
+                        #     masked_blocks, frac = 0, 0.5
 
                         log_batch_shapes(
                             "train_batch", step_num, x, x_i, N, n_blocks, frac, patch_size=self.config["patch_size"]
