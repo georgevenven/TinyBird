@@ -15,6 +15,8 @@ from matplotlib.colors import ListedColormap
 from tqdm import tqdm
 from utils import load_model_from_checkpoint
 from data_loader import SpectogramDataset
+# For pixel-perfect axis-aligned strips
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 
 def parse_args():
@@ -223,7 +225,7 @@ def main():
                 va='bottom',
             )
 
-            # Add chirp label strips along axes: light blue (0), dark blue (1), NaN/invalid -> black
+            # Add chirp label strips along axes using shared axes for pixel-perfect alignment
             Hh, Wh = loss_mat_np.shape
             lbl_x = labels_np[:Wh]
             lbl_y = labels_np[:Hh]
@@ -231,18 +233,22 @@ def main():
             cmap_lbl = ListedColormap(["#add8e6", "#00008b"]).copy()
             cmap_lbl.set_bad(color='black')
 
-            pos = ax_hm.get_position()
-            fig = ax_hm.figure
+            divider = make_axes_locatable(ax_hm)
+            # Size as a small percentage of the main axes; share to guarantee alignment
+            ax_strip_x = divider.append_axes("bottom", size="3%", pad=0.1, sharex=ax_hm)
+            ax_strip_y = divider.append_axes("left",   size="3%", pad=0.1, sharey=ax_hm)
+
             # Bottom strip (x-axis): 1 × Wh
-            ax_strip_x = fig.add_axes([pos.x0, pos.y0 - 0.03, pos.width, 0.02])
             strip_x = np.ma.masked_invalid(lbl_x[np.newaxis, :])
-            ax_strip_x.imshow(strip_x, aspect='auto', cmap=cmap_lbl, interpolation='nearest')
-            ax_strip_x.set_xticks([]); ax_strip_x.set_yticks([]); ax_strip_x.set_frame_on(False)
+            ax_strip_x.imshow(strip_x, aspect='auto', cmap=cmap_lbl, interpolation='nearest', origin='lower')
+            ax_strip_x.set_xlim(ax_hm.get_xlim())
+            ax_strip_x.axis('off')
+
             # Left strip (y-axis): Hh × 1 (origin lower to match heatmap orientation)
-            ax_strip_y = fig.add_axes([pos.x0 - 0.03, pos.y0, 0.02, pos.height])
             strip_y = np.ma.masked_invalid(lbl_y[:, np.newaxis])
             ax_strip_y.imshow(strip_y, aspect='auto', cmap=cmap_lbl, interpolation='nearest', origin='lower')
-            ax_strip_y.set_xticks([]); ax_strip_y.set_yticks([]); ax_strip_y.set_frame_on(False)
+            ax_strip_y.set_ylim(ax_hm.get_ylim())
+            ax_strip_y.axis('off')
 
             plt.tight_layout()
             loss_hm_out = os.path.join(images_dir, f"loss_heatmap_{tag}_{i}_{filename}.png")
