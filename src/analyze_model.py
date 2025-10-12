@@ -49,9 +49,9 @@ def process_file(model, dataset, index, device):
 
             mblock = [total_blocks - 1]
             if isolate_block:
-                iblock = [mblock[0] - n_blocks]
+                iblock = [n_blocks]
             else:
-                iblock = list(range(mblock[0] - n_blocks, mblock[0]))
+                iblock = list(range(n_blocks, mblock[0]))
 
             xs, x_is = model.sample_data(x.clone(), x_i.clone(), N.clone(), n_blocks=total_blocks, start=windowed_start)
             h, idx_restore, bool_mask, bool_pad, T = model.forward_encoder(
@@ -61,8 +61,11 @@ def process_file(model, dataset, index, device):
             loss = model.loss_mse(xs, pred, bool_mask)
             return loss
 
-        total_blocks = 11
-        block_max = 8
+        mblock, iblock, n_blocks = [], [], 11
+        mblock = [n_blocks - 1]
+        start = 3
+        iblock = list(range(start, mblock[0]))
+
         n_valid_chirps = N.max().item()
         # Fill with NaNs so missing entries don't bias averages
         losses = torch.full((block_max, n_valid_chirps), float('nan'), device=device)
@@ -70,12 +73,12 @@ def process_file(model, dataset, index, device):
         print(f"\nComputing losses for {losses.numel()} (rows × starts)...")
 
         # Compute an accurate total for the progress ba
-        with tqdm(total=n_valid_chirps * (block_max - 1), desc="Computing losses") as pbar:
-            for start in range(block_max, n_valid_chirps):
-                for n_blocks in range(0, block_max):
+        with tqdm(total=n_valid_chirps * (n_blocks - start - 1), desc="Computing losses") as pbar:
+            for start in range(n_blocks, n_valid_chirps):
+                for blk in iblock:
                     with torch.no_grad():
-                        loss = compute_loss(x, x_i, N, start, n_blocks, isolate_block, total_blocks=total_blocks)
-                    losses[n_blocks - 1, start] = loss.item()
+                        loss = compute_loss(x, x_i, N, start, blk, isolate_block, total_blocks=n_blocks)
+                    losses[n_blocks - blk, start] = loss.item()
                     pbar.update(1)
         return losses
 
