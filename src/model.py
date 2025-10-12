@@ -455,8 +455,8 @@ class TinyBird(nn.Module):
             d = self.decoder(y_full)  # (B, T, D_dec)
         else:
             assert (
-                bool_pad.shape == y_full.shape
-            ), f"shape mismatch bool_pad.shape={bool_pad.shape}, y_full.shape={y_full.shape}"
+                bool_pad.shape == y_full.shape[:2]
+            ), f"shape mismatch bool_pad.shape={bool_pad.shape}, y_full.shape={y_full.shape[:2]}"
             d = self.decoder(y_full, src_key_padding_mask=bool_pad)
         pred = self.decoder_to_pixel(d)  # Final per-token patch prediction: (B, T, P). P is pixels per patch
         return pred
