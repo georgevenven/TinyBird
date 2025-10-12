@@ -489,23 +489,24 @@ class TinyBird(nn.Module):
 
         # loss = ((pred - target) ** 2)[bool_mask].mean()  # compute MSE only on masked patches; pred is (B, T, P), bool_mask is (B, T)
 
-        # MSE per token, then masked mean across tokens
+        # MSE per pixel; compute a single masked mean across all masked pixels (size-invariant)
         per_pixel = (pred - target).pow(2)  # (B, T, P)
-        per_token = per_pixel.mean(dim=-1)
-
-        # Defensive guard: detect NaNs/Inf in per_token
-        if torch.isnan(per_token).any() or torch.isinf(per_token).any():
-            # Print one-time diagnostics to help trace bad values
+        # Defensive guard: sanitize before reduction
+        if torch.isnan(per_pixel).any() or torch.isinf(per_pixel).any():
             if not hasattr(self, "_loss_nan_warned"):
-                print("[loss_mse] WARNING: NaN/Inf detected in per_token. Dumping stats once.")
+                print("[loss_mse] WARNING: NaN/Inf detected in per_pixel. Dumping stats once.")
                 print("  target stats:", float(t32.min()), float(t32.max()), float(var32.mean()))
                 self._loss_nan_warned = True
-            per_token = torch.nan_to_num(per_token, nan=0.0, posinf=0.0, neginf=0.0)
+            per_pixel = torch.nan_to_num(per_pixel, nan=0.0, posinf=0.0, neginf=0.0)
 
-            # (B, T)
-        masked_sum = (per_token * bool_mask.float()).sum()  # scalar
-        masked_count = bool_mask.sum().clamp_min(1).to(per_token.dtype)  # scalar
-        loss = masked_sum / masked_count  # scalar
+        # Expand the (B,T) mask to pixels and take a single mean over all masked pixels
+        mask3d = bool_mask.unsqueeze(-1).expand_as(per_pixel)  # (B, T, P)
+        masked_pixels = per_pixel[mask3d]
+        if masked_pixels.numel() == 0:
+            # Fallback: avoid division by zero if mask is empty (e.g., visualization mode)
+            loss = per_pixel.mean()
+        else:
+            loss = masked_pixels.mean()
 
         return loss
 
