@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """
 Analyze TinyBird model behavior on spectrogram data.
@@ -15,6 +14,7 @@ from matplotlib.colors import ListedColormap
 from tqdm import tqdm
 from utils import load_model_from_checkpoint
 from data_loader import SpectogramDataset
+
 # For pixel-perfect axis-aligned strips
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
@@ -144,14 +144,9 @@ def main():
 
     def process_and_plot(i: int):
         print(f"\nLoading sample at index {i}")
-        (
-            isolated_losses,
-            isolated_losses_by_blocks,
-            all_losses,
-            all_losses_by_blocks,
-            filename,
-            x_l,
-        ) = process_file(model, dataset, i, device)
+        (isolated_losses, isolated_losses_by_blocks, all_losses, all_losses_by_blocks, filename, x_l) = process_file(
+            model, dataset, i, device
+        )
 
         iso_np = isolated_losses.detach().cpu().numpy()
         iso_by_np = isolated_losses_by_blocks.detach().cpu().numpy()
@@ -275,20 +270,31 @@ def main():
                 # cell sizes (in inches)
                 cell_w_in = (bbox.width) / max(1, arr.shape[1])
                 cell_h_in = (bbox.height) / max(1, arr.shape[0])
-                # diameter ~ 0.8 of the smaller cell dimension
-                diam_in = 0.8 * min(cell_w_in, cell_h_in)
+                # diameter ~ 1.2 of the smaller cell dimension (slightly larger than a cell)
+                diam_in = 2.0 * min(cell_w_in, cell_h_in)
                 # convert diameter (inches) to points, then to area (points^2)
                 diam_pt = diam_in * 72.0
-                s = (diam_pt ** 2)
-                ax_hm.scatter(cols, ys, s=s, c="#ff69b4", marker='o', edgecolors='none', zorder=6)
+                s = diam_pt**2
+                ax_hm.scatter(
+                    cols,
+                    ys,
+                    s=s,
+                    c="#ff1493",  # brighter pink
+                    marker='o',
+                    edgecolors='white',
+                    linewidths=0.4,
+                    zorder=7,
+                )
 
             # Add chirp label strips along axes using shared axes for pixel-perfect alignment
             Hh, Wh = loss_mat_np.shape
             lbl_x = labels_np[:Wh]
             lbl_y = labels_np[:Hh]
             # Mask any values not in {0,1}
-            lbl_x = lbl_x.astype(float); lbl_x[(lbl_x != 0) & (lbl_x != 1)] = np.nan
-            lbl_y = lbl_y.astype(float); lbl_y[(lbl_y != 0) & (lbl_y != 1)] = np.nan
+            lbl_x = lbl_x.astype(float)
+            lbl_x[(lbl_x != 0) & (lbl_x != 1)] = np.nan
+            lbl_y = lbl_y.astype(float)
+            lbl_y[(lbl_y != 0) & (lbl_y != 1)] = np.nan
 
             cmap_lbl = ListedColormap(["#add8e6", "#00008b"]).copy()
             cmap_lbl.set_bad(color='black')
@@ -296,7 +302,7 @@ def main():
             divider = make_axes_locatable(ax_hm)
             # Increase pad to leave room for axis labels and ticks
             ax_strip_x = divider.append_axes("bottom", size="3%", pad=0.3, sharex=ax_hm)
-            ax_strip_y = divider.append_axes("left",   size="3%", pad=0.45, sharey=ax_hm)
+            ax_strip_y = divider.append_axes("left", size="3%", pad=0.45, sharey=ax_hm)
 
             # Bottom strip (x-axis): 1 × Wh
             strip_x = np.ma.masked_invalid(lbl_x[np.newaxis, :])
