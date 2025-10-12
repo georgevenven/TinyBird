@@ -289,11 +289,11 @@ class TinyBird(nn.Module):
             # pad2d[b, remaining] = False
 
         pad2d = (
-            pad2d.unsqueeze(1).expand(-1, H, -1).flatten(1, 2).to(device=device, dtype=torch.bool)
-        )  # (B,W) -> (B, H, W) -> (B, H*W)
+            pad2d.unsqueeze(1).expand(B, H, W).flatten(1, 2).to(device=device, dtype=torch.bool)
+        )  # (B,W) -> (B,1,W)->(B, H, W) -> (B, H*W)
         mask2d = (
             mask2d.unsqueeze(1).expand(-1, H, -1).flatten(1, 2).to(device=device, dtype=torch.bool)
-        )  # (B,W) -> (B, H, W) -> (B, H*W)
+        )  # (B,W) -> (B,1,W)->(B, H, W) -> (B, H*W)
         assert not (pad2d & mask2d).any(), "pad2d and mask2d overlap (both True at some positions)"
 
         return pad2d, mask2d
@@ -454,6 +454,9 @@ class TinyBird(nn.Module):
         if attend_to_padded:
             d = self.decoder(y_full)  # (B, T, D_dec)
         else:
+            assert (
+                bool_pad.shape == y_full.shape
+            ), f"shape mismatch bool_pad.shape={bool_pad.shape}, y_full.shape={y_full.shape}"
             d = self.decoder(y_full, src_key_padding_mask=bool_pad)
         pred = self.decoder_to_pixel(d)  # Final per-token patch prediction: (B, T, P). P is pixels per patch
         return pred

@@ -53,7 +53,6 @@ def process_file(model, dataset, index, device):
             else:
                 iblock = list(range(blk, total_blocks))
 
-            print(f"mblock: {mblock}, iblock: {iblock}, n_blocks: {total_blocks}")
 
             xs, x_is = model.sample_data(x.clone(), x_i.clone(), N.clone(), n_blocks=total_blocks, start=windowed_start)
             h, idx_restore, bool_mask, bool_pad, T = model.forward_encoder(xs, x_is, mblock=mblock, iblock=iblock)
@@ -230,10 +229,21 @@ def main():
                 continue
             label = f"{y_values[row_idx]} blocks"
 
-            marker = 'o' if row_idx == rows - 1 else None
-            lw = 1.6 if row_idx == rows - 1 else 1.0
-            alpha = 1.0 if row_idx == rows - 1 else 0.7
-            ax_all.plot(x, y, marker=marker, linewidth=lw, alpha=alpha, label=label)
+            is_final = (row_idx == rows - 1)
+            marker = 'o' if is_final else None
+            lw = 3.0 if is_final else 1.0
+            alpha = 1.0 if is_final else 0.7
+            ax_all.plot(
+                x, y,
+                marker=marker,
+                markersize=6 if is_final else 0,
+                markeredgecolor='black' if is_final else None,
+                markerfacecolor='white' if is_final else None,
+                linewidth=lw,
+                alpha=alpha,
+                label=label,
+                zorder=5 if is_final else 2,
+            )
 
         ax_all.set_xlabel('Start Position (block index)')
         ax_all.set_ylabel('Loss (MSE)')
