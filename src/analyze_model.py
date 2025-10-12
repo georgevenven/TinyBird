@@ -234,9 +234,9 @@ def main():
             cmap_lbl.set_bad(color='black')
 
             divider = make_axes_locatable(ax_hm)
-            # Size as a small percentage of the main axes; share to guarantee alignment
-            ax_strip_x = divider.append_axes("bottom", size="3%", pad=0.1, sharex=ax_hm)
-            ax_strip_y = divider.append_axes("left",   size="3%", pad=0.1, sharey=ax_hm)
+            # Increase pad to leave room for axis labels and ticks
+            ax_strip_x = divider.append_axes("bottom", size="3%", pad=0.3, sharex=ax_hm)
+            ax_strip_y = divider.append_axes("left",   size="3%", pad=0.3, sharey=ax_hm)
 
             # Bottom strip (x-axis): 1 × Wh
             strip_x = np.ma.masked_invalid(lbl_x[np.newaxis, :])
@@ -251,6 +251,8 @@ def main():
             ax_strip_y.axis('off')
 
             plt.tight_layout()
+            # Add a small extra margin to leave room for axis labels and ticks
+            plt.subplots_adjust(bottom=0.12, left=0.12)
             loss_hm_out = os.path.join(images_dir, f"loss_heatmap_{tag}_{i}_{filename}.png")
             fig_hm.savefig(loss_hm_out, dpi=300, bbox_inches='tight')
             plt.close(fig_hm)
