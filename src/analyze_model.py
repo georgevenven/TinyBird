@@ -189,6 +189,15 @@ def main():
             cbar_hm = plt.colorbar(im_hm, ax=ax_hm)
             cbar_hm.set_label('Loss (MSE)', rotation=270, labelpad=20, fontsize=12)
             ax_hm.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+            if tag == 'isolated':
+                mode_label = 'Isolated Block Mode (isolate_block=True)'
+            else:
+                mode_label = 'All Blocks Mode (isolate_block=False)'
+            ax_hm.set_title(
+                f'Loss (MSE) Heatmap – {mode_label}\nIndex {i}, File: {filename}',
+                fontsize=14,
+                pad=20,
+            )
             ax_hm.annotate(
                 'Note: Some rows/columns may have fewer valid samples due to boundaries.',
                 xy=(0.99, 0.01),
@@ -216,9 +225,10 @@ def main():
             if np.isnan(y).all():
                 continue
             label = f"{y_values[row_idx]} blocks"
-            lw = 1.6 if (row_idx == 0 or row_idx == rows - 1) else 1.0
-            alpha = 1.0 if (row_idx == 0 or row_idx == rows - 1) else 0.7
-            marker = 'o' if (row_idx == 0 or row_idx == rows - 1) else None
+            # Highlight only the n=5 row (index 4) with markers
+            marker = 'o' if row_idx == 4 else None
+            lw = 1.6 if row_idx == 4 else 1.0
+            alpha = 1.0 if row_idx == 4 else 0.7
             ax_all.plot(x, y, marker=marker, linewidth=lw, alpha=alpha, label=label)
         ax_all.set_xlabel('Start Position (block index)')
         ax_all.set_ylabel('Loss (MSE)')

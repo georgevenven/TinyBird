@@ -332,8 +332,8 @@ class Trainer:
         mblock, iblock, frac, n_blocks = [], [], 0.0, 11
         if random.random() < 0.75:
             mblock = [n_blocks - 1]
-            start = random.randint(5, mblock[0] - 1)
-            if random.random() < 0.5:
+            start = random.randint(3, mblock[0] - 1)
+            if random.random() < 0.25:
                 iblock = [start]
             else:
                 iblock = list(range(start, mblock[0]))
@@ -495,37 +495,57 @@ class Trainer:
         # Denormalize predictions to original scale
         pred_denorm = denormalize_predictions(x_patches, pred)
 
+        # Compute robust display limits from the original spectrogram
+        import numpy as np
+
+        def _auto_limits(img, lo=1.0, hi=99.0):
+            vals = np.asarray(img).ravel()
+            vals = vals[np.isfinite(vals)]
+            if vals.size == 0:
+                return None
+            vmin, vmax = np.percentile(vals, [lo, hi])
+            if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax <= vmin:
+                vmin, vmax = float(np.nanmin(vals)), float(np.nanmax(vals))
+                if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax <= vmin:
+                    vmin, vmax = 0.0, 1.0
+            return float(vmin), float(vmax)
+
+        x_img = x[0, 0].detach().cpu().numpy()  # First sample, first channel
+        limits = _auto_limits(x_img)
+        if limits is None:
+            limits = (float(np.nanmin(x_img)), float(np.nanmax(x_img)))
+        vmin, vmax = limits
+
         # Create overlay patches
         overlay_patches = create_overlay(x_patches, pred_denorm, bool_mask)
 
-        # Create masked original: original with black (zero) where masked
+        # Create masked original: original with black (below vmin) where masked
         def create_masked_original(x_patches, bool_mask):
-            # x_patches: (B, T, P), bool_mask: (B, T)
             masked_patches = x_patches.clone()
-            # Set masked patches to minimum value to ensure they appear black
-            min_val = masked_patches.min()
-            masked_patches[bool_mask] = min_val - 1.0
+            # Use a value slightly below the display vmin so masked areas appear black
+            min_val = torch.tensor(
+                vmin - (vmax - vmin) * 0.05, dtype=masked_patches.dtype, device=masked_patches.device
+            )
+            masked_patches[bool_mask] = min_val
             return masked_patches
 
-        # Save reconstruction comparison
-        x_img = x[0, 0].detach().cpu().numpy()  # First sample, first channel
         masked_img = depatchify(create_masked_original(x_patches, bool_mask))[0, 0].detach().cpu().numpy()
         overlay_img = depatchify(overlay_patches)[0, 0].detach().cpu().numpy()
 
         fig = plt.figure(figsize=(12, 4.5))  # Taller figure for 3 rows
 
         ax1 = plt.subplot(3, 1, 1)
-        ax1.imshow(x_img, origin="lower", aspect="auto")
+        ax1.imshow(x_img, origin="lower", aspect="auto", vmin=vmin, vmax=vmax, cmap="viridis")
         ax1.set_title("Input Spectrogram")
         ax1.axis("off")
 
         ax2 = plt.subplot(3, 1, 2)
-        ax2.imshow(masked_img, origin="lower", aspect="auto", cmap="viridis")
+        ax2.imshow(masked_img, origin="lower", aspect="auto", vmin=vmin, vmax=vmax, cmap="viridis")
         ax2.set_title("Original with Mask (black = masked patches)")
         ax2.axis("off")
 
         ax3 = plt.subplot(3, 1, 3)
-        ax3.imshow(overlay_img, origin="lower", aspect="auto")
+        ax3.imshow(overlay_img, origin="lower", aspect="auto", vmin=vmin, vmax=vmax, cmap="viridis")
         ax3.set_title("Overlay: Unmasked Original + Masked Predictions")
         ax3.axis("off")
 

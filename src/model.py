@@ -247,10 +247,10 @@ class TinyBird(nn.Module):
         mask_blocks = []
         if len(mblock) > 0:
             mask_blocks = mblock
-            m_w = max([int(widths[b, mask_blocks].sum().item()) for b in range(B)])  # max width of the blocks
+            m_w = max([int(widths[b, mask_blocks].sum().item() // 2) for b in range(B)])  # max width of the blocks
         elif masked_blocks > 0:
             mask_blocks = torch.randperm(N, device=device)[:masked_blocks].tolist()  # randomly select n_blocks blocks
-            m_w = max([int(widths[b, mask_blocks].sum().item()) for b in range(B)])  # max width of the blocks
+            m_w = max([int(widths[b, mask_blocks].sum().item() // 2) for b in range(B)])  # max width of the blocks
         else:  # frac > 0
             m_w = max(0, min(W - 1, int(round(float(frac) * W))))  # width of the mask, no block selected
 
@@ -270,7 +270,7 @@ class TinyBird(nn.Module):
 
             # Specified mask block will not be padded, it will be masked even if iblock was set
             for blk in mask_blocks:
-                mask2d[b, st_i[blk] : end_i[blk]] = True
+                mask2d[b, (st_i[blk] + end_i[blk]) // 2 : end_i[blk]] = True
 
             # randomly select remaining columns to keep mask width constant for each item in the batch
             remaining = ((~mask2d[b]) & (~pad2d[b])).nonzero(as_tuple=False).squeeze(1)
