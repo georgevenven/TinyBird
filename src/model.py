@@ -290,10 +290,10 @@ class TinyBird(nn.Module):
 
             # pad2d[b, remaining] = False
 
-        print("mask_blocks", mask_blocks, "iblock", iblock)
-        print("pad2d", pad2d[0, :])
-        print("mask2d", mask2d[0, :])
-        assert False, "breaking..."
+        # print("mask_blocks", mask_blocks, "iblock", iblock)
+        # print("pad2d", pad2d[0, :])
+        # print("mask2d", mask2d[0, :])
+        # assert False, "breaking..."
 
         pad2d = (
             pad2d.unsqueeze(1).expand(B, H, W).flatten(1, 2).to(device=device, dtype=torch.bool)
