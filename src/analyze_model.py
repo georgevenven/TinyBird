@@ -44,14 +44,16 @@ def process_file(model, dataset, index, device):
     print(f"  Number of valid chirps: {N.item()}")
 
     def compute_losses(x, x_i, N, isolate_block=False):
-        def compute_loss(x, x_i, N, start, n_blocks, isolate_block, total_blocks=11):
+        def compute_loss(x, x_i, N, start, blk, isolate_block, total_blocks=11):
             windowed_start = start - total_blocks
 
             mblock = [total_blocks - 1]
             if isolate_block:
-                iblock = [n_blocks]
+                iblock = [blk]
             else:
-                iblock = list(range(n_blocks, mblock[0]))
+                iblock = list(range(blk, mblock[0]))
+
+            print(f"mblock: {mblock}, iblock: {iblock}, n_blocks: {total_blocks}")
 
             xs, x_is = model.sample_data(x.clone(), x_i.clone(), N.clone(), n_blocks=total_blocks, start=windowed_start)
             h, idx_restore, bool_mask, bool_pad, T = model.forward_encoder(xs, x_is, mblock=mblock, iblock=iblock)
