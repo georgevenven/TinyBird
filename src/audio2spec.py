@@ -332,6 +332,7 @@ def _detect_and_load_audio(fp: Path, target_sr: int, channel: int = -1) -> tuple
     # Robust channel-count detection: prefer soundfile, fall back to a short librosa load
     try:
         import soundfile as sf
+
         with sf.SoundFile(fp) as f:
             channel_count = int(f.channels)
     except Exception:
@@ -342,7 +343,7 @@ def _detect_and_load_audio(fp: Path, target_sr: int, channel: int = -1) -> tuple
             channel_count = 1  # safe fallback
 
     # Load once; let librosa resample if needed. Handle channel selection uniformly.
-    mono = (channel == -1)
+    mono = channel == -1
     wav, actual_sr = librosa.load(fp, sr=target_sr if needs_resampling else None, mono=mono)
     if not mono:
         # librosa.load(mono=False) returns shape (n_channels, n_samples)
@@ -434,7 +435,7 @@ def _process_core(
                 e_l = float(np.sum(P0[:, cs:ce], dtype=np.float64))
                 e_r = float(np.sum(P1[:, cs:ce], dtype=np.float64))
                 chrip_labels[i] = 1 if e_r > e_l else 0
-                print(f"cs: {cs}, ce: {ce}, e_l: {e_l}, e_r: {e_r}, chrip_labels: {chrip_labels[i]}")
+                # print(f"cs: {cs}, ce: {ce}, e_l: {e_l}, e_r: {e_r}, chrip_labels: {chrip_labels[i]}")
         else:
             chrip_labels = np.zeros((chirp_intervals.shape[0],), dtype=np.int32)
 
