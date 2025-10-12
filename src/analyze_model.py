@@ -159,10 +159,44 @@ def main():
         all_by_np = all_losses_by_blocks.detach().cpu().numpy()
         labels_np = x_l.detach().cpu().numpy().astype(int).reshape(-1)
 
+        # Diagnostics: summarize chirp labels
+        uniq, counts = np.unique(labels_np, return_counts=True)
+        print("chirp_labels summary:")
+        for u, c in zip(uniq.tolist(), counts.tolist()):
+            print(f"  label {u}: {c}")
+
         rows = int(iso_by_np.shape[0])  # number of rows equals n_blocks
         print(f"rows (n_blocks): {rows}")
 
         y_values = list(range(1, rows + 1))  # blocks 1..rows
+
+        def plot_chirp_labels_strip(labels_np, tag: str):
+            # Standalone 1xW strip to visualize label distribution
+            fig, ax = plt.subplots(figsize=(12, 1.4))
+            cmap_lbl = ListedColormap(["#add8e6", "#00008b"]).copy()  # light blue = 0, dark blue = 1
+            cmap_lbl.set_bad(color='black')
+
+            # Mask invalid entries (e.g., -1) as NaN so they render black
+            lbl = labels_np.astype(float).copy()
+            lbl[(lbl != 0) & (lbl != 1)] = np.nan
+            strip = np.ma.masked_invalid(lbl[np.newaxis, :])  # shape (1, W)
+            im = ax.imshow(strip, aspect='auto', cmap=cmap_lbl, interpolation='nearest')
+            ax.set_yticks([])
+            ax.set_xlabel('Chirp index')
+            ax.set_title(f'Chirp Labels (light=0 left, dark=1 right) — {tag}\nFile: {filename}')
+            # Add tick marks sparsely if long
+            Wlab = labels_np.size
+            if Wlab > 20:
+                step = max(1, Wlab // 20)
+                ax.set_xticks(np.arange(0, Wlab, step))
+            fig.tight_layout()
+            out_path = os.path.join(images_dir, f"chirp_labels_strip_{tag}_{i}_{filename}.png")
+            fig.savefig(out_path, dpi=300, bbox_inches='tight')
+            plt.close(fig)
+            print(f"Saved: {out_path}")
+
+        # Plot chirp labels as a stand-alone strip (once per file)
+        plot_chirp_labels_strip(labels_np, tag='per_file')
 
         def plot_avg_by_blocks(loss_by_np, tag: str):
             # Average across starts (columns) for each n_blocks row
@@ -229,6 +263,9 @@ def main():
             Hh, Wh = loss_mat_np.shape
             lbl_x = labels_np[:Wh]
             lbl_y = labels_np[:Hh]
+            # Mask any values not in {0,1}
+            lbl_x = lbl_x.astype(float); lbl_x[(lbl_x != 0) & (lbl_x != 1)] = np.nan
+            lbl_y = lbl_y.astype(float); lbl_y[(lbl_y != 0) & (lbl_y != 1)] = np.nan
 
             cmap_lbl = ListedColormap(["#add8e6", "#00008b"]).copy()
             cmap_lbl.set_bad(color='black')
@@ -236,7 +273,7 @@ def main():
             divider = make_axes_locatable(ax_hm)
             # Increase pad to leave room for axis labels and ticks
             ax_strip_x = divider.append_axes("bottom", size="3%", pad=0.3, sharex=ax_hm)
-            ax_strip_y = divider.append_axes("left",   size="3%", pad=0.3, sharey=ax_hm)
+            ax_strip_y = divider.append_axes("left",   size="3%", pad=0.45, sharey=ax_hm)
 
             # Bottom strip (x-axis): 1 × Wh
             strip_x = np.ma.masked_invalid(lbl_x[np.newaxis, :])
@@ -252,7 +289,7 @@ def main():
 
             plt.tight_layout()
             # Add a small extra margin to leave room for axis labels and ticks
-            plt.subplots_adjust(bottom=0.12, left=0.12)
+            plt.subplots_adjust(bottom=0.12, left=0.10)
             loss_hm_out = os.path.join(images_dir, f"loss_heatmap_{tag}_{i}_{filename}.png")
             fig_hm.savefig(loss_hm_out, dpi=300, bbox_inches='tight')
             plt.close(fig_hm)
