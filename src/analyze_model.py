@@ -64,21 +64,22 @@ def process_file(model, dataset, index, device):
         mblock, iblock, n_blocks = [], [], 11
         mblock = [n_blocks - 1]
         start = 3
-        iblock = list(range(start, mblock[0]))
+        iblock = list(range(start, mblock[0] + 1))
 
         n_valid_chirps = N.max().item()
         # Fill with NaNs so missing entries don't bias averages
         losses = torch.full((n_blocks, n_valid_chirps), float('nan'), device=device)
 
         print(f"\nComputing losses for {losses.numel()} (rows × starts)...")
+        print(f"mblock: {mblock}, iblock: {iblock}, n_blocks: {n_blocks}")
 
         # Compute an accurate total for the progress ba
-        with tqdm(total=n_valid_chirps * (n_blocks - start - 1), desc="Computing losses") as pbar:
+        with tqdm(total=(n_valid_chirps - n_blocks) * len(iblock), desc="Computing losses") as pbar:
             for start in range(n_blocks, n_valid_chirps):
                 for blk in iblock:
                     with torch.no_grad():
                         loss = compute_loss(x, x_i, N, start, blk, isolate_block, total_blocks=n_blocks)
-                    losses[n_blocks - blk, start] = loss.item()
+                    losses[iblock[-1] - blk, start] = loss.item()
                     pbar.update(1)
         return losses
 
@@ -143,6 +144,8 @@ def main():
 
         # Infer rows and baseline dynamically from the matrix shape
         rows = int(losses_iso_np.shape[0])
+        print(f"rows: {rows}")
+
         y_values = list(range(0, rows))  # blocks 1..rows
 
         # Helper to plot line summary and heatmap for a given matrix
@@ -226,11 +229,12 @@ def main():
             if np.isnan(y).all():
                 continue
             label = f"{y_values[row_idx]} blocks"
-            # Highlight only the n=5 row (index 4) with markers
+
             marker = 'o' if row_idx == rows - 1 else None
             lw = 1.6 if row_idx == rows - 1 else 1.0
             alpha = 1.0 if row_idx == rows - 1 else 0.7
             ax_all.plot(x, y, marker=marker, linewidth=lw, alpha=alpha, label=label)
+
         ax_all.set_xlabel('Start Position (block index)')
         ax_all.set_ylabel('Loss (MSE)')
         ax_all.set_title(f'Raw Loss vs Start by n_blocks (index {i}, allblocks)\nFile: {filename}')
