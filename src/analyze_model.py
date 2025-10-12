@@ -53,10 +53,9 @@ def process_file(model, dataset, index, device):
             else:
                 iblock = list(range(blk, total_blocks))
 
-
             xs, x_is = model.sample_data(x.clone(), x_i.clone(), N.clone(), n_blocks=total_blocks, start=windowed_start)
             h, idx_restore, bool_mask, bool_pad, T = model.forward_encoder(xs, x_is, mblock=mblock, iblock=iblock)
-            pred = model.forward_decoder(h, idx_restore, T, bool_pad=bool_pad, attend_to_padded=True)
+            pred = model.forward_decoder(h, idx_restore, T, bool_pad=bool_pad, attend_to_padded=False)
             loss = model.loss_mse(xs, pred, bool_mask)
             return loss
 
@@ -229,12 +228,13 @@ def main():
                 continue
             label = f"{y_values[row_idx]} blocks"
 
-            is_final = (row_idx == rows - 1)
+            is_final = row_idx == rows - 1
             marker = 'o' if is_final else None
             lw = 3.0 if is_final else 1.0
             alpha = 1.0 if is_final else 0.7
             ax_all.plot(
-                x, y,
+                x,
+                y,
                 marker=marker,
                 markersize=6 if is_final else 0,
                 markeredgecolor='black' if is_final else None,
