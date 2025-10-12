@@ -57,7 +57,7 @@ def process_file(model, dataset, index, device):
 
             xs, x_is = model.sample_data(x.clone(), x_i.clone(), N.clone(), n_blocks=total_blocks, start=windowed_start)
             h, idx_restore, bool_mask, bool_pad, T = model.forward_encoder(xs, x_is, mblock=mblock, iblock=iblock)
-            pred = model.forward_decoder(h, idx_restore, T, bool_pad=bool_pad, attend_to_padded=False)
+            pred = model.forward_decoder(h, idx_restore, T, bool_pad=bool_pad, attend_to_padded=True)
             loss = model.loss_mse(xs, pred, bool_mask)
             return loss
 
