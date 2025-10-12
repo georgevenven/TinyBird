@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 """
 Analyze TinyBird model behavior on spectrogram data.
@@ -6,8 +7,11 @@ This script loads a trained TinyBird model and normalized spectrogram data for a
 """
 
 import argparse
+import os
+import numpy as np
 import torch
 import matplotlib.pyplot as plt
+from matplotlib.colors import ListedColormap
 from tqdm import tqdm
 from utils import load_model_from_checkpoint
 from data_loader import SpectogramDataset
@@ -32,16 +36,16 @@ def parse_args():
 def process_file(model, dataset, index, device):
     x, x_i, x_l, N, filename = dataset[index]
 
-    # print out contents of x_l along with the shape
-    print(f"x_l shape: {x_l.shape}")
-    print(f"x_l contents: {x_l}")
-    assert False, "breaking..."
-
     x = x.unsqueeze(0).float().to(device)
     x_i = x_i.unsqueeze(0).to(device)
     N = torch.tensor([N], dtype=torch.long, device=device)
 
     x, x_i = model.compactify_data(x.clone(), x_i.clone(), N.clone())
+    # Ensure chirp labels align in length with chirp boundaries (trim trailing padding labels)
+    if isinstance(x_l, torch.Tensor):
+        x_l = x_l[: x_i.shape[1]]
+    else:
+        x_l = torch.as_tensor(x_l)[: x_i.shape[1]]
 
     print(f"  Filename: {filename}")
     print(f"  Spectrogram shape: {x.shape}")
@@ -61,7 +65,6 @@ def process_file(model, dataset, index, device):
             mblock = [len(indices) - 1]
 
             h, idx_restore, bool_mask, bool_pad, T = model.forward_encoder(xs, x_is, mblock=mblock, half_mask=False)
-
             pred = model.forward_decoder(h, idx_restore, T, bool_pad=bool_pad, attend_to_padded=False)
             loss = model.loss_mse(xs, pred, bool_mask)
             return loss
@@ -90,7 +93,7 @@ def process_file(model, dataset, index, device):
     isolated_losses, isolated_losses_by_blocks = compute_losses(x, x_i, N, isolate_block=True)
     all_losses, all_losses_by_blocks = compute_losses(x, x_i, N, isolate_block=False)
 
-    return isolated_losses, isolated_losses_by_blocks, all_losses, all_losses_by_blocks, filename
+    return isolated_losses, isolated_losses_by_blocks, all_losses, all_losses_by_blocks, filename, x_l
 
 
 def main():
@@ -134,26 +137,30 @@ def main():
     dataset = SpectogramDataset(dir=data_dir, n_mels=config.get('mels', 128), n_timebins=config.get('num_timebins', 1024), pad_crop=True)  # fmt: skip
     print(f"Dataset size: {len(dataset)} files")
 
-    import os
-    import numpy as np
-
     images_dir = "images"
     os.makedirs(images_dir, exist_ok=True)
 
     def process_and_plot(i: int):
         print(f"\nLoading sample at index {i}")
-        isolated_losses, isolated_losses_by_blocks, all_losses, all_losses_by_blocks, filename = process_file(
-            model, dataset, i, device
-        )
-        iso_np = isolated_losses.cpu().numpy()
-        iso_by_np = isolated_losses_by_blocks.cpu().numpy()
-        all_np = all_losses.cpu().numpy()
-        all_by_np = all_losses_by_blocks.cpu().numpy()
+        (
+            isolated_losses,
+            isolated_losses_by_blocks,
+            all_losses,
+            all_losses_by_blocks,
+            filename,
+            x_l,
+        ) = process_file(model, dataset, i, device)
+
+        iso_np = isolated_losses.detach().cpu().numpy()
+        iso_by_np = isolated_losses_by_blocks.detach().cpu().numpy()
+        all_np = all_losses.detach().cpu().numpy()
+        all_by_np = all_losses_by_blocks.detach().cpu().numpy()
+        labels_np = x_l.detach().cpu().numpy().astype(int).reshape(-1)
 
         rows = int(iso_by_np.shape[0])  # number of rows equals n_blocks
         print(f"rows (n_blocks): {rows}")
 
-        y_values = list(range(rows))  # blocks 1..rows
+        y_values = list(range(1, rows + 1))  # blocks 1..rows
 
         def plot_avg_by_blocks(loss_by_np, tag: str):
             # Average across starts (columns) for each n_blocks row
@@ -186,7 +193,7 @@ def main():
             plt.close(fig_line)
             print(f"Saved: {out_line}")
 
-        def plot_heatmap(loss_mat_np, tag: str):
+        def plot_heatmap(loss_mat_np, tag: str, labels_np):
             fig_hm, ax_hm = plt.subplots(figsize=(12, 8))
             loss_ma = np.ma.masked_invalid(loss_mat_np)
             # Colormap: low loss = green, high loss = red; NaNs = black
@@ -198,7 +205,6 @@ def main():
             if vmax <= vmin:
                 vmax = vmin + 1.0
             im_hm = ax_hm.imshow(loss_ma, aspect='auto', cmap=cmap, origin='lower', vmin=vmin, vmax=vmax)
-            # y-axis for heatmap is start_block index; we keep default integer ticks
             cbar_hm = plt.colorbar(im_hm, ax=ax_hm)
             cbar_hm.set_label('Loss (MSE)', rotation=270, labelpad=20, fontsize=12)
             ax_hm.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
@@ -216,6 +222,28 @@ def main():
                 ha='right',
                 va='bottom',
             )
+
+            # Add chirp label strips along axes: light blue (0), dark blue (1), NaN/invalid -> black
+            Hh, Wh = loss_mat_np.shape
+            lbl_x = labels_np[:Wh]
+            lbl_y = labels_np[:Hh]
+
+            cmap_lbl = ListedColormap(["#add8e6", "#00008b"]).copy()
+            cmap_lbl.set_bad(color='black')
+
+            pos = ax_hm.get_position()
+            fig = ax_hm.figure
+            # Bottom strip (x-axis): 1 × Wh
+            ax_strip_x = fig.add_axes([pos.x0, pos.y0 - 0.03, pos.width, 0.02])
+            strip_x = np.ma.masked_invalid(lbl_x[np.newaxis, :])
+            ax_strip_x.imshow(strip_x, aspect='auto', cmap=cmap_lbl, interpolation='nearest')
+            ax_strip_x.set_xticks([]); ax_strip_x.set_yticks([]); ax_strip_x.set_frame_on(False)
+            # Left strip (y-axis): Hh × 1 (origin lower to match heatmap orientation)
+            ax_strip_y = fig.add_axes([pos.x0 - 0.03, pos.y0, 0.02, pos.height])
+            strip_y = np.ma.masked_invalid(lbl_y[:, np.newaxis])
+            ax_strip_y.imshow(strip_y, aspect='auto', cmap=cmap_lbl, interpolation='nearest', origin='lower')
+            ax_strip_y.set_xticks([]); ax_strip_y.set_yticks([]); ax_strip_y.set_frame_on(False)
+
             plt.tight_layout()
             loss_hm_out = os.path.join(images_dir, f"loss_heatmap_{tag}_{i}_{filename}.png")
             fig_hm.savefig(loss_hm_out, dpi=300, bbox_inches='tight')
@@ -226,9 +254,9 @@ def main():
         plot_avg_by_blocks(iso_by_np, tag='isolated')
         plot_avg_by_blocks(all_by_np, tag='allblocks')
 
-        # Heatmaps use the full sparse matrices
-        plot_heatmap(iso_np, tag='isolated')
-        plot_heatmap(all_np, tag='allblocks')
+        # Heatmaps use the full sparse matrices (with chirp label strips)
+        plot_heatmap(iso_np, tag='isolated', labels_np=labels_np)
+        plot_heatmap(all_np, tag='allblocks', labels_np=labels_np)
 
         # Raw loss vs start (isolated blocks)
         fig_iso, ax_iso = plt.subplots(figsize=(10, 5))
