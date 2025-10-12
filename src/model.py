@@ -202,6 +202,7 @@ class TinyBird(nn.Module):
         frac: float = -1.0,
         mblock: list = [],
         iblock: list = [],
+        half_mask: bool = False,
     ):
         """
         Generate column-wise masking pattern for spectrogram patches.
@@ -248,6 +249,8 @@ class TinyBird(nn.Module):
         if len(mblock) > 0:
             mask_blocks = mblock
             m_w = min([int(widths[b, mask_blocks].sum().item()) for b in range(B)])  # max width of the blocks
+            if half_mask:
+                m_w = m_w // 2
         elif masked_blocks > 0:
             mask_blocks = torch.randperm(N, device=device)[:masked_blocks].tolist()  # randomly select n_blocks blocks
             m_w = min([int(widths[b, mask_blocks].sum().item()) for b in range(B)])  # max width of the blocks

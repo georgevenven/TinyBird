@@ -54,7 +54,9 @@ def process_file(model, dataset, index, device):
                 iblock = list(range(mblock[0] - n_blocks, mblock[0]))
 
             xs, x_is = model.sample_data(x.clone(), x_i.clone(), N.clone(), n_blocks=total_blocks, start=windowed_start)
-            h, idx_restore, bool_mask, bool_pad, T = model.forward_encoder(xs, x_is, mblock=mblock, iblock=iblock)
+            h, idx_restore, bool_mask, bool_pad, T = model.forward_encoder(
+                xs, x_is, mblock=mblock, iblock=iblock, half_mask=True
+            )
             pred = model.forward_decoder(h, idx_restore, T, bool_pad=bool_pad)
             loss = model.loss_mse(xs, pred, bool_mask)
             return loss
@@ -70,7 +72,7 @@ def process_file(model, dataset, index, device):
         # Compute an accurate total for the progress ba
         with tqdm(total=n_valid_chirps * (block_max - 1), desc="Computing losses") as pbar:
             for start in range(block_max, n_valid_chirps):
-                for n_blocks in range(1, block_max):
+                for n_blocks in range(0, block_max):
                     with torch.no_grad():
                         loss = compute_loss(x, x_i, N, start, n_blocks, isolate_block, total_blocks=total_blocks)
                     losses[n_blocks - 1, start] = loss.item()
@@ -138,7 +140,7 @@ def main():
 
         # Infer rows and baseline dynamically from the matrix shape
         rows = int(losses_iso_np.shape[0])
-        y_values = list(range(1, rows + 1))  # blocks 1..rows
+        y_values = list(range(0, rows))  # blocks 1..rows
 
         # Helper to plot line summary and heatmap for a given matrix
         def plot_set(loss_mat_np, tag: str):
@@ -222,9 +224,9 @@ def main():
                 continue
             label = f"{y_values[row_idx]} blocks"
             # Highlight only the n=5 row (index 4) with markers
-            marker = 'o' if row_idx == 4 else None
-            lw = 1.6 if row_idx == 4 else 1.0
-            alpha = 1.0 if row_idx == 4 else 0.7
+            marker = 'o' if row_idx == rows - 1 else None
+            lw = 1.6 if row_idx == rows - 1 else 1.0
+            alpha = 1.0 if row_idx == rows - 1 else 0.7
             ax_all.plot(x, y, marker=marker, linewidth=lw, alpha=alpha, label=label)
         ax_all.set_xlabel('Start Position (block index)')
         ax_all.set_ylabel('Loss (MSE)')
