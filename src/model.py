@@ -282,8 +282,8 @@ class TinyBird(nn.Module):
 
             for blk in range(N):
                 if (blk not in iblock) and (blk not in mask_blocks):
-                    if st_i[blk] > 0:
-                        pad2d[b, st_i[blk]] = True
+                    if st_i[blk] - 1 > 0:
+                        pad2d[b, st_i[blk] - 1] = True
                     pad2d[b, st_i[blk] : end_i[blk]] = True  # not in an iblock or a mask_block so pad
                 else:
                     pad2d[b, st_i[blk] : end_i[blk]] = False  # in an iblock or a mask_block so don't pad
