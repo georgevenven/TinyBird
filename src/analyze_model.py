@@ -60,7 +60,7 @@ def process_file(model, dataset, index, device):
             return loss
 
         total_blocks = 11
-        block_max = 6
+        block_max = 8
         n_valid_chirps = N.max().item()
         # Fill with NaNs so missing entries don't bias averages
         losses = torch.full((block_max, n_valid_chirps), float('nan'), device=device)
@@ -76,7 +76,7 @@ def process_file(model, dataset, index, device):
                     losses[n_blocks - 1, start] = loss.item()
                     pbar.update(1)
         return losses
-        
+
     losses = compute_losses(x, x_i, N, isolate_block=True)
     losses_all_blocks = compute_losses(x, x_i, N, isolate_block=False)
 
@@ -193,11 +193,7 @@ def main():
                 mode_label = 'Isolated Block Mode (isolate_block=True)'
             else:
                 mode_label = 'All Blocks Mode (isolate_block=False)'
-            ax_hm.set_title(
-                f'Loss (MSE) Heatmap – {mode_label}\nIndex {i}, File: {filename}',
-                fontsize=14,
-                pad=20,
-            )
+            ax_hm.set_title(f'Loss (MSE) Heatmap – {mode_label}\nIndex {i}, File: {filename}', fontsize=14, pad=20)
             ax_hm.annotate(
                 'Note: Some rows/columns may have fewer valid samples due to boundaries.',
                 xy=(0.99, 0.01),
