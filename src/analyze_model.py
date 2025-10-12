@@ -44,18 +44,19 @@ def process_file(model, dataset, index, device):
     print(f"  Number of valid chirps: {N.item()}")
 
     def compute_losses(x, x_i, N, isolate_block=False):
-        def compute_loss(x, x_i, N, start, blk, isolate_block, total_blocks=11):
-            windowed_start = start - total_blocks
-
-            mblock = [total_blocks - 1]
-            if isolate_block:
-                iblock = [blk]
+        def compute_loss(x, x_i, N, start_block, last_block, isolate_block):
+ 
+            if isolate_block :
+                indices = [start_block,last_block]
             else:
-                iblock = list(range(blk, total_blocks))
+                indices = list(range(start_block, last_block+1))
 
-            xs, x_is = model.sample_data(x.clone(), x_i.clone(), N.clone(), n_blocks=total_blocks, start=windowed_start)
+            xs, x_is = model.sample_data_indices(x.clone(), x_i.clone(), N.clone(), indices)
+
+            mblock = [len(indices)-1]
+
             h, idx_restore, bool_mask, bool_pad, T = model.forward_encoder(
-                xs, x_is, mblock=mblock, iblock=iblock, half_mask=False
+                xs, x_is, mblock=mblock, half_mask=False
             )
 
             # print(
@@ -67,32 +68,30 @@ def process_file(model, dataset, index, device):
             loss = model.loss_mse(xs, pred, bool_mask)
             return loss
 
-        mblock, iblock, n_blocks = [], [], 11
-        mblock = [n_blocks - 1]
-        start = 3
-        iblock = list(range(start, mblock[0] + 1))
-
+        n_blocks       =  8
         n_valid_chirps = N.max().item()
+
         # Fill with NaNs so missing entries don't bias averages
-        losses = torch.full((n_blocks, n_valid_chirps), float('nan'), device=device)
+        losses           = torch.full((n_valid_chirps, n_valid_chirps), float('nan'), device=device)
+        losses_by_blocks = torch.full((n_blocks, n_valid_chirps), float('nan'), device=device)
 
         print(f"\nComputing losses for {losses.numel()} (rows × starts)...")
-        print(f"mblock: {mblock}, iblock: {iblock}, n_blocks: {n_blocks}")
 
         # Compute an accurate total for the progress ba
-        with tqdm(total=(n_valid_chirps - n_blocks) * len(iblock), desc="Computing losses") as pbar:
-            for start in range(n_blocks, n_valid_chirps):
-                for blk in iblock:
+        with tqdm(total=(n_valid_chirps - n_blocks) * len(n_blocks), desc="Computing losses") as pbar:
+            for last_block in range(n_blocks, n_valid_chirps):
+                for start_block in range(last_block-n_blocks, last_block):
                     with torch.no_grad():
-                        loss = compute_loss(x, x_i, N, start, blk, isolate_block, total_blocks=n_blocks)
-                    losses[iblock[-1] - blk, start] = loss.item()
+                        loss = compute_loss(x, x_i, N, start_block, last_block, isolate_block)
+                    losses[start_block, last_block] = loss.item()
+                    losses_by_blocks[last_block-start_block, last_block] = loss.item()
                     pbar.update(1)
-        return losses
+        return losses, losses_by_blocks
 
-    losses = compute_losses(x, x_i, N, isolate_block=True)
-    losses_all_blocks = compute_losses(x, x_i, N, isolate_block=False)
+    isolated_losses, isolated_losses_by_blocks = compute_losses(x, x_i, N, isolate_block=True)
+    all_losses, all_losses_by_blocks = compute_losses(x, x_i, N, isolate_block=False)
 
-    return losses, losses_all_blocks, filename
+    return  isolated_losses, isolated_losses_by_blocks, all_losses, all_losses_by_blocks, filename
 
 
 def main():
@@ -144,21 +143,21 @@ def main():
 
     def process_and_plot(i: int):
         print(f"\nLoading sample at index {i}")
-        losses_iso, losses_all, filename = process_file(model, dataset, i, device)
-        losses_iso_np = losses_iso.cpu().numpy()
-        losses_all_np = losses_all.cpu().numpy()
+        isolated_losses, isolated_losses_by_blocks, all_losses, all_losses_by_blocks, filename = process_file(model, dataset, i, device)
+        iso_np = isolated_losses.cpu().numpy()
+        iso_by_np = isolated_losses_by_blocks.cpu().numpy()
+        all_np = all_losses.cpu().numpy()
+        all_by_np = all_losses_by_blocks.cpu().numpy()
 
-        # Infer rows and baseline dynamically from the matrix shape
-        rows = int(losses_iso_np.shape[0])
-        print(f"rows: {rows}")
+        rows = int(iso_by_np.shape[0])  # number of rows equals n_blocks
+        print(f"rows (n_blocks): {rows}")
 
-        y_values = list(range(0, rows))  # blocks 1..rows
+        y_values = list(range(1, rows + 1))  # blocks 1..rows
 
-        # Helper to plot line summary and heatmap for a given matrix
-        def plot_set(loss_mat_np, tag: str):
-            # 1) Line plot of average raw loss (MSE) vs n_blocks, excluding baseline row (0 blocks)
-            mean_loss = np.nanmean(loss_mat_np, axis=1)
-            std_loss = np.nanstd(loss_mat_np, axis=1)
+        def plot_avg_by_blocks(loss_by_np, tag: str):
+            # Average across starts (columns) for each n_blocks row
+            mean_loss = np.nanmean(loss_by_np, axis=1)
+            std_loss = np.nanstd(loss_by_np, axis=1)
 
             idxs = list(range(rows))
             y_vals_plot = y_values
@@ -168,18 +167,13 @@ def main():
             fig_line, ax_line = plt.subplots(figsize=(8, 5))
             ax_line.plot(y_vals_plot, mean_plot, marker='o')
             ax_line.fill_between(y_vals_plot, mean_plot - std_plot, mean_plot + std_plot, alpha=0.2)
-            ax_line.set_xlabel('n_blocks (index)')
+            ax_line.set_xlabel('n_blocks')
             ax_line.set_ylabel('Average Loss (MSE)')
             ax_line.set_title(f'Average Loss vs n_blocks (index {i}, {tag})\nFile: {filename}')
             ax_line.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
-            # Add note about missing data
             ax_line.annotate(
-                'Note: Some rows/columns may have fewer valid samples due to boundaries.',
-                xy=(0.99, 0.01),
-                xycoords='axes fraction',
-                fontsize=8,
-                ha='right',
-                va='bottom',
+                'Note: Some rows may have fewer valid samples due to boundaries.',
+                xy=(0.99, 0.01), xycoords='axes fraction', fontsize=8, ha='right', va='bottom',
             )
             plt.tight_layout()
             out_line = os.path.join(images_dir, f"avg_loss_vs_nblocks_{tag}_{i}_{filename}.png")
@@ -187,34 +181,27 @@ def main():
             plt.close(fig_line)
             print(f"Saved: {out_line}")
 
-            # 2) Heatmap: raw Loss (MSE)
+        def plot_heatmap(loss_mat_np, tag: str):
             fig_hm, ax_hm = plt.subplots(figsize=(12, 8))
             loss_ma = np.ma.masked_invalid(loss_mat_np)
-            # Set color scale to data range (ignoring NaNs)
-            vmin = np.nanmin(loss_ma)
-            vmax = np.nanmax(loss_ma)
-            if not np.isfinite(vmin):
-                vmin = 0.0
-            if not np.isfinite(vmax) or vmax == vmin:
+            # Colormap: low loss = green, high loss = red; NaNs = black
+            cmap = plt.get_cmap('RdYlGn_r').copy()
+            cmap.set_bad(color='black')
+            # Scale to finite data range
+            vmin = float(np.nanmin(loss_ma)) if np.isfinite(np.nanmin(loss_ma)) else 0.0
+            vmax = float(np.nanmax(loss_ma)) if np.isfinite(np.nanmax(loss_ma)) else 1.0
+            if vmax <= vmin:
                 vmax = vmin + 1.0
-            im_hm = ax_hm.imshow(loss_ma, aspect='auto', cmap='viridis', origin='lower', vmin=vmin, vmax=vmax)
-            ax_hm.set_yticks(np.arange(rows))
-            ax_hm.set_yticklabels([str(v) for v in y_values])
+            im_hm = ax_hm.imshow(loss_ma, aspect='auto', cmap=cmap, origin='lower', vmin=vmin, vmax=vmax)
+            # y-axis for heatmap is start_block index; we keep default integer ticks
             cbar_hm = plt.colorbar(im_hm, ax=ax_hm)
             cbar_hm.set_label('Loss (MSE)', rotation=270, labelpad=20, fontsize=12)
             ax_hm.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
-            if tag == 'isolated':
-                mode_label = 'Isolated Block Mode (isolate_block=True)'
-            else:
-                mode_label = 'All Blocks Mode (isolate_block=False)'
+            mode_label = 'Isolated Block Mode (isolate_block=True)' if tag == 'isolated' else 'All Blocks Mode (isolate_block=False)'
             ax_hm.set_title(f'Loss (MSE) Heatmap – {mode_label}\nIndex {i}, File: {filename}', fontsize=14, pad=20)
             ax_hm.annotate(
-                'Note: Some rows/columns may have fewer valid samples due to boundaries.',
-                xy=(0.99, 0.01),
-                xycoords='axes fraction',
-                fontsize=8,
-                ha='right',
-                va='bottom',
+                'NaN = black; low = green; high = red. Sparse near diagonal due to windowing.',
+                xy=(0.99, 0.01), xycoords='axes fraction', fontsize=8, ha='right', va='bottom',
             )
             plt.tight_layout()
             loss_hm_out = os.path.join(images_dir, f"loss_heatmap_{tag}_{i}_{filename}.png")
@@ -222,37 +209,60 @@ def main():
             plt.close(fig_hm)
             print(f"Saved: {loss_hm_out}")
 
-        # Generate both sets
-        plot_set(losses_iso_np, tag='isolated')
-        plot_set(losses_all_np, tag='allblocks')
+        # Average loss vs n_blocks (by-blocks matrices)
+        plot_avg_by_blocks(iso_by_np, tag='isolated')
+        plot_avg_by_blocks(all_by_np, tag='allblocks')
 
-        # Line graph of raw loss for each block row (1..rows), labeled by block count
-        fig_all, ax_all = plt.subplots(figsize=(10, 5))
-        for k in range(rows):  # k: 0..rows-1 corresponds to 1..rows blocks
+        # Heatmaps use the full sparse matrices
+        plot_heatmap(iso_np, tag='isolated')
+        plot_heatmap(all_np, tag='allblocks')
+
+        # Raw loss vs start (isolated blocks)
+        fig_iso, ax_iso = plt.subplots(figsize=(10, 5))
+        for k in range(rows):
             row_idx = k
-            y = losses_all_np[row_idx, :]
+            y = iso_by_np[row_idx, :]
             x = np.arange(y.size)
             if np.isnan(y).all():
                 continue
             label = f"{y_values[row_idx]} blocks"
-
             is_final = row_idx == rows - 1
             marker = 'o' if is_final else None
             lw = 3.0 if is_final else 1.0
             alpha = 1.0 if is_final else 0.7
-            ax_all.plot(
-                x,
-                y,
-                marker=marker,
-                markersize=6 if is_final else 0,
-                markeredgecolor='black' if is_final else None,
-                markerfacecolor='white' if is_final else None,
-                linewidth=lw,
-                alpha=alpha,
-                label=label,
-                zorder=5 if is_final else 2,
-            )
+            ax_iso.plot(x, y, marker=marker, markersize=6 if is_final else 0,
+                        markeredgecolor='black' if is_final else None,
+                        markerfacecolor='white' if is_final else None,
+                        linewidth=lw, alpha=alpha, label=label, zorder=5 if is_final else 2)
+        ax_iso.set_xlabel('Start Position (block index)')
+        ax_iso.set_ylabel('Loss (MSE)')
+        ax_iso.set_title(f'Raw Loss vs Start by n_blocks (index {i}, isolated)\nFile: {filename}')
+        ax_iso.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+        if len(ax_iso.lines) > 0:
+            ax_iso.legend(title='n_blocks')
+        plt.tight_layout()
+        iso_out = os.path.join(images_dir, f"loss_lines_isolated_by_blocks_{i}_{filename}.png")
+        fig_iso.savefig(iso_out, dpi=300, bbox_inches='tight')
+        plt.close(fig_iso)
+        print(f"Saved: {iso_out}")
 
+        # Raw loss vs start (all blocks)
+        fig_all, ax_all = plt.subplots(figsize=(10, 5))
+        for k in range(rows):
+            row_idx = k
+            y = all_by_np[row_idx, :]
+            x = np.arange(y.size)
+            if np.isnan(y).all():
+                continue
+            label = f"{y_values[row_idx]} blocks"
+            is_final = row_idx == rows - 1
+            marker = 'o' if is_final else None
+            lw = 3.0 if is_final else 1.0
+            alpha = 1.0 if is_final else 0.7
+            ax_all.plot(x, y, marker=marker, markersize=6 if is_final else 0,
+                        markeredgecolor='black' if is_final else None,
+                        markerfacecolor='white' if is_final else None,
+                        linewidth=lw, alpha=alpha, label=label, zorder=5 if is_final else 2)
         ax_all.set_xlabel('Start Position (block index)')
         ax_all.set_ylabel('Loss (MSE)')
         ax_all.set_title(f'Raw Loss vs Start by n_blocks (index {i}, allblocks)\nFile: {filename}')

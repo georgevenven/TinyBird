@@ -139,6 +139,10 @@ class TinyBird(nn.Module):
 
         return x_new, xi_new
 
+
+
+        
+
     def sample_data(self, x: torch.Tensor, xi: torch.Tensor, N: torch.Tensor, n_blocks: int, start: int = -1):
         """
         Sample random contiguous windows of chirp blocks.
@@ -191,6 +195,75 @@ class TinyBird(nn.Module):
             xi_out[b] = xi[b, start[b] : end[b], :].clone()  # remap the boundaries to the new window
             xi_out[b, :, 0] = xi_out[b, :, 0] - st
             xi_out[b, :, 1] = xi_out[b, :, 1] - st
+
+        return x_out, xi_out
+
+    def sample_data_indices(self, x: torch.Tensor, xi: torch.Tensor, N: torch.Tensor, indices):
+        """
+        Sample a window of chirp blocks using explicit block indices (not necessarily contiguous).
+
+        Args:
+            x: Spectrograms (B, C, H, W)
+            xi: Chirp boundaries (B, N_max, 2)
+            N: Valid chirp counts per item (B,)
+            indices: Iterable of integer block indices to extract, in the order to be concatenated
+
+        Returns:
+            x_out:  Concatenated spectrograms of the selected blocks with 1-col separators (B, C, H, max_width)
+            xi_out: Remapped boundaries in the new window coordinates, one row per selected index (B, K, 2)
+        """
+        B, C, H, W = x.shape
+        device = x.device
+        N = N.view(B, 1)
+
+        # Normalize indices to a Python list of ints (preserve caller order)
+        if isinstance(indices, torch.Tensor):
+            indices = indices.detach().cpu().tolist()
+        else:
+            indices = list(indices)
+        indices = [int(i) for i in indices]
+        assert len(indices) > 0, "indices must contain at least one element"
+
+        # Ensure feasibility across the batch: only keep indices valid for all items
+        n_min = int(N.min().item())
+        valid = [i for i in indices if 0 <= i < n_min]
+        assert len(valid) > 0, f"no valid indices within min(N)={n_min}; got {indices}"
+        K = len(valid)
+
+        # Compute per-item output widths = sum of widths for selected blocks + (K-1) separators
+        # separators are 1 column wide, consistent with compactify_data()
+        b_ix = torch.arange(B, device=device)
+        starts = xi[b_ix.unsqueeze(1), torch.tensor(valid, device=device), 0].long()  # (B, K)
+        ends   = xi[b_ix.unsqueeze(1), torch.tensor(valid, device=device), 1].long()  # (B, K)
+        widths = (ends - starts).clamp_min(0)                                         # (B, K)
+        widths_sum = widths.sum(dim=1)                                                # (B,)
+        out_widths = widths_sum + (K - 1)                                             # (B,)
+        max_width = int(out_widths.max().item())
+
+        x_out = torch.zeros(B, C, H, max_width, device=device, dtype=x.dtype)
+        xi_out = torch.zeros(B, K, 2, device=device, dtype=xi.dtype)
+
+        for b in range(B):
+            pos = 0
+            for k, idx in enumerate(valid):
+                s0 = int(xi[b, idx, 0].item())
+                e0 = int(xi[b, idx, 1].item())
+                w  = max(0, e0 - s0)
+                if w > 0 and pos + w <= max_width:
+                    # Copy all channels, not just channel 0
+                    x_out[b, :, :, pos : pos + w] = x[b, :, :, s0:e0]
+                    xi_out[b, k, 0] = pos
+                    xi_out[b, k, 1] = pos + w
+                    pos += w
+                else:
+                    # Degenerate case: zero-width or truncated by max_width; keep xi_out contiguous
+                    xi_out[b, k, 0] = pos
+                    xi_out[b, k, 1] = pos
+                # Insert separator if not the last selected block and room remains
+                if k < K - 1 and pos < max_width:
+                    # Use the actual separator column from the source window at e0 (1+end of block)
+                    x_out[b, :, :, pos] = x[b, :, :, e0]
+                    pos += 1
 
         return x_out, xi_out
 
