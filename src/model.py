@@ -264,8 +264,9 @@ class TinyBird(nn.Module):
             st_i = [int(v) for v in starts[b].tolist()]
             end_i = [int(v) for v in ends[b].tolist()]
 
-            pad2d[b, 0 : min(st_i)] = True  # pad partial blocks if iblock is not set
-            pad2d[b, max(end_i) : W] = True  # pad partial blocks if iblock is not set
+            if len(iblock) > 0:
+                pad2d[b, 0 : min(st_i)] = True  # pad partial blocks if iblock is not set
+                pad2d[b, max(end_i) : W] = True  # pad partial blocks if iblock is not set
 
             # ensure that "remaining" can't include the isolated blocks, as this is where information comes from.
             for ib in iblock:
@@ -280,13 +281,14 @@ class TinyBird(nn.Module):
             # remaining = remaining[torch.randperm(remaining.numel(), device=device)[: m_w - int(mask2d[b].sum().item())]]
             # mask2d[b, remaining] = True
 
-            for blk in range(N):
-                if (blk not in iblock) and (blk not in mask_blocks):
-                    if st_i[blk] - 1 > 0:
-                        pad2d[b, st_i[blk] - 1] = True
-                    pad2d[b, st_i[blk] : end_i[blk]] = True  # not in an iblock or a mask_block so pad
-                else:
-                    pad2d[b, st_i[blk] : end_i[blk]] = False  # in an iblock or a mask_block so don't pad
+            if len(iblock) > 0:
+                for blk in range(N):
+                    if (blk not in iblock) and (blk not in mask_blocks):
+                        if st_i[blk] - 1 > 0:
+                            pad2d[b, st_i[blk] - 1] = True
+                        pad2d[b, st_i[blk] : end_i[blk]] = True  # not in an iblock or a mask_block so pad
+                    else:
+                        pad2d[b, st_i[blk] : end_i[blk]] = False  # in an iblock or a mask_block so don't pad
 
             # pad2d[b, remaining] = False
 

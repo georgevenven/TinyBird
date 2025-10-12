@@ -332,15 +332,16 @@ class Trainer:
         mblock, iblock, frac, n_blocks = [], [], 0.0, 11
         # if random.random() < 0.75:
         mblock = [n_blocks - 1]
-        start = random.randint(3, mblock[0] - 1)
-        if random.random() < 0.25:
-            iblock = [start]
-        else:
-            iblock = list(range(start, mblock[0]))
+        iblock = []
+        # start = random.randint(3, mblock[0] - 1)
+        # if random.random() < 0.25:
+        #     iblock = [start]
+        # else:
+        #     iblock = list(range(start, mblock[0]))
         # else:
         #     frac = 0.5
 
-        attend_to_padded = False  # True if random.random() < 0.25 else False
+        attend_to_padded = True  # True if random.random() < 0.25 else False
 
         if is_training:
             self.tinybird.train()
