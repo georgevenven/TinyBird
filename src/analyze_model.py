@@ -51,7 +51,7 @@ def process_file(model, dataset, index, device):
             if isolate_block:
                 iblock = [blk]
             else:
-                iblock = list(range(blk, mblock[0]))
+                iblock = list(range(blk, total_blocks))
 
             print(f"mblock: {mblock}, iblock: {iblock}, n_blocks: {total_blocks}")
 
