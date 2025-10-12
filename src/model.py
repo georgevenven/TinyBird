@@ -282,11 +282,18 @@ class TinyBird(nn.Module):
 
             for blk in range(N):
                 if (blk not in iblock) and (blk not in mask_blocks):
+                    if st_i[blk] > 0:
+                        pad2d[b, st_i[blk]] = True
                     pad2d[b, st_i[blk] : end_i[blk]] = True  # not in an iblock or a mask_block so pad
                 else:
                     pad2d[b, st_i[blk] : end_i[blk]] = False  # in an iblock or a mask_block so don't pad
 
             # pad2d[b, remaining] = False
+
+        print("mask_blocks", mask_blocks, "iblock", iblock)
+        print("pad2d", pad2d[0, :])
+        print("mask2d", mask2d[0, :])
+        assert False, "breaking..."
 
         pad2d = (
             pad2d.unsqueeze(1).expand(B, H, W).flatten(1, 2).to(device=device, dtype=torch.bool)
@@ -449,7 +456,10 @@ class TinyBird(nn.Module):
         pos_dec = self.encoder_to_decoder(
             self.pos_enc[:, :T, :]
         )  # (1, T, D_dec) decoder pos-encs derived by projecting encoder pos-encs
-        y_full = y_full + pos_dec
+
+        # bool_pad: (B, T) True = padded
+        y_full = y_full + pos_dec * (~bool_pad).unsqueeze(-1)
+        # y_full = y_full + pos_dec
 
         if attend_to_padded:
             d = self.decoder(y_full)  # (B, T, D_dec)
