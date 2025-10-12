@@ -44,22 +44,17 @@ def process_file(model, dataset, index, device):
     print(f"  Number of valid chirps: {N.item()}")
 
     def compute_losses(x, x_i, N, isolate_block=False):
-        def compute_loss(x, x_i, N, start_block, last_block, isolate_block):
+        def compute_loss(x, x_i, N, start_block, last_block, n_blocks, isolate_block):
             if isolate_block:
                 indices = [start_block, last_block]
             else:
-                indices = list(range(start_block, last_block + 1))
+                indices = list(range(start_block, min(start_block + n_blocks, last_block))) + [last_block]
 
             xs, x_is = model.sample_data_indices(x.clone(), x_i.clone(), N.clone(), indices)
 
             mblock = [len(indices) - 1]
 
             h, idx_restore, bool_mask, bool_pad, T = model.forward_encoder(xs, x_is, mblock=mblock, half_mask=False)
-
-            # print(
-            #     f"h.shape: {h.shape}, idx_restore.shape: {idx_restore.shape}, bool_mask.shape: {bool_mask.shape}, bool_pad.shape: {bool_pad.shape}, T: {T}"
-            # )
-            # assert False, "breaking..."
 
             pred = model.forward_decoder(h, idx_restore, T, bool_pad=bool_pad, attend_to_padded=False)
             loss = model.loss_mse(xs, pred, bool_mask)
@@ -77,11 +72,12 @@ def process_file(model, dataset, index, device):
         # Compute an accurate total for the progress ba
         with tqdm(total=(n_valid_chirps - n_blocks) * n_blocks, desc="Computing losses") as pbar:
             for last_block in range(n_blocks, n_valid_chirps):
-                for start_block in range(last_block - n_blocks, last_block):
+                for start_block in range(0, last_block):
                     with torch.no_grad():
-                        loss = compute_loss(x, x_i, N, start_block, last_block, isolate_block)
+                        loss = compute_loss(x, x_i, N, start_block, last_block, n_blocks, isolate_block)
                     losses[start_block, last_block] = loss.item()
-                    losses_by_blocks[last_block - start_block, last_block] = loss.item()
+                    if (last_block - start_block) <= n_blocks:
+                        losses_by_blocks[last_block - start_block, last_block] = loss.item()
                     pbar.update(1)
         return losses, losses_by_blocks
 
@@ -151,7 +147,7 @@ def main():
         rows = int(iso_by_np.shape[0])  # number of rows equals n_blocks
         print(f"rows (n_blocks): {rows}")
 
-        y_values = list(range(1, rows + 1))  # blocks 1..rows
+        y_values = list(range(rows))  # blocks 1..rows
 
         def plot_avg_by_blocks(loss_by_np, tag: str):
             # Average across starts (columns) for each n_blocks row
