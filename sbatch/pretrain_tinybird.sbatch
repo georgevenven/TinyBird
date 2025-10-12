@@ -45,11 +45,10 @@ python -u src/compute_statistics_of_spectrograms.py "$SPEC_DIR"
 
 RUN_NAME=tinybird_pretrain_$(date +%Y%m%d_%H%M%S)
 
-# Train & val are the same for now; 10,000,000 steps as requested
 python -u src/pretrain.py \
   --train_dir "$SPEC_DIR" \
   --val_dir   "$SPEC_DIR" \
   --run_name  "$RUN_NAME" \
   --steps 5000000 \
-  --num_workers 32 \
+  --num_workers 12 \
   --amp
