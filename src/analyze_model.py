@@ -68,7 +68,7 @@ def process_file(model, dataset, index, device):
 
         n_valid_chirps = N.max().item()
         # Fill with NaNs so missing entries don't bias averages
-        losses = torch.full((block_max, n_valid_chirps), float('nan'), device=device)
+        losses = torch.full((n_blocks, n_valid_chirps), float('nan'), device=device)
 
         print(f"\nComputing losses for {losses.numel()} (rows × starts)...")
 
