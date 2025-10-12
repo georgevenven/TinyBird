@@ -259,6 +259,29 @@ def main():
                 va='bottom',
             )
 
+            # === Overlay: for each x (column), mark the y with the smallest finite loss ===
+            arr = np.array(loss_mat_np, dtype=float)
+            finite_mask = np.isfinite(arr)
+            # Columns that have at least one finite value
+            cols = np.where(finite_mask.any(axis=0))[0]
+            if cols.size > 0:
+                # Replace non-finite with +inf so argmin ignores them
+                arr_inf = arr.copy()
+                arr_inf[~finite_mask] = np.inf
+                ys = np.argmin(arr_inf[:, cols], axis=0)
+                # Compute marker size ~ size of one heatmap cell
+                fig = ax_hm.figure
+                bbox = ax_hm.get_window_extent().transformed(fig.dpi_scale_trans.inverted())
+                # cell sizes (in inches)
+                cell_w_in = (bbox.width) / max(1, arr.shape[1])
+                cell_h_in = (bbox.height) / max(1, arr.shape[0])
+                # diameter ~ 0.8 of the smaller cell dimension
+                diam_in = 0.8 * min(cell_w_in, cell_h_in)
+                # convert diameter (inches) to points, then to area (points^2)
+                diam_pt = diam_in * 72.0
+                s = (diam_pt ** 2)
+                ax_hm.scatter(cols, ys, s=s, c="#ff69b4", marker='o', edgecolors='none', zorder=6)
+
             # Add chirp label strips along axes using shared axes for pixel-perfect alignment
             Hh, Wh = loss_mat_np.shape
             lbl_x = labels_np[:Wh]
