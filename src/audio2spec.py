@@ -23,6 +23,7 @@ from tqdm import tqdm
 from scipy import ndimage
 import scipy.signal as ss
 
+
 def compute_spectrogram(
     wav: np.ndarray, sr: int, n_fft: int, hop: int, *, mel: bool, n_mels: int, s_ref: float = None
 ) -> tuple[np.ndarray, np.ndarray, float]:
@@ -72,6 +73,7 @@ def compute_spectrogram(
     S_db = librosa.power_to_db(S, ref=ref, top_db=None)
     chirp_intervals, _, _ = classify_loudness(S_db, frame_ms)
     return S_db, np.asarray(chirp_intervals, dtype=np.int32).reshape(-1, 2), ref
+
 
 def classify_loudness(
     spec_db: np.ndarray, frame_ms: float, merge_ms: float = 200.0
@@ -300,6 +302,7 @@ def aggregate_and_print_summary(summary_rows: list[dict], dst_dir: Path) -> None
         mx = np.max(maxs) if maxs else float('nan')
         print(f"{L}\t{mu:.2f}\t{np.sqrt(var):.2f}\t{mn:.2f}\t{mx:.2f}\t{c}")
 
+
 def _detect_and_load_audio(fp: Path, target_sr: int, channel: int = -1) -> tuple[np.ndarray, int, int]:
     """
     Load audio from `fp` and return (wav, actual_sr, channel_count).
@@ -326,13 +329,24 @@ def _detect_and_load_audio(fp: Path, target_sr: int, channel: int = -1) -> tuple
         native_sr = None
     needs_resampling = (native_sr != target_sr) if native_sr else True
 
-    channel_count = librosa.get_channel_count(fp)
+    # Robust channel-count detection: prefer soundfile, fall back to a short librosa load
+    try:
+        import soundfile as sf
+        with sf.SoundFile(fp) as f:
+            channel_count = int(f.channels)
+    except Exception:
+        try:
+            y_probe, sr_probe = librosa.load(fp, sr=None, mono=False, duration=0.01)
+            channel_count = 1 if np.ndim(y_probe) == 1 else int(y_probe.shape[0])
+        except Exception:
+            channel_count = 1  # safe fallback
 
     # Load once; let librosa resample if needed. Handle channel selection uniformly.
-    mono = channel == -1
+    mono = (channel == -1)
     wav, actual_sr = librosa.load(fp, sr=target_sr if needs_resampling else None, mono=mono)
     if not mono:
-        wav = wav[:, channel]
+        # librosa.load(mono=False) returns shape (n_channels, n_samples)
+        wav = wav[int(channel), :]
 
     # If we skipped resampling above but SR still mismatches, resample now.
     if not needs_resampling and actual_sr != target_sr:
@@ -347,7 +361,13 @@ def _detect_and_load_audio(fp: Path, target_sr: int, channel: int = -1) -> tuple
 
 
 def _save_outputs_pt_or_npz(
-    fmt: str, dst_dir: Path, stem: str, S: np.ndarray, chirp_intervals: np.ndarray, labels: np.ndarray, chirp_labels: np.ndarray
+    fmt: str,
+    dst_dir: Path,
+    stem: str,
+    S: np.ndarray,
+    chirp_intervals: np.ndarray,
+    labels: np.ndarray,
+    chirp_labels: np.ndarray,
 ) -> None:
     if fmt == "pt":
         import torch
@@ -365,6 +385,7 @@ def _save_outputs_pt_or_npz(
     else:
         out = dst_dir / (stem + ".npz")
         np.savez(out, s=S, chirp_intervals=chirp_intervals, labels=labels, chirp_labels=chirp_labels)
+
 
 def _process_core(
     fp: Path,
@@ -413,6 +434,7 @@ def _process_core(
                 e_l = float(np.sum(P0[:, cs:ce], dtype=np.float64))
                 e_r = float(np.sum(P1[:, cs:ce], dtype=np.float64))
                 chrip_labels[i] = 1 if e_r > e_l else 0
+                print(f"cs: {cs}, ce: {ce}, e_l: {e_l}, e_r: {e_r}, chrip_labels: {chrip_labels[i]}")
         else:
             chrip_labels = np.zeros((chirp_intervals.shape[0],), dtype=np.int32)
 
