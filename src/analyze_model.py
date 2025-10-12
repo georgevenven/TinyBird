@@ -69,9 +69,9 @@ def process_file(model, dataset, index, device):
 
         print(f"\nComputing losses for {losses.numel()} (rows × starts)...")
 
-        # Compute an accurate total for the progress ba
-        with tqdm(total=(n_valid_chirps - n_blocks) * n_blocks, desc="Computing losses") as pbar:
-            for last_block in range(n_blocks, n_valid_chirps):
+        # Compute an accurate total for the progress bar
+        with tqdm(total=(n_valid_chirps * n_valid_chirps) / 2, desc="Computing losses") as pbar:
+            for last_block in range(1, n_valid_chirps):
                 for start_block in range(0, last_block):
                     with torch.no_grad():
                         loss = compute_loss(x, x_i, N, start_block, last_block, n_blocks, isolate_block)
