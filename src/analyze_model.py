@@ -31,6 +31,12 @@ def parse_args():
 
 def process_file(model, dataset, index, device):
     x, x_i, x_l, N, filename = dataset[index]
+
+    # print out contents of x_l along with the shape
+    print(f"x_l shape: {x_l.shape}")
+    print(f"x_l contents: {x_l}")
+    assert False, "breaking..."
+
     x = x.unsqueeze(0).float().to(device)
     x_i = x_i.unsqueeze(0).to(device)
     N = torch.tensor([N], dtype=torch.long, device=device)
