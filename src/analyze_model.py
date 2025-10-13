@@ -79,8 +79,9 @@ def process_file(model, dataset, index, device):
                 # Gracefully handle CUDA OOM and similar transient errors so we can continue loops
                 msg = str(e).lower()
                 if ("out of memory" in msg or "cuda" in msg) and torch.cuda.is_available():
+                    last_block_duration = x_is[:,-1,1] - x_is[:,-1,0]
                     print(
-                        f"[WARN] OOM at (start={start_block}, last={last_block}, isolate={isolate_block}). Skipping with NaN."
+                        f"[WARN] OOM at (start={start_block}, last={last_block}, isolate={isolate_block}, xs.shape={xs.shape}, x_is.shape={x_is.shape}, last_block_duration={last_block_duration}, N.shape={N.shape}, ). Skipping with NaN."
                     )
                     try:
                         torch.cuda.empty_cache()
