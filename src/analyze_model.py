@@ -32,7 +32,135 @@ def parse_args():
         help="Index of the spectrogram file to analyze (>=0). If negative, process ALL files (default: -1)",
     )
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", choices=["cuda", "cpu"], help="Device to run inference on (default: cuda if available, else cpu)")  # fmt: skip
+    parser.add_argument("--start-block", type=int, default=None, help="Start block index for save_reconstruction mode")
+    parser.add_argument("--last-block", type=int, default=None, help="Last block index for save_reconstruction mode")
+    parser.add_argument("--isolate-block", action="store_true", help="Use isolate_block=True during save_reconstruction")
     return parser.parse_args()
+def prepare_sample(model, dataset, index, device):
+    x, x_i, x_l, N, filename = dataset[index]
+    x = x.unsqueeze(0).float().to(device)
+    x_i = x_i.unsqueeze(0).to(device)
+    N = torch.tensor([N], dtype=torch.long, device=device)
+    x, x_i = model.compactify_data(x.clone(), x_i.clone(), N.clone())
+    return x, x_i, N, filename
+
+
+def compute_loss(model, x, x_i, N, start_block, last_block, n_blocks, isolate_block):
+    """
+    Compute masked MSE loss for a given block configuration.
+    Returns: (loss, xs, x_is, bool_mask, pred, mblock, indices)
+    """
+    try:
+        half_mask = False
+        if isolate_block:
+            indices = [start_block, last_block]
+        else:
+            indices = list(range(start_block, min(start_block + n_blocks, last_block))) + [last_block]
+        xs, x_is = model.sample_data_indices(x.clone(), x_i.clone(), N.clone(), indices)
+        mblock = [len(indices) - 1]
+        h, idx_restore, bool_mask, bool_pad, T = model.forward_encoder(
+            xs, x_is, mblock=mblock, half_mask=half_mask
+        )
+        pred = model.forward_decoder(h, idx_restore, T, bool_pad=bool_pad, attend_to_padded=False)
+        loss = model.loss_mse(xs, pred, bool_mask)
+        return loss, xs, x_is, bool_mask, pred, mblock, indices
+    except RuntimeError as e:
+        msg = str(e).lower()
+        if ("out of memory" in msg or "cuda" in msg) and torch.cuda.is_available():
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+            return torch.tensor(float('nan'), device=x.device), None, None, None, None, None, None
+        else:
+            raise
+
+def save_reconstruction(model, x, x_i, N, start_block, last_block, n_blocks, isolate_block, *, filename, index, images_dir='images'):
+    """
+    Save a side-by-side reconstruction visualization for a given block configuration.
+    Returns: (output_path, loss)
+    """
+    import torch
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import ListedColormap
+    import os
+    loss, xs, x_is, bool_mask, pred, mblock, indices = compute_loss(
+        model, x, x_i, N, start_block, last_block, n_blocks, isolate_block
+    )
+    if xs is None or pred is None or bool_mask is None:
+        return None, loss
+    def _reconstruct(xs, pred, bool_mask, patch_size):
+        # xs: (B, 1, H, W)
+        # pred: (B, T, P), bool_mask: (B, T)
+        B, C, H, W = xs.shape
+        unfold = torch.nn.Unfold(kernel_size=patch_size, stride=patch_size)
+        fold = torch.nn.Fold(output_size=(H, W), kernel_size=patch_size, stride=patch_size)
+        xs_patches = unfold(xs).transpose(1, 2)  # (B, T, P)
+        # Replace masked patches with pred
+        xs_patches = xs_patches.clone()
+        bool_mask_exp = bool_mask.unsqueeze(-1).expand_as(xs_patches)
+        xs_patches[bool_mask_exp] = pred[bool_mask_exp]
+        xs_patches = xs_patches.transpose(1, 2)  # (B, P, T)
+        x_rec = fold(xs_patches)  # (B, 1, H, W)
+        return x_rec
+    def _column_mask_2d(bool_mask, H, W):
+        # bool_mask: (B, H*W) -> (B, H, W) -> (B, W) by .any(dim=1)
+        return bool_mask.view(-1, H, W).any(dim=1)
+    def _draw_separators(ax, x_is_b):
+        # x_is_b: (K, 2)
+        K = x_is_b.shape[0]
+        for k in range(K - 1):
+            pos = int(x_is_b[k, 1])
+            ax.axvline(pos - 0.5, linewidth=0.8, alpha=0.8, color='cyan')
+    # Assume batch size 1
+    xs_cpu = xs[0, 0].detach().cpu().numpy()
+    H, W = xs_cpu.shape
+    x_rec = _reconstruct(xs, pred, bool_mask, model.patch_size)
+    x_rec_cpu = x_rec[0, 0].detach().cpu().numpy()
+    vmin = min(np.nanmin(xs_cpu), np.nanmin(x_rec_cpu))
+    vmax = max(np.nanmax(xs_cpu), np.nanmax(x_rec_cpu))
+    fig, axs = plt.subplots(1, 2, figsize=(12, 5), sharey=True)
+    cmap = plt.get_cmap('magma')
+    im0 = axs[0].imshow(xs_cpu, cmap=cmap, vmin=vmin, vmax=vmax, origin='lower', aspect='auto', interpolation='nearest')
+    im1 = axs[1].imshow(x_rec_cpu, cmap=cmap, vmin=vmin, vmax=vmax, origin='lower', aspect='auto', interpolation='nearest')
+    axs[0].set_title('Input')
+    axs[1].set_title('Reconstruction')
+    # Overlay masked region on panel 0
+    col_mask = _column_mask_2d(bool_mask[0], H, W)[0].cpu().numpy()
+    # Find contiguous True spans in col_mask and draw axvspan
+    in_span = False
+    start = 0
+    for i in range(len(col_mask)):
+        if col_mask[i] and not in_span:
+            start = i
+            in_span = True
+        elif not col_mask[i] and in_span:
+            axs[0].axvspan(start - 0.5, i - 0.5, alpha=0.25, color='yellow')
+            in_span = False
+    if in_span:
+        axs[0].axvspan(start - 0.5, len(col_mask) - 0.5, alpha=0.25, color='yellow')
+    # Draw separators
+    _draw_separators(axs[0], x_is[0].detach().cpu().numpy())
+    _draw_separators(axs[1], x_is[0].detach().cpu().numpy())
+    # Detailed title
+    indices_str = str(indices)
+    mblock_str = mblock[0] if mblock is not None and len(mblock) > 0 else 'N/A'
+    loss_str = f"{loss.item():.6f}" if loss is not None and torch.isfinite(loss) else "NaN"
+    title = (
+        f"{filename}, idx={index}, start={start_block}, last={last_block}, n_blocks={n_blocks}, "
+        f"isolate_block={isolate_block}, indices={indices_str}, mblock={mblock_str}, loss={loss_str}"
+    )
+    fig.suptitle(title, fontsize=11)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    os.makedirs(images_dir, exist_ok=True)
+    out_path = os.path.join(
+        images_dir,
+        f"reconstruction_idx{index}_start{start_block}_last{last_block}_iso{int(isolate_block)}.png"
+    )
+    fig.savefig(out_path, dpi=200, bbox_inches='tight')
+    plt.close(fig)
+    return out_path, loss
 
 
 def process_file(model, dataset, index, device):
@@ -56,56 +184,18 @@ def process_file(model, dataset, index, device):
     print(f"  Number of valid chirps: {N.item()}")
 
     def compute_losses(x, x_i, N, isolate_block=False):
-        def compute_loss(x, x_i, N, start_block, last_block, n_blocks, isolate_block):
-            try:
-                half_mask = False
-
-                if isolate_block:
-                    indices = [start_block, last_block]
-                else:
-                    indices = list(range(start_block, min(start_block + n_blocks, last_block))) + [last_block]
-
-                xs, x_is = model.sample_data_indices(x.clone(), x_i.clone(), N.clone(), indices)
-
-                mblock = [len(indices) - 1]
-
-                h, idx_restore, bool_mask, bool_pad, T = model.forward_encoder(
-                    xs, x_is, mblock=mblock, half_mask=half_mask
-                )
-                pred = model.forward_decoder(h, idx_restore, T, bool_pad=bool_pad, attend_to_padded=False)
-                loss = model.loss_mse(xs, pred, bool_mask)
-                return loss
-            except RuntimeError as e:
-                # Gracefully handle CUDA OOM and similar transient errors so we can continue loops
-                msg = str(e).lower()
-                if ("out of memory" in msg or "cuda" in msg) and torch.cuda.is_available():
-                    last_block_duration = x_is[:, -1, 1] - x_is[:, -1, 0]
-                    print(
-                        f"[WARN] OOM at (start={start_block}, last={last_block}, isolate={isolate_block}, xs.shape={xs.shape}, x_is.shape={x_is.shape}, last_block_duration={last_block_duration}, N.shape={N.shape}, ). Skipping with NaN."
-                    )
-                    try:
-                        torch.cuda.empty_cache()
-                    except Exception:
-                        pass
-                    return torch.tensor(float('nan'), device=x.device)
-                else:
-                    raise
-
         n_blocks = 8
         n_valid_chirps = N.max().item()
-
         # Fill with NaNs so missing entries don't bias averages
         losses = torch.full((n_valid_chirps, n_valid_chirps), float('nan'), device=device)
         losses_by_blocks = torch.full((n_blocks + 1, n_valid_chirps), float('nan'), device=device)
-
         print(f"\nComputing losses for {losses.numel()} (rows × starts)...")
-
         # Compute an accurate total for the progress bar
         with tqdm(total=(n_valid_chirps * n_valid_chirps) / 2, desc="Computing losses") as pbar:
             for last_block in range(1, n_valid_chirps):
                 for start_block in range(0, last_block):
                     with torch.no_grad():
-                        loss = compute_loss(x, x_i, N, start_block, last_block, n_blocks, isolate_block)
+                        loss, *_ = compute_loss(model, x, x_i, N, start_block, last_block, n_blocks, isolate_block)
                     val = float('nan') if torch.isnan(loss) else loss.item()
                     losses[start_block, last_block] = val
                     if (last_block - start_block) <= n_blocks:
@@ -163,6 +253,35 @@ def main():
     images_dir = "images"
     os.makedirs(images_dir, exist_ok=True)
 
+    # === Reconstruction-only mode branch ===
+    reconstruction_mode = (args.start_block is not None) and (args.last_block is not None)
+    if reconstruction_mode:
+        print("\nReconstruction-only mode enabled.")
+        print(f"Params: start_block={args.start_block}, last_block={args.last_block}, isolate_block={args.isolate_block}")
+        def run_reconstruction(i: int):
+            print(f"\nLoading sample at index {i}")
+            x, x_i, N, filename = prepare_sample(model, dataset, i, device)
+            n_blocks = max(1, int(args.last_block - args.start_block))
+            out_path, loss = save_reconstruction(
+                model, x, x_i, N,
+                args.start_block, args.last_block, n_blocks, args.isolate_block,
+                filename=filename, index=i, images_dir=images_dir,
+            )
+            print(f"Saved reconstruction → {out_path}")
+        if args.index >= 0:
+            if args.index >= len(dataset):
+                raise ValueError(f"Index {args.index} out of range. Dataset has {len(dataset)} files.")
+            run_reconstruction(args.index)
+        else:
+            print(f"\nProcessing all {len(dataset)} files (reconstruction-only)...")
+            for i in range(len(dataset)):
+                run_reconstruction(i)
+        print("\n" + "=" * 60)
+        print("Reconstruction complete!")
+        print("=" * 60)
+        return
+
+    # === Default: loss/plotting mode ===
     def process_and_plot(i: int):
         print(f"\nLoading sample at index {i}")
         (isolated_losses, isolated_losses_by_blocks, all_losses, all_losses_by_blocks, filename, x_l) = process_file(
