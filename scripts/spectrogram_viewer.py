@@ -23,12 +23,6 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.widgets import Cursor
 
-try:
-    import torch
-    TORCH_AVAILABLE = True
-except ImportError:
-    TORCH_AVAILABLE = False
-
 
 class SpectrogramViewer:
     def __init__(self, spec_dir: str):
@@ -97,27 +91,13 @@ class SpectrogramViewer:
             }
     
     def _find_spectrogram_files(self) -> List[Path]:
-        """Find all .pt and .npz files in the directory"""
-        files = []
-        for ext in ['*.pt', '*.npz']:
-            files.extend(self.spec_dir.glob(ext))
-        return sorted(files)
+        """Find all .npy files in the directory"""
+        return sorted(self.spec_dir.glob("*.npy"))
     
     def _load_spectrogram(self, file_path: Path) -> Tuple[np.ndarray, np.ndarray]:
-        """Load spectrogram and labels from file"""
-        if file_path.suffix == '.pt':
-            if not TORCH_AVAILABLE:
-                raise ImportError("PyTorch is required to load .pt files")
-            data = torch.load(file_path, map_location='cpu')
-            spec = data['s'].numpy()
-            labels = data['labels'].numpy()
-        elif file_path.suffix == '.npz':
-            data = np.load(file_path)
-            spec = data['s']
-            labels = data['labels']
-        else:
-            raise ValueError(f"Unsupported file format: {file_path.suffix}")
-        
+        """Load spectrogram from .npy file"""
+        spec = np.load(file_path).astype(np.float32)
+        labels = np.zeros(spec.shape[1], dtype=np.int32)
         return spec, labels
     
     def _get_time_axis(self, n_frames: int) -> np.ndarray:

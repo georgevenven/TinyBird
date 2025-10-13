@@ -1,5 +1,5 @@
 # ──────────────────────────────────────────────────────────────────────────────
-# audio2spec.py  ‑  simple .wav /.mp3/.ogg ➜ spectrogram (.npz / .pt) converter
+# audio2spec.py  ‑  simple .wav /.mp3/.ogg ➜ spectrogram (.npy) converter
 # ──────────────────────────────────────────────────────────────────────────────
 import os, json, time, gc, argparse, logging, random, psutil, signal, sys, shutil
 import multiprocessing as mp
@@ -12,13 +12,12 @@ from tqdm import tqdm
 
 
 class AudioEvent:
-    __slots__ = ("path", "start", "end", "label", "name", "waveform", "sample_rate")
+    __slots__ = ("path", "start", "end", "name", "waveform", "sample_rate")
 
-    def __init__(self, path, start, end, label, name):
+    def __init__(self, path, start, end, name):
         self.path = Path(path)
         self.start = float(start)
         self.end = float(end)
-        self.label = int(label)
         self.name = str(name)
         self.waveform = None  # Will be set for BirdSet events
         self.sample_rate = None  # Will be set for BirdSet events
@@ -54,7 +53,7 @@ def compute_spectrogram(wav, sr, n_fft, hop, *, mel, n_mels):
 # ══════════════════════════════════════════════════════════════════════════════
 # standalone worker function (picklable)
 # ══════════════════════════════════════════════════════════════════════════════
-def process_audio_file(obj, dst_dir, sr, n_fft, step, use_mel, n_mels, min_len_ms, min_timebins, fmt, skipped_counter):
+def process_audio_file(obj, dst_dir, sr, n_fft, step, use_mel, n_mels, min_len_ms, min_timebins, skipped_counter):
     """
     Standalone worker function that processes a single audio file.
     Returns None on success, error message on failure.
@@ -65,10 +64,7 @@ def process_audio_file(obj, dst_dir, sr, n_fft, step, use_mel, n_mels, min_len_m
 
         stem = event.name if event else fp.stem
         # ─── check if output already exists ─────────────────────────
-        if fmt == "pt":
-            out_path = dst_dir / (stem + ".pt")
-        else:
-            out_path = dst_dir / (stem + ".npz")
+        out_path = dst_dir / (stem + ".npy")
         
         if out_path.exists():
             return None  # Skip already processed files
@@ -133,24 +129,11 @@ def process_audio_file(obj, dst_dir, sr, n_fft, step, use_mel, n_mels, min_len_m
             skipped_counter.value += 1
             return None
 
-        if event:
-            labels = np.full(S.shape[1], event.label, dtype=np.int32)
-        else:
-            labels = np.zeros(S.shape[1], dtype=np.int32)
-
         # ─── optimized output with minimal conversions ───────────────
-        if fmt == "pt":
-            import torch
-            out = dst_dir / (stem + ".pt")
-            # S uses default dtype, avoid unnecessary conversion
-            torch.save({"s": torch.from_numpy(S), "labels": torch.from_numpy(labels)}, out)
-        else:  # npz (uncompressed)
-            out = dst_dir / (stem + ".npz")
-            # S uses default dtype from compute_spectrogram
-            np.savez(out, s=S, labels=labels)
+        np.save(out_path, S.astype(np.float32))
 
         # free memory fast in workers
-        del wav, S, labels
+        del wav, S
         gc.collect()
         return None
         
@@ -189,14 +172,9 @@ def calculate_optimal_workers(total_files, avg_file_size_mb=50):
 # main worker class
 # ══════════════════════════════════════════════════════════════════════════════
 class WavToSpec:
-    """
-    Convert a directory (or explicit list) of audio files to .npz spectrograms.
-    Keys inside the .npz **match what BirdSpectrogramDataset expects**:
-        s       -> (F,T)   log spectrogram
-        labels  -> int32   (T,)    all zeros (placeholder)
-    """
+    """Convert audio files into spectrogram .npy dumps."""
 
-    def __init__(self, src_dir, dst_dir, *, file_list=None, birdset=None, birdset_split="train", step_size=160, n_fft=1024, sr=32_000, take_n_random=None, single_threaded=True, min_len_ms=25, min_timebins=25, fmt="pt", mel=True, n_mels=128, max_workers=None):
+    def __init__(self, src_dir, dst_dir, *, file_list=None, birdset=None, birdset_split="train", step_size=160, n_fft=1024, sr=32_000, take_n_random=None, single_threaded=True, min_len_ms=25, min_timebins=25, mel=True, n_mels=128, max_workers=None):
         self.src_dir = Path(src_dir) if src_dir is not None else None
         self.dst_dir = Path(dst_dir)
         self.dst_dir.mkdir(parents=True, exist_ok=True)
@@ -211,7 +189,6 @@ class WavToSpec:
         self.single = single_threaded
         self.min_len_ms = min_len_ms
         self.min_timebins = min_timebins
-        self.fmt = fmt
         self.use_mel = mel
         self.n_mels = n_mels
         self.max_workers = max_workers
@@ -357,8 +334,7 @@ class WavToSpec:
             # Process full sample (no event snipping)
             duration = len(waveform) / actual_sr
             
-            audio_event = AudioEvent(path=fp, start=0.0, end=duration, 
-                                   label=label_idx, name=name)
+            audio_event = AudioEvent(path=fp, start=0.0, end=duration, name=name)
             audio_event.waveform = waveform
             audio_event.sample_rate = actual_sr
             
@@ -419,7 +395,7 @@ class WavToSpec:
                 worker_args = (
                     self.dst_dir, self.sr, self.n_fft, self.step,
                     self.use_mel, self.n_mels, self.min_len_ms,
-                    self.min_timebins, self.fmt, skipped_counter
+                    self.min_timebins, skipped_counter
                 )
                 
                 failed_files = []
@@ -501,10 +477,7 @@ class WavToSpec:
             fp = event.path if event else obj
             stem = event.name if event else fp.stem
             # ─── check if output already exists ─────────────────────────
-            if self.fmt == "pt":
-                out_path = self.dst_dir / (stem + ".pt")
-            else:
-                out_path = self.dst_dir / (stem + ".npz")
+            out_path = self.dst_dir / (stem + ".npy")
             
             if out_path.exists():
                 return None  # Skip already processed files
@@ -564,24 +537,11 @@ class WavToSpec:
             if S.shape[1] < self.min_timebins:
                 return None  # Skip, but not an error
 
-            if event:
-                labels = np.full(S.shape[1], event.label, dtype=np.int32)
-            else:
-                labels = np.zeros(S.shape[1], dtype=np.int32)
-
             # ─── optimized output with minimal conversions ───────────────
-            if self.fmt == "pt":
-                import torch
-                out = self.dst_dir / (stem + ".pt")
-                # S uses default dtype, avoid unnecessary conversion
-                torch.save({"s": torch.from_numpy(S), "labels": torch.from_numpy(labels)}, out)
-            else:  # npz (uncompressed)
-                out = self.dst_dir / (stem + ".npz")
-                # S uses default dtype from compute_spectrogram
-                np.savez(out, s=S, labels=labels)
+            np.save(out_path, S.astype(np.float32))
 
             # free memory fast
-            del wav, S, labels
+            del wav, S
             gc.collect()
             return None
             
@@ -594,7 +554,7 @@ class WavToSpec:
 # ══════════════════════════════════════════════════════════════════════════════
 def cli():
     p = argparse.ArgumentParser(
-        description="Convert audio → log‑spectrogram .npz (no JSON, no filtering).")
+        description="Convert audio → log‑spectrogram files (.npy).")
     grp = p.add_mutually_exclusive_group(required=True)
     grp.add_argument("--src_dir",   type=str,
                      help="Root folder with wav/mp3/ogg files (searched recursively).")
@@ -604,8 +564,6 @@ def cli():
                      help="BirdSet configuration name (e.g. HSN or HSN_xc) to load via Hugging Face.")
     p.add_argument("--dst_dir",  type=str, required=True,
                    help="Where outputs go.")
-    p.add_argument("--format", choices=["pt","npz"], default="pt",
-                   help="output format (default: pt, fp32)")
     p.add_argument("--birdset_split", type=str, default="train",
                    help="Dataset split to use with --birdset (default: train) for XCL that is the only one")
     p.add_argument("--sr", type=int, default=32_000,
@@ -633,7 +591,7 @@ def cli():
 
     single = args.single_threaded.lower() in {"true", "1", "yes"}
 
-    converter = WavToSpec(src_dir=args.src_dir, dst_dir=args.dst_dir, file_list=args.file_list, birdset=args.birdset, birdset_split=args.birdset_split, step_size=args.step_size, n_fft=args.nfft, sr=args.sr, take_n_random=args.take_n_random, single_threaded=single, fmt=args.format, mel=not args.linear, n_mels=args.n_mels, max_workers=args.max_workers)
+    converter = WavToSpec(src_dir=args.src_dir, dst_dir=args.dst_dir, file_list=args.file_list, birdset=args.birdset, birdset_split=args.birdset_split, step_size=args.step_size, n_fft=args.nfft, sr=args.sr, take_n_random=args.take_n_random, single_threaded=single, mel=not args.linear, n_mels=args.n_mels, max_workers=args.max_workers)
     converter.run()
 
 

@@ -40,9 +40,6 @@ MY_SCRATCH="/scratch/${PIRG}/${USER}"
 SPEC_DIR="${MY_SCRATCH}/specs"
 mkdir -p "${SPEC_DIR}" logs
 
-# Calculate spec stats
-python -u src/compute_statistics_of_spectrograms.py "$SPEC_DIR"
-
 RUN_NAME=tinybird_pretrain_$(date +%Y%m%d_%H%M%S)
 
 python -u src/pretrain.py \

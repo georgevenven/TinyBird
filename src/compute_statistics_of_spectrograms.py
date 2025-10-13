@@ -3,7 +3,7 @@ import json
 import math
 import random
 from pathlib import Path
-import torch
+import numpy as np
 from tqdm import tqdm
 
 
@@ -12,10 +12,13 @@ def compute_statistics(spec_dir, sample_fraction=0.1, seed=0):
     rng = random.Random(seed)
     
     # Stream through files without loading all paths into memory
-    files = []
-    for path in spec_dir.glob("*.pt"):
-        if rng.random() < sample_fraction:
-            files.append(path)
+    all_files = list(spec_dir.glob("*.npy"))
+    if not all_files:
+        raise ValueError(f"No .npy files found in {spec_dir}")
+    
+    files = [path for path in all_files if rng.random() < sample_fraction]
+    if not files:
+        files = all_files
     
     print(f"Processing {len(files)} files...")
     
@@ -26,18 +29,12 @@ def compute_statistics(spec_dir, sample_fraction=0.1, seed=0):
     
     for path in tqdm(files, desc="Computing statistics"):
         # Load tensor
-        data = torch.load(path, map_location="cpu")
-        if isinstance(data, dict):
-            tensor = data["s"]
-        else:
-            tensor = data
-        
-        tensor = tensor.float()
+        tensor = np.load(path).astype(np.float32, copy=False)
         
         # Update statistics
         total_sum += tensor.sum().item()
-        total_sq_sum += tensor.square().sum().item()
-        total_values += tensor.numel()
+        total_sq_sum += np.square(tensor, out=None).sum().item()
+        total_values += tensor.size
     
     # Calculate mean and std
     mean = total_sum / total_values
