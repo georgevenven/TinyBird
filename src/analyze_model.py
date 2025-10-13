@@ -104,9 +104,17 @@ def save_reconstruction(model, x, x_i, N, start_block, last_block, n_blocks, iso
         xs_patches = xs_patches.transpose(1, 2)  # (B, P, T)
         x_rec = fold(xs_patches)  # (B, 1, H, W)
         return x_rec
-    def _column_mask_2d(bool_mask, H, W):
-        # bool_mask: (B, H*W) -> (B, H, W) -> (B, W) by .any(dim=1)
-        return bool_mask.view(-1, H, W).any(dim=1)
+    def _column_mask_2d(bool_mask, H, W, patch_size):
+        """
+        Convert a token-level mask (B, T) into a per-column mask (B, W) in pixel space.
+        T = H' * W', where H' = H // patch_height, W' = W // patch_width.
+        We reduce across token rows (H') to find columns masked anywhere in that column.
+        """
+        ph, pw = patch_size
+        Htok = max(1, H // ph)
+        Wtok = max(1, W // pw)
+        # bool_mask is (B, T) where T == Htok * Wtok; reshape accordingly
+        return bool_mask.view(-1, Htok, Wtok).any(dim=1)
     def _draw_separators(ax, x_is_b):
         # x_is_b: (K, 2)
         K = x_is_b.shape[0]
@@ -127,7 +135,7 @@ def save_reconstruction(model, x, x_i, N, start_block, last_block, n_blocks, iso
     axs[0].set_title('Input')
     axs[1].set_title('Reconstruction')
     # Overlay masked region on panel 0
-    col_mask = _column_mask_2d(bool_mask[0], H, W)[0].cpu().numpy()
+    col_mask = _column_mask_2d(bool_mask, H, W, model.patch_size)[0].cpu().numpy()
     # Find contiguous True spans in col_mask and draw axvspan
     in_span = False
     start = 0
