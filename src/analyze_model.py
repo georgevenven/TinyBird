@@ -58,6 +58,8 @@ def process_file(model, dataset, index, device):
     def compute_losses(x, x_i, N, isolate_block=False):
         def compute_loss(x, x_i, N, start_block, last_block, n_blocks, isolate_block):
             try:
+                half_mask = False
+
                 if isolate_block:
                     indices = [start_block, last_block]
                 else:
@@ -65,21 +67,23 @@ def process_file(model, dataset, index, device):
 
                 xs, x_is = model.sample_data_indices(x.clone(), x_i.clone(), N.clone(), indices)
 
+                last_block_duration = x_is[:, -1, 1] - x_is[:, -1, 0]
+                if last_block_duration > 900:
+                    half_mask = True
+
                 mblock = [len(indices) - 1]
 
                 h, idx_restore, bool_mask, bool_pad, T = model.forward_encoder(
-                    xs, x_is, mblock=mblock, half_mask=False
+                    xs, x_is, mblock=mblock, half_mask=half_mask
                 )
-                pred = model.forward_decoder(
-                    h, idx_restore, T, bool_pad=bool_pad, attend_to_padded=False
-                )
+                pred = model.forward_decoder(h, idx_restore, T, bool_pad=bool_pad, attend_to_padded=False)
                 loss = model.loss_mse(xs, pred, bool_mask)
                 return loss
             except RuntimeError as e:
                 # Gracefully handle CUDA OOM and similar transient errors so we can continue loops
                 msg = str(e).lower()
                 if ("out of memory" in msg or "cuda" in msg) and torch.cuda.is_available():
-                    last_block_duration = x_is[:,-1,1] - x_is[:,-1,0]
+                    last_block_duration = x_is[:, -1, 1] - x_is[:, -1, 0]
                     print(
                         f"[WARN] OOM at (start={start_block}, last={last_block}, isolate={isolate_block}, xs.shape={xs.shape}, x_is.shape={x_is.shape}, last_block_duration={last_block_duration}, N.shape={N.shape}, ). Skipping with NaN."
                     )
