@@ -132,7 +132,7 @@ def save_reconstruction_plot(
 
     # Disable per-patch denormalization so we visualise raw decoder outputs.
     # pred_denorm = _denormalize_predictions(x_patches, pred)
-    pred_denorm = pred
+    pred_denorm = pred.to(dtype=x_patches.dtype)
     overlay_patches = _create_overlay(x_patches, pred_denorm, bool_mask)
 
     overlay_img = _depatchify(overlay_patches, mels=config["mels"], timebins=config["num_timebins"], patch_size=patch_size)

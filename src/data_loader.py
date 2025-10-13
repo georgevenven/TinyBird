@@ -53,6 +53,7 @@ class SpectogramDataset(Dataset):
 
         # Apply z-score normalization
         spec = (spec - self.mean) / self.std
+        spec = spec.float()
 
         if self.pad_crop:
             spec = self.crop_or_pad(spec)
