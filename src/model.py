@@ -215,8 +215,9 @@ class TinyBird(nn.Module):
         B, C, H, W = x.shape
         device = x.device
         N = N.view(B, 1)
+        W = int(W)
 
-        # Normalize indices to a Python list of ints (preserve caller order)
+        # Normalize to a Python list of ints and **preserve the exact input order**
         if isinstance(indices, torch.Tensor):
             indices = indices.detach().cpu().tolist()
         else:
@@ -224,7 +225,7 @@ class TinyBird(nn.Module):
         indices = [int(i) for i in indices]
         assert len(indices) > 0, "indices must contain at least one element"
 
-        # Ensure feasibility across the batch: only keep indices valid for all items
+        # Keep only indices valid for *all* items in the batch, preserving caller order
         n_min = int(N.min().item())
         valid = [i for i in indices if 0 <= i < n_min]
         assert len(valid) > 0, f"no valid indices within min(N)={n_min}; got {indices}"
@@ -261,8 +262,9 @@ class TinyBird(nn.Module):
                     xi_out[b, k, 1] = pos
                 # Insert separator if not the last selected block and room remains
                 if k < K - 1 and pos < max_width:
-                    # Use the actual separator column from the source window at e0 (1+end of block)
-                    x_out[b, :, :, pos] = x[b, :, :, e0]
+                    # Use a separator column; e0 is end-exclusive so clamp to W-1
+                    e0_clamped = min(e0, W - 1)
+                    x_out[b, :, :, pos] = x[b, :, :, e0_clamped]
                     pos += 1
 
         return x_out, xi_out
