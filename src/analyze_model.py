@@ -245,7 +245,7 @@ def process_file(model, dataset, index, device):
     print(f"  Number of valid chirps: {N.item()}")
 
     def compute_losses(x, x_i, N, isolate_block=False):
-        n_blocks = 8
+        n_blocks = 10
         n_valid_chirps = N.max().item()
         # Fill with NaNs so missing entries don't bias averages
         losses = torch.full((n_valid_chirps, n_valid_chirps), float('nan'), device=device)
