@@ -85,12 +85,6 @@ def save_reconstruction(
     Save a side-by-side reconstruction visualization for a given block configuration.
     Returns: (output_path, loss)
     """
-    import torch
-    import numpy as np
-    import matplotlib.pyplot as plt
-    from matplotlib.colors import ListedColormap
-    import os
-
     loss, xs, x_is, bool_mask, pred, mblock, indices = compute_loss(
         model, x, x_i, N, start_block, last_block, n_blocks, isolate_block
     )
@@ -98,18 +92,33 @@ def save_reconstruction(
         return None, loss
 
     def _reconstruct(xs, pred, bool_mask, patch_size):
-        # xs: (B, 1, H, W)
-        # pred: (B, T, P), bool_mask: (B, T)
+        """
+        xs:   (B, 1, H, W) input spectrogram window
+        pred: (B, T, P) decoder output in the same normalized space as loss
+        bool_mask: (B, T) which tokens were masked
+        Returns: (B, 1, H, W) image where masked patches are replaced with **denormalized** predictions.
+        """
         B, C, H, W = xs.shape
         unfold = torch.nn.Unfold(kernel_size=patch_size, stride=patch_size)
         fold = torch.nn.Fold(output_size=(H, W), kernel_size=patch_size, stride=patch_size)
-        xs_patches = unfold(xs).transpose(1, 2)  # (B, T, P)
-        # Replace masked patches with pred
-        xs_patches = xs_patches.clone()
-        bool_mask_exp = bool_mask.unsqueeze(-1).expand_as(xs_patches)
-        xs_patches[bool_mask_exp] = pred[bool_mask_exp]
-        xs_patches = xs_patches.transpose(1, 2)  # (B, P, T)
-        x_rec = fold(xs_patches)  # (B, 1, H, W)
+
+        # Convert input into patches to compute per-token moments for denormalization
+        x_patches = unfold(xs).transpose(1, 2)  # (B, T, P)
+
+        # Per-token mean/std of target patches (match pretrain.py logic)
+        target_mean = x_patches.mean(dim=-1, keepdim=True)
+        target_std = x_patches.std(dim=-1, keepdim=True)
+
+        # Denormalize predictions: pred_denorm = pred * std + mean
+        pred_denorm = pred * (target_std + 1e-6) + target_mean
+
+        # Replace only masked tokens with denormalized predictions
+        out_patches = x_patches.clone()
+        out_patches[bool_mask] = pred_denorm[bool_mask]
+
+        # Fold back to image
+        out_patches = out_patches.transpose(1, 2)  # (B, P, T)
+        x_rec = fold(out_patches)  # (B, 1, H, W)
         return x_rec
 
     def _column_mask_2d(bool_mask, H, W, patch_size):
