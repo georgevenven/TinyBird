@@ -68,7 +68,7 @@ def process_file(model, dataset, index, device):
                 xs, x_is = model.sample_data_indices(x.clone(), x_i.clone(), N.clone(), indices)
 
                 last_block_duration = x_is[:, -1, 1] - x_is[:, -1, 0]
-                if last_block_duration > 900:
+                if xs.shape[-1] > 3500 or last_block_duration > 900:
                     half_mask = True
 
                 mblock = [len(indices) - 1]
