@@ -68,7 +68,7 @@ def compute_loss(model, x, x_i, N, start_block, last_block, n_blocks, isolate_bl
 
         xs, x_is = model.sample_data_indices(x.clone(), x_i.clone(), N.clone(), indices)
         mblock = [len(indices) - 1]
-        h, idx_restore, bool_mask, bool_pad, T = model.forward_encoder(xs, x_is, mblock=mblock, half_mask=half_mask)
+        h, idx_restore, bool_mask, bool_pad, T = model.forward_encoder(xs, x_is, mblock=mblock)
         pred = model.forward_decoder(h, idx_restore, T, bool_pad=bool_pad, attend_to_padded=False)
         loss = model.loss_mse(xs, pred, bool_mask)
         return loss, xs, x_is, bool_mask, pred, mblock, indices
