@@ -122,24 +122,23 @@ class Team:
                     pbar.update(1)
 
     def keep_winners(self, iteration=0):
+        self.winners = set(a.index for a in self.approaches if a.keep)
+        original_length = len(self.winners)
+
         self.eval_all(iteration=iteration)
         self.new_winners = set(torch.argmin(self.losses, dim=0).tolist())
         self.losers = self.winners - self.new_winners
-        print(f"[Team] Winners this round: {sorted(list(self.new_winners))[:5]}… (total {len(self.new_winners)})")
-        print(f"[Team] Approaches to drop: {sorted(list(self.losers))}")
-        for loser in self.losers:
-            if 0 <= loser < len(self.approaches):
-                self.approaches[loser].keep = False
-        self.condense_approaches()
-        self.winners = set(a.index for a in self.approaches if a.keep)
 
-    def condense_approaches(self):
+        print(f"[Team] Winners this round: {sorted(list(self.new_winners))} (total {len(self.new_winners)})")
+        print(f"[Team] Approaches to drop: {sorted(list(self.losers))} (total {len(self.losers)})")
+        for loser in self.losers:
+            loser.keep = False
+
         keep_mask = torch.tensor([a.keep for a in self.approaches], device=self.losses.device)
         self.losses = self.losses[keep_mask, :]
         self.approaches = [a for a in self.approaches if a.keep]
-        for i, a in enumerate(self.approaches):
-            a.index = i
-        print(f"[Team] Condensed to {len(self.approaches)} approaches after pruning losers.")
+
+        print(f"[Team] Condensed to {len(self.approaches)} approaches from {original_length} after pruning losers.")
 
     def add_new_approaches(self, iteration=0):
         new_approaches = []
