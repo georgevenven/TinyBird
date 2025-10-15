@@ -5,6 +5,7 @@ import random
 import numpy as np
 from typing import List, Sequence
 
+from sympy.core.numbers import I
 import torch
 from tqdm import tqdm
 import os
@@ -62,7 +63,7 @@ class Team:
     def build_approaches(self, local_blocks=0):
         context = max(0, self.n_blocks - int(local_blocks))
         approaches = []
-        for t in range(20):  # range(self.N):
+        for t in range(10):  # range(self.N):
             # Keep a fixed prefix [t, t+1, ..., t+context-1] (clamped to N-1)
             right = min(t + context, self.N - 1)
             indices = list(range(t, right))
@@ -102,8 +103,8 @@ class Team:
         val = self.eval_loss(indices)
         return val
 
-    def eval_approach_all(self, approach):
-        if approach.keep:
+    def eval_approach_all(self, approach, iteration=0):
+        if approach.keep and approach.iteration == iteration:
             for t in self.N_targets:
                 v = self.eval_approach(approach, t)
                 self.losses[approach.index, t] = v
@@ -112,16 +113,16 @@ class Team:
             self.losses[approach.index, :] = np.float32(float('inf')).item()
             return False
 
-    def eval_all(self):
-        valid_approaches = sum(1 for approach in self.approaches if approach.keep)
+    def eval_all(self, iteration=i):
+        valid_approaches = sum(1 for approach in self.approaches if approach.keep and approach.iteration == iteration)
         print(f"[Team] Evaluating {valid_approaches} kept approaches over {len(self.N_targets)} targets each…")
         with tqdm(total=valid_approaches, desc="Computing losses") as pbar:
             for approach in self.approaches:
-                if self.eval_approach_all(approach):
+                if self.eval_approach_all(approach, iteration=iteration):
                     pbar.update(1)
 
-    def keep_winners(self):
-        self.eval_all()
+    def keep_winners(self, iteration=0):
+        self.eval_all(iteration=iteration)
         self.new_winners = set(torch.argmin(self.losses, dim=0).tolist())
         self.losers = self.winners - self.new_winners
         print(f"[Team] Winners this round: {sorted(list(self.new_winners))[:5]}… (total {len(self.new_winners)})")
@@ -174,7 +175,7 @@ class Team:
             print("\n" + "=" * 60)
             print(f"[Team] Optimize round {i+1}/{rounds}")
             print("=" * 60)
-            self.keep_winners()
+            self.keep_winners(iteration=i)
             self.plot_state(images_dir, suffix=f"round{i+1}")
             self.summarize(tag=f"after round {i+1}")
             self.add_new_approaches(iteration=i)
