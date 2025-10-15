@@ -6,7 +6,10 @@ import numpy as np
 from utils import load_audio_params
 
 class SpectogramDataset(Dataset):
-    def __init__(self, dir, n_timebins=1024):
+    def __init__(self, dir, n_timebins=1024): 
+        """
+        n_timebins = None means no cropping
+        """
         self.file_dirs = list(Path(dir).glob("*.npy"))
 
         # Load audio parameters using utility function
@@ -19,50 +22,51 @@ class SpectogramDataset(Dataset):
         self.mean = self.audio_data_json["mean"]
         self.std = self.audio_data_json["std"]
         self.n_timebins = n_timebins
-        self._mmaps = {}
-        self._mean32 = np.float32(self.mean)
-        self._std32 = np.float32(self.std)
+        self.mean = np.float32(self.mean)
+        self.std = np.float32(self.std)
 
         if len(self.file_dirs) == 0:
             raise SystemExit("no files!!")
-
-    def _open(self, path: Path):
-        key = str(path)
-        mm = self._mmaps.get(key)
-        if mm is None:
-            mm = np.load(path, mmap_mode="r")
-            self._mmaps[key] = mm
-        return mm
             
     def __getitem__(self, index):
-        path = self.file_dirs[index]   # pick actual .npy path
+        path = self.file_dirs[index]  
 
-        try:
-            arr = self._open(path)
-        except Exception:
-            index = random.randint(0, len(self.file_dirs)-1)
-            path = self.file_dirs[index]
-            arr = self._open(path)
+        # if file not possible to open pick a random file from the list and try again, this actually shoudl recursively recall getitem 
         filename = path.stem
-
+        arr = np.load(path, mmap_mode="r")
         time = arr.shape[1]
-        if time > self.n_timebins:
-            start = random.randint(0, time - self.n_timebins)
-            end = start + self.n_timebins
-            view = arr[:, start:end]
-        else:
-            view = arr[:, :self.n_timebins]
 
-        out = np.empty((self.n_mels, self.n_timebins), dtype=np.float32)
-        out.fill(0.0)
-        out[:, :view.shape[1]] = view
-        assert out.shape[0] == self.n_mels and out.shape[1] == self.n_timebins
+        # we want to load the whole file if n_timebins is None
+        if self.n_timebins is None:
+            start = 0
+            end = time
+
+        # loading a chunk 
+        else:
+            # crop 
+            if time > self.n_timebins:
+                start = random.randint(0, time - self.n_timebins)
+                end = start + self.n_timebins
+                arr = arr[:,start:end]
+
+            # do nothing 
+            if time == self.n_timebins:
+                pass 
+
+            # pad 
+            if time < self.n_timebins:
+                start = 0
+                end = self.n_timebins
+                pad_amount = self.n_timebins - arr.shape[1]
+                arr = np.pad(arr, ((0, 0), (0, pad_amount)), mode='constant')
+
+        arr = np.array(arr, dtype=np.float32)
 
         # Apply z-score normalization in-place
-        out -= self._mean32
-        out /= self._std32
+        arr -= self.mean
+        arr /= self.std
 
-        spec = torch.from_numpy(out).unsqueeze(0)  # since we are dealing with image data, conv requires channels 
+        spec = torch.from_numpy(arr).unsqueeze(0)  # since we are dealing with image data, conv requires channels 
 
         return spec, filename 
 

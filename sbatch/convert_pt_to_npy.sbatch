@@ -33,9 +33,13 @@ if [ "$workers" -lt 1 ]; then workers=1; fi
 
 cd "$HOME/TinyBird"
 
-# change to src/convert_pt_to_npy.py if you want to use the original script
-python -u scripts/convert_pt_to_npy.py \
---src_dir "$SPEC_DIR" \
---overwrite true
+# Create destination directory for converted NPY files in scratch
+dst="$MY_SCRATCH/specs_XCM"
+mkdir -p "$dst"
 
-echo "Done. NPys under: $SPEC_DIR"
+# Convert PT files to NPY format
+python -u scripts/convert_pt_to_npy.py \
+  --src_dir "$SPEC_DIR" \
+  --dst_dir "$dst"
+
+echo "Done. NPYs under: $dst"

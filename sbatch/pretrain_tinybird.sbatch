@@ -22,21 +22,7 @@ export MKL_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 
 cd "$SLURM_SUBMIT_DIR"
 
-echo "Node: $(hostname)"
-nvidia-smi || true
-
-# Quick sanity check before training
-python - <<'PY'
-import torch
-print("torch:", torch.__version__)
-print("CUDA available:", torch.cuda.is_available())
-if torch.cuda.is_available():
-    print("GPU count:", torch.cuda.device_count())
-    print("GPU 0:", torch.cuda.get_device_name(0))
-PY
-
-PIRG=$(id -nG | tr ' ' '\n' | sed -n 's/^is\.racs\.pirg\.//p' | head -n1)
-MY_SCRATCH="/scratch/${PIRG}/${USER}"
+MY_SCRATCH=/scratch/gardnerlab/georgev
 SPEC_DIR="${MY_SCRATCH}/specs"
 mkdir -p "${SPEC_DIR}" logs
 
