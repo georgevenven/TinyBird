@@ -160,7 +160,7 @@ class Team:
             print("[Team] summarize: no losses yet.")
             return
         with torch.no_grad():
-            argmins = torch.nanargmin(self.losses, dim=0)  # per-target best approach
+            argmins = torch.argmin(self.losses, dim=0)  # per-target best approach
             counts = torch.bincount(argmins, minlength=self.losses.shape[0])
             topk = torch.topk(counts, k=min(10, counts.numel()))
             print(f"[Team] Summary {tag}: top approaches by wins (approach_index: wins)")
@@ -169,7 +169,7 @@ class Team:
 
     def optimize(self, images_dir="images_seed_eval"):
         os.makedirs(images_dir, exist_ok=True)
-        rounds = max(1, self.n_blocks - 1)
+        rounds = max(0, self.n_blocks - 1)
         for i in range(rounds):
             print("\n" + "=" * 60)
             print(f"[Team] Optimize round {i+1}/{rounds}")
@@ -205,21 +205,10 @@ class Team:
         plt.close(fig)
         print(f"[Plot] Saved {out1}")
 
-        # Winners-by-target stripe and histogram
         with np.errstate(invalid='ignore'):
             arr_copy = arr.copy()
             arr_copy[~np.isfinite(arr_copy)] = np.inf
             winners = np.argmin(arr_copy, axis=0)
-        # Stripe
-        fig2, ax2 = plt.subplots(figsize=(12, 1.8))
-        ax2.imshow(winners[np.newaxis, :], aspect='auto', origin='lower', cmap=plt.get_cmap('tab20'))
-        ax2.set_yticks([])
-        ax2.set_xlabel('Target t (winning approach index)')
-        out2 = os.path.join(images_dir, f"winners_stripe_{suffix}.png")
-        fig2.tight_layout()
-        fig2.savefig(out2, dpi=200, bbox_inches='tight')
-        plt.close(fig2)
-        print(f"[Plot] Saved {out2}")
 
         # Histogram
         unique, counts = np.unique(winners, return_counts=True)
