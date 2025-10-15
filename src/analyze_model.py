@@ -322,7 +322,7 @@ def main():
         def run_reconstruction(i: int):
             print(f"\nLoading sample at index {i}")
             x, x_i, N, filename = prepare_sample(model, dataset, i, device)
-            n_blocks = min(8, int(args.last_block - args.start_block))
+            n_blocks = min(10, int(args.last_block - args.start_block))
             out_path, loss = save_reconstruction(
                 model,
                 x,
