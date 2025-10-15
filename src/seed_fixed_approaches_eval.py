@@ -52,6 +52,7 @@ class Team:
         self.N = int(N)
         self.n_blocks = int(n_blocks)
         self.device = device
+
         # Targets are chirps 1..N-1 (since 0 can't be predicted from prior)
         self.N_targets = list(range(1, self.N))
         self.approaches = self.build_approaches(local_blocks=0)
@@ -63,7 +64,7 @@ class Team:
     def build_approaches(self, local_blocks=0):
         context = max(0, self.n_blocks - int(local_blocks))
         approaches = []
-        for t in range(10):  # range(self.N):
+        for t in range(self.N):  # range(self.N):
             # Keep a fixed prefix [t, t+1, ..., t+context-1] (clamped to N-1)
             right = min(t + context, self.N - 1)
             indices = list(range(t, right))
