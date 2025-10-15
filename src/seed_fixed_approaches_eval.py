@@ -108,7 +108,7 @@ class Team:
                 self.losses[approach.index, t] = self.eval_approach(approach, t)
             return True
         elif approach.keep :
-            return True:
+            return True
         else:
             self.losses[approach.index, :] = np.float32(float('inf')).item()
             return False
