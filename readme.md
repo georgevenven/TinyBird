@@ -24,6 +24,7 @@
 ```
 
 - Times are milliseconds; `plot_embedding_bf.py` converts them to 2 ms timebins.
+- all values are relative to the absolute start and end of files 
 
 
 

@@ -5,13 +5,12 @@ that contain syllable annotations (onsets, offsets, labels) and converts them
 into the TinyBird JSON format used by the Bengalese finch tooling:
 
 {
-  "metadata": {"units": "ms", "label_to_id": {"a": 0, ...}},
+  "metadata": {"units": "ms"},
   "recordings": [
     {
       "recording": {
         "filename": "clip.wav",
         "bird_id": "B123",
-        "sampling_rate_hz": 44100,
         "detected_vocalizations": 42
       },
       "detected_events": [
@@ -37,7 +36,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,7 +57,6 @@ class RecordingAnnotation:
     path: Path
     filename: str
     bird_id: str
-    sampling_rate_hz: int
     segments: List[Segment]
 
 
@@ -93,6 +90,7 @@ def _ensure_string(value) -> str:
         flat = value.ravel(order="F")
         return "".join(str(x) for x in flat.tolist())
     return str(value)
+
 
 def _basename(value: str) -> str:
     """Return filename component handling Windows-style paths."""
@@ -150,7 +148,6 @@ def infer_bird_id(mat_path: Path, fname: str) -> str:
 
 def parse_not_mat(path: Path) -> RecordingAnnotation:
     data = loadmat(path, squeeze_me=True, struct_as_record=False)
-    sampling_rate = int(data.get("Fs", 0) or 0)
     fname = _ensure_string(data.get("fname", ""))
     labels = _extract_labels(data.get("labels"))
     onsets = _to_float_array(data.get("onsets"), "onsets", path)
@@ -180,7 +177,6 @@ def parse_not_mat(path: Path) -> RecordingAnnotation:
         path=path,
         filename=recording_name,
         bird_id=bird_id,
-        sampling_rate_hz=sampling_rate or 44_100,
         segments=segments,
     )
 
@@ -212,7 +208,6 @@ def to_json_dict(recordings: Sequence[RecordingAnnotation]) -> Dict[str, object]
                 "recording": {
                     "filename": rec.filename,
                     "bird_id": rec.bird_id,
-                    "sampling_rate_hz": rec.sampling_rate_hz,
                     "detected_vocalizations": len(units),
                 },
                 "detected_events": [
@@ -225,10 +220,7 @@ def to_json_dict(recordings: Sequence[RecordingAnnotation]) -> Dict[str, object]
             }
         )
 
-    return {
-        "metadata": {"units": "ms", "label_to_id": label_map},
-        "recordings": json_recordings,
-    }
+    return {"metadata": {"units": "ms"}, "recordings": json_recordings}
 
 
 def write_json(output: Dict[str, object], dst_dir: Path) -> Path:
