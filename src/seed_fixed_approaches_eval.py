@@ -61,12 +61,14 @@ class Team:
         self.winners = set(a.index for a in self.approaches if a.keep)
         self.starting_loss = 0.0
         self.average_loss = []
+        ç = int(0.1 * self.N)
         print(f"[Team] Init: N={self.N}, n_blocks={self.n_blocks}, approaches={len(self.approaches)}")
 
     def build_approaches(self, local_blocks=0):
         context = max(0, self.n_blocks - int(local_blocks))
         approaches = []
         approaches.append(Approach(indices=[], index=len(approaches), n_blocks=self.n_blocks, iteration=-1))
+
         for t in range(self.N):  # range(self.N):
             # Keep a fixed prefix [t, t+1, ..., t+context-1] (clamped to N-1)
             right = min(t + context, self.N - 1)
@@ -133,7 +135,7 @@ class Team:
 
         mins, indices = torch.min(self.losses, dim=0)
         counts = torch.bincount(indices, minlength=self.losses.shape[0]).tolist()
-        losers = sorted([i for i, count in enumerate(counts) if count <= 5])
+        losers = sorted([i for i, count in enumerate(counts) if count < self.min_count])
 
         if iteration == 0:
             sl = self.losses[0, :]
@@ -151,7 +153,7 @@ class Team:
         counts = torch.bincount(indices, minlength=self.losses.shape[0]).tolist()
         self.average_loss.append(mins[torch.isfinite(mins)].mean().item())
 
-        new_winners = sorted(list(indices.tolist()))
+        new_winners = sorted(list(set(indices.tolist())))
 
         print(f"[Team] Winners this round: {new_winners} (total {len(new_winners)})")
         print(f"[Team] Approaches dropped: {losers} (total {len(losers)})")
@@ -199,6 +201,9 @@ class Team:
             self.summarize(tag=f"after round {i+1}")
             self.add_new_approaches(iteration=i)
         print("\n[Team] Optimization complete.")
+        print("[Team] Starting loss: ", self.starting_loss)
+        for i, loss in enumerate(self.average_loss):
+            print(f"[Team]Iteration {i}: loss = {loss}")
 
     def _loss_numpy(self):
         return self.losses.detach().cpu().numpy()
@@ -253,14 +258,12 @@ class Approach:
         self.iteration = int(iteration)
 
     def build_indices(self, t: int) -> List[int]:
-        kept = [int(idx) for idx in self.indices]
-        kept = kept[: max(0, int(self.n_blocks))]
-        remaining = max(0, int(self.n_blocks) - len(kept))
+        remaining = max(0, int(self.n_blocks) - len(self.indices))
         if remaining > 0:
             preds = list(range(max(0, t - remaining), t))
-            indices = kept + preds + [t]
+            indices = self.indices + preds + [t]
         else:
-            indices = kept + [t]
+            indices = self.indices + [t]
         return indices
 
     def prune_context(self):
