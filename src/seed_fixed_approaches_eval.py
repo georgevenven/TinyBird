@@ -59,17 +59,22 @@ class Team:
         self.losses = torch.full((len(self.approaches), self.N), float('inf'), device=device)
         self.leaderboard = [-1 for _ in range(self.N)]
         self.winners = set(a.index for a in self.approaches if a.keep)
+        self.starting_loss = 0.0
+        self.average_loss = []
         print(f"[Team] Init: N={self.N}, n_blocks={self.n_blocks}, approaches={len(self.approaches)}")
 
     def build_approaches(self, local_blocks=0):
         context = max(0, self.n_blocks - int(local_blocks))
         approaches = []
+        approaches.append(Approach(indices=[], index=len(approaches), n_blocks=self.n_blocks, iteration=-1))
         for t in range(self.N):  # range(self.N):
             # Keep a fixed prefix [t, t+1, ..., t+context-1] (clamped to N-1)
             right = min(t + context, self.N - 1)
             indices = list(range(t, right))
             approaches.append(Approach(indices=indices, index=len(approaches), n_blocks=self.n_blocks, iteration=0))
+
         print(f"[Team] Built {len(approaches)} initial approaches (context={context}).")
+
         return approaches
 
     def eval_loss(self, indices: Sequence[int]) -> float:
@@ -107,14 +112,14 @@ class Team:
             for t in self.N_targets:
                 self.losses[approach.index, t] = self.eval_approach(approach, t)
             return True
-        elif approach.keep :
+        elif approach.keep:
             return True
         else:
             self.losses[approach.index, :] = np.float32(float('inf')).item()
             return False
 
     def eval_all(self, iteration=0):
-        valid_approaches = sum(1 for approach in self.approaches if approach.keep )
+        valid_approaches = sum(1 for approach in self.approaches if approach.keep)
         print(f"[Team] Evaluating {valid_approaches} kept approaches over {len(self.N_targets)} targets each…")
         with tqdm(total=valid_approaches, desc="Computing losses") as pbar:
             for approach in self.approaches:
@@ -122,23 +127,33 @@ class Team:
                     pbar.update(1)
 
     def keep_winners(self, iteration=0):
-        self.winners = set(a.index for a in self.approaches if a.keep)
-        original_length = len(self.winners)
+        print(f"[Team] Iteration {iteration} overall approaches:  total {len(self.approaches)})")
 
         self.eval_all(iteration=iteration)
-        self.new_winners = set(torch.argmin(self.losses, dim=0).tolist())
-        self.losers = self.winners - self.new_winners
 
-        print(f"[Team] Winners this round: {sorted(list(self.new_winners))} (total {len(self.new_winners)})")
-        print(f"[Team] Approaches to drop: {sorted(list(self.losers))} (total {len(self.losers)})")
-        for loser in self.losers:
+        mins, indices = torch.min(self.losses, dim=0)
+        counts = torch.bincount(indices, minlength=self.losses.shape[0]).tolist()
+        losers = sorted([i for i, count in enumerate(counts) if count <= 5])
+
+        if iteration == 0:
+            self.starting_loss = self.losses[0, :].mean().item()
+
+        for loser in losers:
             self.approaches[loser].keep = False
 
         keep_mask = torch.tensor([a.keep for a in self.approaches], device=self.losses.device)
         self.losses = self.losses[keep_mask, :]
         self.approaches = [a for a in self.approaches if a.keep]
 
-        print(f"[Team] Condensed to {len(self.approaches)} approaches from {original_length} after pruning losers.")
+        mins, indices = torch.min(self.losses, dim=0)
+        counts = torch.bincount(indices, minlength=self.losses.shape[0]).tolist()
+        self.average_loss.append(mins.mean().item())
+
+        new_winners = sorted(list(indices))
+
+        print(f"[Team] Winners this round: {new_winners} (total {len(new_winners)})")
+        print(f"[Team] Approaches dropped: {losers} (total {len(losers)})")
+        print(f"[Team] Starting loss : {self.starting_loss} Current loss: {self.average_loss[-1]}")
 
     def add_new_approaches(self, iteration=0):
         new_approaches = []
