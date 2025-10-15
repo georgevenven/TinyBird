@@ -296,8 +296,8 @@ def main():
     if not (0 <= args.index < len(dataset)):
         raise ValueError(f"--index {args.index} out of range (dataset size={len(dataset)}).")
     x, x_i, x_l, N, file_name = dataset[args.index]
-    x = x.float().to(device)
-    x_i = x_i.to(device)
+    x = x.unsqueeze(0).float().to(device)
+    x_i = x_i.unsqueeze(0).to(device)
     N = int(torch.tensor([int(N)], dtype=torch.long, device=device).max().item())
     x, x_i = model.compactify_data(x.clone(), x_i.clone(), torch.tensor([N], device=device))
     print(f"[Main] compactify_data → x={tuple(x.shape)}, x_i={tuple(x_i.shape)}, N={N}")
