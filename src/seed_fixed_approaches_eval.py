@@ -62,7 +62,7 @@ class Team:
     def build_approaches(self, local_blocks=0):
         context = max(0, self.n_blocks - int(local_blocks))
         approaches = []
-        for t in range(20) :#range(self.N):
+        for t in range(20):  # range(self.N):
             # Keep a fixed prefix [t, t+1, ..., t+context-1] (clamped to N-1)
             right = min(t + context, self.N - 1)
             indices = list(range(t, right))
@@ -122,7 +122,7 @@ class Team:
 
     def keep_winners(self):
         self.eval_all()
-        self.new_winners = set(torch.nanargmin(self.losses, dim=0).tolist())
+        self.new_winners = set(torch.argmin(self.losses, dim=0).tolist())
         self.losers = self.winners - self.new_winners
         print(f"[Team] Winners this round: {sorted(list(self.new_winners))[:5]}… (total {len(self.new_winners)})")
         print(f"[Team] Approaches to drop: {sorted(list(self.losers))}")
