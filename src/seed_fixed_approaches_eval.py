@@ -132,7 +132,7 @@ class Team:
         print(f"[Team] Winners this round: {sorted(list(self.new_winners))} (total {len(self.new_winners)})")
         print(f"[Team] Approaches to drop: {sorted(list(self.losers))} (total {len(self.losers)})")
         for loser in self.losers:
-            loser.keep = False
+            self.approaches[loser].keep = False
 
         keep_mask = torch.tensor([a.keep for a in self.approaches], device=self.losses.device)
         self.losses = self.losses[keep_mask, :]
