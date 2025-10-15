@@ -61,7 +61,7 @@ class Team:
         self.winners = set(a.index for a in self.approaches if a.keep)
         self.starting_loss = 0.0
         self.average_loss = []
-        ç = int(0.1 * self.N)
+        self.min_count = int(0.1 * self.N)
         print(f"[Team] Init: N={self.N}, n_blocks={self.n_blocks}, approaches={len(self.approaches)}")
 
     def build_approaches(self, local_blocks=0):
