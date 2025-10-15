@@ -22,8 +22,8 @@ export MKL_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 
 cd "$SLURM_SUBMIT_DIR"
 
-MY_SCRATCH=/scratch/gardnerlab/georgev
-SPEC_DIR="${MY_SCRATCH}/specs"
+MY_SCRATCH="/scratch/gardnerlab/georgev"
+SPEC_DIR="${MY_SCRATCH}/specs_XCM"
 mkdir -p "${SPEC_DIR}" logs
 
 RUN_NAME=tinybird_pretrain_$(date +%Y%m%d_%H%M%S)
