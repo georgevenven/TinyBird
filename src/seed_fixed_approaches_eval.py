@@ -234,8 +234,47 @@ def load_or_init_cache(
         old_keys = [keyify(a) for a in old_approaches]
         new_keys = [keyify(a) for a in approaches]
 
-        with np.load(npz_path) as z:
-            losses = z["losses"].astype(np.float32)
+        npz_broken = False
+        z = None
+        try:
+            z = np.load(npz_path)
+        except Exception:
+            npz_broken = True
+
+        losses = None
+        if not npz_broken:
+            try:
+                if "losses" not in z or not isinstance(z["losses"], np.ndarray):
+                    npz_broken = True
+                else:
+                    arr = z["losses"]
+                    if arr.dtype != np.float32 or arr.ndim != 2:
+                        npz_broken = True
+                    else:
+                        losses = arr.astype(np.float32)
+            except Exception:
+                npz_broken = True
+            finally:
+                if z is not None:
+                    try:
+                        z.close()
+                    except Exception:
+                        pass
+
+        if npz_broken:
+            # Rename broken file to .bad (ignore errors)
+            try:
+                bad_path = npz_path + ".bad"
+                os.rename(npz_path, bad_path)
+            except Exception:
+                pass
+            # Use meta's approaches if present, else incoming approaches
+            approaches_for_cols = meta.get("approaches", approaches)
+            A_existing = len(approaches_for_cols)
+            losses = np.full((num_targets, A_existing), np.nan, dtype=np.float32)
+            meta["approaches"] = [list(map(int, a)) for a in approaches_for_cols]
+            print(f"[WARN] Cache NPZ appears corrupted; reinitialized at {npz_path}")
+            return losses, meta, existed
 
         # Append columns for any truly new approaches (preserving old column order)
         append_cols = []
