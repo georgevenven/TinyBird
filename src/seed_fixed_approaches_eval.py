@@ -100,22 +100,21 @@ class Team:
                 raise
 
     def eval_approach(self, approach, t):
-        indices = approach.build_indices(t)
-        val = self.eval_loss(indices)
-        return val
+        return self.eval_loss(approach.build_indices(t))
 
     def eval_approach_all(self, approach, iteration=0):
         if approach.keep and approach.iteration == iteration:
             for t in self.N_targets:
-                v = self.eval_approach(approach, t)
-                self.losses[approach.index, t] = v
+                self.losses[approach.index, t] = self.eval_approach(approach, t)
             return True
+        elif approach.keep :
+            return True:
         else:
             self.losses[approach.index, :] = np.float32(float('inf')).item()
             return False
 
     def eval_all(self, iteration=0):
-        valid_approaches = sum(1 for approach in self.approaches if approach.keep and approach.iteration == iteration)
+        valid_approaches = sum(1 for approach in self.approaches if approach.keep )
         print(f"[Team] Evaluating {valid_approaches} kept approaches over {len(self.N_targets)} targets each…")
         with tqdm(total=valid_approaches, desc="Computing losses") as pbar:
             for approach in self.approaches:
