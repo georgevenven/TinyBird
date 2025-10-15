@@ -113,7 +113,7 @@ class Team:
             self.losses[approach.index, :] = np.float32(float('inf')).item()
             return False
 
-    def eval_all(self, iteration=i):
+    def eval_all(self, iteration=0):
         valid_approaches = sum(1 for approach in self.approaches if approach.keep and approach.iteration == iteration)
         print(f"[Team] Evaluating {valid_approaches} kept approaches over {len(self.N_targets)} targets each…")
         with tqdm(total=valid_approaches, desc="Computing losses") as pbar:
