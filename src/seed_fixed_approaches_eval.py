@@ -136,7 +136,9 @@ class Team:
         losers = sorted([i for i, count in enumerate(counts) if count <= 5])
 
         if iteration == 0:
-            self.starting_loss = self.losses[0, :].mean().item()
+            sl = self.losses[0, :]
+            torch.isfinite(sl)
+            self.starting_loss = sl[torch.isfinite(sl)].mean().item()
 
         for loser in losers:
             self.approaches[loser].keep = False
@@ -147,9 +149,9 @@ class Team:
 
         mins, indices = torch.min(self.losses, dim=0)
         counts = torch.bincount(indices, minlength=self.losses.shape[0]).tolist()
-        self.average_loss.append(mins.mean().item())
+        self.average_loss.append(mins[torch.isfinite(mins)].mean().item())
 
-        new_winners = sorted(list(indices))
+        new_winners = sorted(list(indices.tolist()))
 
         print(f"[Team] Winners this round: {new_winners} (total {len(new_winners)})")
         print(f"[Team] Approaches dropped: {losers} (total {len(losers)})")
