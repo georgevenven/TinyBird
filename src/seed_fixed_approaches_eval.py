@@ -46,9 +46,8 @@ import json
 import math
 import os
 import random
-import sys
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -269,10 +268,33 @@ def load_or_init_cache(
 
 
 def save_cache(npz_path: str, meta_path: str, losses: np.ndarray, meta: dict) -> None:
-    os.makedirs(os.path.dirname(npz_path), exist_ok=True)
-    tmp_npz = f"{npz_path}.tmp"
-    np.savez_compressed(tmp_npz, losses=losses.astype(np.float32, copy=False))
-    os.replace(tmp_npz, npz_path)
+    # Ensure directory exists
+    dirpath = os.path.dirname(npz_path) or "."
+    os.makedirs(dirpath, exist_ok=True)
+
+    # Write NPZ atomically via a pre-created named temp file in the same directory
+    import tempfile
+    with tempfile.NamedTemporaryFile(
+        prefix=os.path.basename(npz_path) + ".",
+        suffix=".tmp",
+        dir=dirpath,
+        delete=False,
+    ) as tmpf:
+        tmp_npz = tmpf.name
+
+    try:
+        np.savez_compressed(tmp_npz, losses=losses.astype(np.float32, copy=False))
+        # Atomic replace on same filesystem
+        os.replace(tmp_npz, npz_path)
+    except Exception:
+        # Best-effort cleanup of the temp file if anything goes wrong
+        try:
+            if os.path.exists(tmp_npz):
+                os.remove(tmp_npz)
+        finally:
+            raise
+
+    # Write JSON meta (uses its own atomic writer)
     _json_dump(meta_path, meta)
 
 
