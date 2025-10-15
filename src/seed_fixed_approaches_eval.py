@@ -54,7 +54,7 @@ class Team:
         # Targets are chirps 1..N-1 (since 0 can't be predicted from prior)
         self.N_targets = list(range(1, self.N))
         self.approaches = self.build_approaches(local_blocks=0)
-        self.losses = torch.full((len(self.approaches), self.N), float('nan'), device=device)
+        self.losses = torch.full((len(self.approaches), self.N), float('inf'), device=device)
         self.leaderboard = [-1 for _ in range(self.N)]
         self.winners = set(a.index for a in self.approaches if a.keep)
         print(f"[Team] Init: N={self.N}, n_blocks={self.n_blocks}, approaches={len(self.approaches)}")
@@ -62,7 +62,7 @@ class Team:
     def build_approaches(self, local_blocks=0):
         context = max(0, self.n_blocks - int(local_blocks))
         approaches = []
-        for t in range(self.N):
+        for t in range(20) :#range(self.N):
             # Keep a fixed prefix [t, t+1, ..., t+context-1] (clamped to N-1)
             right = min(t + context, self.N - 1)
             indices = list(range(t, right))
@@ -93,7 +93,7 @@ class Team:
                 except Exception:
                     pass
                 print("[Team] CUDA OOM while eval_loss; returning NaN for indices=", indices)
-                return np.float32(np.nan).item()
+                return np.float32(float('inf')).item()
             else:
                 raise
 
@@ -109,7 +109,7 @@ class Team:
                 self.losses[approach.index, t] = v
             return True
         else:
-            self.losses[approach.index, :] = np.float32(np.nan).item()
+            self.losses[approach.index, :] = np.float32(float('inf')).item()
             return False
 
     def eval_all(self):
@@ -149,7 +149,7 @@ class Team:
         for i, a in enumerate(self.approaches):
             a.index = i
         self.losses = torch.cat(
-            [self.losses, torch.full((len(new_approaches), self.N), float('nan'), device=self.losses.device)]
+            [self.losses, torch.full((len(new_approaches), self.N), float('inf'), device=self.losses.device)]
         )
         print(
             f"[Team] Added {len(new_approaches)} pruned-context approaches for iteration {iteration}. Total now {len(self.approaches)}."
@@ -186,6 +186,7 @@ class Team:
     def plot_state(self, images_dir, suffix=""):
         # Heatmap: approaches × targets
         arr = self._loss_numpy()
+        arr[arr == np.inf] = np.nan
         fig, ax = plt.subplots(figsize=(12, 6))
         m = np.ma.masked_invalid(arr)
         vmin = float(np.nanmin(m)) if np.isfinite(np.nanmin(m)) else 0.0
