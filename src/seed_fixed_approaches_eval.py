@@ -161,12 +161,15 @@ class Team:
             print("[Team] summarize: no losses yet.")
             return
         with torch.no_grad():
-            argmins = torch.argmin(self.losses, dim=0)  # per-target best approach
-            counts = torch.bincount(argmins, minlength=self.losses.shape[0])
-            topk = torch.topk(counts, k=min(10, counts.numel()))
-            print(f"[Team] Summary {tag}: top approaches by wins (approach_index: wins)")
-            for idx, c in zip(topk.indices.tolist(), topk.values.tolist()):
-                print(f"   • {idx}: {int(c)}")
+            # Winners per target (we already use +inf for invalid entries)
+            argmins = torch.argmin(self.losses, dim=0)
+            counts = torch.bincount(argmins, minlength=self.losses.shape[0]).tolist()
+
+            print(f"[Team] Summary {tag}: approaches with ≥1 win (in current order)")
+            for i, a in enumerate(self.approaches):
+                wins = int(counts[i]) if i < len(counts) else 0
+                if wins > 0:
+                    print(f"   • {i}: wins={wins} | context={a.indices} | iter={a.iteration}")
 
     def optimize(self, images_dir="images_seed_eval"):
         os.makedirs(images_dir, exist_ok=True)
