@@ -12,6 +12,7 @@ dependencies = [
     "torch>=2.8.0",
     "tqdm>=4.67.1",
     "wandb>=0.19.2"
+    "pandas>=2.2.6",
 ]
 [tool.ruff]
 line-length = 120
