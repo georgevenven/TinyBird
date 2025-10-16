@@ -60,7 +60,7 @@ class Team:
         self.losses = torch.full((len(self.approaches), self.N), float('inf'), device=device)
         self.leaderboard = [-1 for _ in range(self.N)]
         self.winners = set(a.index for a in self.approaches if a.keep)
-        self.starting_loss = 0.0
+        self.starting_loss = None
         self.average_loss = []
         self.min_count = int(0.1 * self.N)
         print(f"[Team] Init: N={self.N}, n_blocks={self.n_blocks}, approaches={len(self.approaches)}")
@@ -136,9 +136,11 @@ class Team:
 
         mins, indices = torch.min(self.losses, dim=0)
         counts = torch.bincount(indices, minlength=self.losses.shape[0]).tolist()
-        losers = sorted([i for i, count in enumerate(counts) if count < self.min_count])
+        losers = [i for i, count in enumerate(counts) if count < self.min_count]
+        winners = [i for i, count in enumerate(counts) if count >= self.min_count]
 
-        if iteration == 0:
+        if self.starting_loss is None:
+            self.eval_approach_all(self.approaches[0], iteration=-1)
             sl = self.losses[0, :]
             self.starting_loss = sl[torch.isfinite(sl)].mean().item()
 
@@ -153,9 +155,7 @@ class Team:
         counts = torch.bincount(indices, minlength=self.losses.shape[0]).tolist()
         self.average_loss.append(mins[torch.isfinite(mins)].mean().item())
 
-        new_winners = sorted(list(set(indices.tolist())))
-
-        print(f"[Team] Winners this round: {new_winners} (total {len(new_winners)})")
+        print(f"[Team] Winners this round: {winners} (total {len(winners)})")
         print(f"[Team] Approaches dropped: {losers} (total {len(losers)})")
         print(f"[Team] Starting loss : {self.starting_loss} Current loss: {self.average_loss[-1]}")
 
