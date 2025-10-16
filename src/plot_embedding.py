@@ -160,6 +160,8 @@ def main(args):
     total_timebins = 0
     i = 0
     
+    latent_list = []
+    label_list = []
     while i < len(embedding_dataset) and total_timebins < args["num_timebins"]:
         spec, file_name = embedding_dataset[i]
         
@@ -184,8 +186,6 @@ def main(args):
             i += 1
             continue
 
-        latent_list = []
-        label_list = []
         if matched_events:
             for matched_event in matched_events: # could be multiple songs for each file 
                 # crop the non song elements 
@@ -198,7 +198,7 @@ def main(args):
 
                 # if spec longer than the context 
                 if spec_detected.shape[-1] > model_num_timebins:
-                    batch_size = (spec_detected.shape[-1] // model_num_timebins) + 1 # bc extra batch for overlow 
+                    batch_size = (spec_detected.shape[-1] // model_num_timebins) + 1 # +1 to account for the padding creating an additional batch (important)
                     pad_amnt = model_num_timebins - (spec_detected.shape[-1] % model_num_timebins)
 
                 elif spec_detected.shape[-1] < model_num_timebins:
@@ -213,18 +213,23 @@ def main(args):
                 if pad_amnt > 0: 
                     spec_detected = torch.nn.functional.pad(spec_detected, (0, pad_amnt), mode='constant', value=0)
                     labels = torch.nn.functional.pad(labels, (0, pad_amnt), mode='constant', value=-1) # we gotta pad this shi to match abv
-               
-                print(spec_detected.shape)
+
                 
                 channel, mel, time = spec_detected.shape
-                batched_spec_detected = spec_detected.unsqueeze(0).reshape(batch_size, channel, mel, model_num_timebins)
-                
+                # Correctly batch by slicing along time dimension
+                # spec_detected shape: (channel, mel, time)
+                # We want: (batch_size, channel, mel, model_num_timebins)
+                batched_spec_detected = spec_detected.reshape(channel, mel, batch_size, model_num_timebins)
+                batched_spec_detected = batched_spec_detected.permute(2, 0, 1, 3)  # (batch_size, channel, mel, model_num_timebins)
                 with torch.no_grad():
                     z = model.forward_encoder_inference(batched_spec_detected)       # [B,S,D]
                     B, NP, D = z.shape # batch, num patches, dim
                 
                 # reshape z into something resembling a grid
-                z = z.transpose(1, 2) # now batch, d  s 
+                print(z.shape)
+                z = z.permute(0, 2, 1) # now batch, d  s 
+                print(z.shape)
+
                 z = z.reshape(B, D, num_patches_height, num_patches_time)
 
                 latent_list.append(z)
@@ -233,13 +238,17 @@ def main(args):
         i += 1
 
     z = torch.cat(latent_list, dim=0)  # shape is batch, d , h, w 
+    print(f"z after cat: {z.shape}")
     batches = z.shape[0]
-    z = z.permute(0,3,1,2) # now batch, time, h, w 
+    z = z.permute(0,3,1,2) # now batch, w, h, d 
+    print(f"z after permute: {z.shape}")
     z = z.flatten(0,1) # samples x h, w
+    print(f"z after flatten(0,1): {z.shape}")
 
     # stack height patches onto temporal patches 
-    # (3072, 384, 4) will be 3072 * 4 
+    # (3072, 384, 4) will be 3072, 384 * 4 
     z = z.flatten(1,2)
+    print(f"z after flatten(1,2): {z.shape}")
 
     syllable_labels = torch.cat(label_list, dim=0)  # samples, labels
     pos_ids = torch.arange(0, 1024).repeat(batches)
@@ -260,19 +269,18 @@ def main(args):
     # removal of average vector per position 
     if args.get("mode") == "absolute":
         uniq = np.unique(pos_ids)
-        means = np.zeros((uniq.max()+1, z.shape[1], z.shape[2]), dtype=np.float32)
+        means = np.zeros((uniq.max()+1, z.shape[1]), dtype=np.float32)
         for p in uniq:
             means[p] = z[pos_ids == p].mean(axis=0)
         z = z - means[pos_ids]
+        print("Applied absolute position removal")
     
     print(z.shape)
 
-    # Apply UMAP to the PCA-reduced data
+    # Apply UMAP to the PCA-reduced datas
     reducer_enc = umap.UMAP(n_components=2, n_neighbors=100, metric='cosine')
     emb_enc = reducer_enc.fit_transform(z)
     print("UMAP done")
-
-    Z_pca = z ## place holder 
 
     # # --- save arrays to NPZ (labels, spec, embeddings, pos_ids) ---
     # if args.get("npz_out"):
@@ -306,7 +314,7 @@ def main(args):
         import matplotlib.cm as cm
         mask_labeled = syllable_labels != -1
         labeled_vals = syllable_labels[mask_labeled]
-        unique_syllables = np.sort(np.unique(labeled_vals)) if labeled_vals.size > 0 else np.array([], dtype=int)
+        unique_syllables = np.unique(labeled_vals) if labeled_vals.size > 0 else np.array([], dtype=int)
         colors = cm.tab20(np.linspace(0, 1, len(unique_syllables))) if len(unique_syllables) > 0 else []
         color_map = dict(zip(unique_syllables.tolist(), colors))
 
@@ -394,6 +402,7 @@ if __name__ == "__main__":
     parser.add_argument("--bird", type=str, default=None, help="select specific bird number (e.g., 1 for bird1, 2 for bird2)")
     parser.add_argument("--max_gap", type=int, default=100, help="max patch-length of unlabeled gap to infill")
     parser.add_argument("--max_context", type=int, default=None, help="max timebins to load per clip before chunking; defaults to 64×context")
+    parser.add_argument("--mode", type=str, default="absolute", help="mode for position-based removal: 'absolute' or 'relative'")
 
     args = parser.parse_args()
     main(vars(args))
