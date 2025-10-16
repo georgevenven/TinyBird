@@ -35,7 +35,7 @@ def parse_args():
 
 
 class Team:
-    def __init__(self, model, x, x_i, N, n_blocks=10, device=torch.device('cuda')):
+    def __init__(self, model, x, x_i, x_l, N, n_blocks=10, device=torch.device('cuda')):
         """
         Team manages a set of fixed-context approaches and their evaluation.
         Args:
@@ -49,6 +49,7 @@ class Team:
         self.model = model
         self.x = x
         self.x_i = x_i
+        self.x_l = x_l
         self.N = int(N)
         self.n_blocks = int(n_blocks)
         self.device = device
@@ -139,7 +140,6 @@ class Team:
 
         if iteration == 0:
             sl = self.losses[0, :]
-            torch.isfinite(sl)
             self.starting_loss = sl[torch.isfinite(sl)].mean().item()
 
         for loser in losers:
@@ -181,13 +181,21 @@ class Team:
         with torch.no_grad():
             # Winners per target (we already use +inf for invalid entries)
             argmins = torch.argmin(self.losses, dim=0)
+
             counts = torch.bincount(argmins, minlength=self.losses.shape[0]).tolist()
 
             print(f"[Team] Summary {tag}: approaches with ≥1 win (in current order)")
             for i, a in enumerate(self.approaches):
+
+                wins = self.x_l[argmins == i]
+                b0_count = (wins == 0).sum().item()
+                b1_count = (wins == 1).sum().item()
+
                 wins = int(counts[i]) if i < len(counts) else 0
                 if wins > 0:
-                    print(f"   • {i}: wins={wins} | context={a.indices} | iter={a.iteration}")
+                    print(
+                        f"   • {i}: wins={wins} | context={a.indices} | iter={a.iteration} | b0={b0_count} | b1={b1_count}"
+                    )
 
     def optimize(self, images_dir="images_seed_eval"):
         os.makedirs(images_dir, exist_ok=True)
@@ -261,10 +269,12 @@ class Approach:
         remaining = max(0, int(self.n_blocks) - len(self.indices))
         if remaining > 0:
             preds = list(range(max(0, t - remaining), t))
-            indices = self.indices + preds + [t]
-        else:
-            indices = self.indices + [t]
-        return indices
+            if len(self.indices) > 0:
+                return self.indices + preds + [t]
+            else:
+                return preds + [t]
+
+        return self.indices + [t]
 
     def prune_context(self):
         # drop the earliest fixed index to free one slot, keep iteration+1
@@ -311,11 +321,12 @@ def main():
     x, x_i, x_l, N, file_name = dataset[args.index]
     x = x.unsqueeze(0).float().to(device)
     x_i = x_i.unsqueeze(0).to(device)
+    x_l = x_l.to(device)
     N = int(torch.tensor([int(N)], dtype=torch.long, device=device).max().item())
     x, x_i = model.compactify_data(x.clone(), x_i.clone(), torch.tensor([N], device=device))
     print(f"[Main] compactify_data → x={tuple(x.shape)}, x_i={tuple(x_i.shape)}, N={N}")
 
-    team = Team(model, x, x_i, N, n_blocks=10, device=device)
+    team = Team(model, x, x_i, x_l, N, n_blocks=10, device=device)
     team.optimize()
     print("[Main] Seed fixed-approaches evaluation complete. Plots written under images_seed_eval/ .")
 
