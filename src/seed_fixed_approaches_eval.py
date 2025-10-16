@@ -11,6 +11,8 @@ from tqdm import tqdm
 import os
 import matplotlib.pyplot as plt
 
+from collections import Counter
+
 # Mirror your analyze_model.py imports/names exactly
 from utils import load_model_from_checkpoint
 from data_loader import SpectogramDataset  # note: "SpectogramDataset" (matches your file)
@@ -175,26 +177,38 @@ class Team:
         )
 
     def summarize(self, tag=""):
-        if self.losses.numel() == 0:
-            print("[Team] summarize: no losses yet.")
-            return
         with torch.no_grad():
             # Winners per target (we already use +inf for invalid entries)
             argmins = torch.argmin(self.losses, dim=0)
-
             counts = torch.bincount(argmins, minlength=self.losses.shape[0]).tolist()
-
             print(f"[Team] Summary {tag}: approaches with ≥1 win (in current order)")
+
             for i, a in enumerate(self.approaches):
-                wins = self.x_l[argmins == i]
-                b0_count = (wins == 0).sum().item()
-                b1_count = (wins == 1).sum().item()
+                # which targets did this approach win?
+                approach_wins = argmins == i  # bool mask over targets
+                win_idx = torch.nonzero(approach_wins, as_tuple=True)[0]  # 1D tensor of indices
+
+                # label breakdown among wins (binary example; extend if multi-class)
+                bird_wins = self.x_l[win_idx]  # labels for winning targets
+                b0_count = int((bird_wins == 0).sum().item())
+                b1_count = int((bird_wins == 1).sum().item())
+
+                # frequency of local-context label sequences among winning targets
+                context_counts = Counter()
+                for idx in win_idx.tolist():
+                    local_context = a.local_context(idx)  # list/1D tensor of indices
+                    ctx_labels = self.x_l[
+                        local_context
+                    ].tolist()  # e.g., [0,1,1,0]                       # make hashable
+                    context_counts[str(ctx_labels)] += 1
 
                 wins = int(counts[i]) if i < len(counts) else 0
                 if wins > 0:
                     print(
                         f"   • {i}: wins={wins} | context={a.indices} | iter={a.iteration} | b0={b0_count} | b1={b1_count}"
                     )
+                    for key, value in context_counts.items():
+                        print(f"      {key}: {value}")
 
     def optimize(self, images_dir="images_seed_eval"):
         os.makedirs(images_dir, exist_ok=True)
@@ -264,15 +278,20 @@ class Approach:
         self.n_blocks = int(n_blocks)
         self.iteration = int(iteration)
 
-    def build_indices(self, t: int) -> List[int]:
+    def local_context(self, t: int):
         remaining = max(0, int(self.n_blocks) - len(self.indices))
         if remaining > 0:
-            preds = list(range(max(0, t - remaining), t))
-            if len(self.indices) > 0:
-                return self.indices + preds + [t]
-            else:
-                return preds + [t]
+            return list(range(max(0, t - remaining), t + 1))
+        else:
+            return []
 
+    def build_indices(self, t: int) -> List[int]:
+        preds = self.local_context(t)
+        if len(preds) > 0:
+            if len(self.indices) > 0:
+                return self.indices + preds
+            else:
+                return preds
         return self.indices + [t]
 
     def prune_context(self):
