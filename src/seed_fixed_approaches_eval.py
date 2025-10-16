@@ -279,7 +279,7 @@ class Approach:
         self.iteration = int(iteration)
 
     def local_context(self, t: int):
-        remaining = max(0, int(self.n_blocks) - len(self.indices))
+        remaining = max(0, int(self.n_blocks + 1) - len(self.indices))
         if remaining > 0:
             return list(range(max(0, t - remaining), t + 1))
         else:
