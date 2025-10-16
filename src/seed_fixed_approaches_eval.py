@@ -186,7 +186,6 @@ class Team:
 
             print(f"[Team] Summary {tag}: approaches with ≥1 win (in current order)")
             for i, a in enumerate(self.approaches):
-
                 wins = self.x_l[argmins == i]
                 b0_count = (wins == 0).sum().item()
                 b1_count = (wins == 1).sum().item()
@@ -321,8 +320,8 @@ def main():
     x, x_i, x_l, N, file_name = dataset[args.index]
     x = x.unsqueeze(0).float().to(device)
     x_i = x_i.unsqueeze(0).to(device)
-    x_l = x_l.to(device)
     N = int(torch.tensor([int(N)], dtype=torch.long, device=device).max().item())
+    x_l = x_l.to(device)[:N]
     x, x_i = model.compactify_data(x.clone(), x_i.clone(), torch.tensor([N], device=device))
     print(f"[Main] compactify_data → x={tuple(x.shape)}, x_i={tuple(x_i.shape)}, N={N}")
 
