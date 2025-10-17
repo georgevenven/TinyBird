@@ -387,13 +387,16 @@ def _save_outputs_pt_or_npz(
         )
     else:
         out = dst_dir / (stem + ".npz")
-        np.savez(out, s=S, chirp_intervals=chirp_intervals, labels=labels, chirp_labels=chirp_labels, chirp_feats=chirp_feats)
+        np.savez(
+            out, s=S, chirp_intervals=chirp_intervals, labels=labels, chirp_labels=chirp_labels, chirp_feats=chirp_feats
+        )
 
 
 def _extract_additional_features(fp: Path, chirp_intervals: np.ndarray, step: int, actual_sr: int) -> np.ndarray:
     """Return (N,2,6) tensor of x,y,z,call,song,cage_noise for each chirp and side."""
     try:
         from additional_data import load_additional_data
+
         add_data = load_additional_data(fp.name)
     except Exception:
         add_data = None
@@ -405,18 +408,46 @@ def _extract_additional_features(fp: Path, chirp_intervals: np.ndarray, step: in
         sec_per_frame = step / float(actual_sr)
         for i in range(N):
             cs, ce = int(chirp_intervals[i, 0]), int(chirp_intervals[i, 1])
-            mid_t = ((cs + ce) * 0.5) * sec_per_frame
+            # Compute integer-valued seconds within the chirp span [cs, ce)
+            start_sec = int(np.floor(cs * sec_per_frame))
+            end_sec = int(np.ceil(ce * sec_per_frame))
+
             for side in (0, 1):
-                row = add_data.row_for_time_and_side(mid_t, side)
-                if row is None:
-                    continue
+                xs, ys, zs = [], [], []
+                call_or = 0
+                song_or = 0
+                cage_or = 0
+
+                if start_sec <= end_sec:
+                    for t in range(start_sec, end_sec + 1):
+                        row = add_data.row_for_time_and_side(float(t), side)
+                        if row is None:
+                            continue
+
+                        x = row.get("x", -1)
+                        y = row.get("y", -1)
+                        z = row.get("z", -1)
+
+                        # Collect numeric positions if finite
+                        if np.isfinite(x) and x >= 0.0:
+                            xs.append(float(x))
+                        if np.isfinite(y) and y >= 0.0:
+                            ys.append(float(y))
+                        if np.isfinite(z) and z >= 0.0:
+                            zs.append(float(z))
+
+                        # Bitwise/boolean OR accumulation for flags
+                        call_or |= int(bool(row.get("call", 0)))
+                        song_or |= int(bool(row.get("song", 0)))
+                        cage_or |= int(bool(row.get("cage_noise", 0)))
+
                 vals = [
-                    row.get("x", np.nan),
-                    row.get("y", np.nan),
-                    row.get("z", np.nan),
-                    row.get("call", np.nan),
-                    row.get("song", np.nan),
-                    row.get("cage_noise", np.nan),
+                    float(np.mean(xs)) if len(xs) else -1,
+                    float(np.mean(ys)) if len(ys) else -1,
+                    float(np.mean(zs)) if len(zs) else -1,
+                    float(call_or),
+                    float(song_or),
+                    float(cage_or),
                 ]
                 try:
                     extra_feats[i, side, :] = np.asarray(vals, dtype=np.float32)
