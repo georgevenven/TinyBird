@@ -16,139 +16,7 @@ from utils import load_model_from_checkpoint
 from data_loader import SpectogramDataset
 
 # For pixel-perfect axis-aligned strips
-
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-
-# === Timing utilities (modular so they are easy to remove later) ===
-
-def _get_sec_per_frame(dataset):
-    """Best-effort retrieval of seconds-per-frame from the dataset.
-    Tries common attributes; falls back to 1.0 and warns if not found.
-    """
-    spp = None
-    for attr in ("sec_per_frame", "seconds_per_frame", "s_per_frame"):
-        if hasattr(dataset, attr):
-            spp = getattr(dataset, attr)
-            break
-    # Try deriving from hop/step and sample rate
-    if spp is None:
-        hop = None
-        sr = None
-        for attr in ("step", "hop_length", "hop", "frame_step"):
-            if hasattr(dataset, attr):
-                hop = getattr(dataset, attr)
-                break
-        for attr in ("actual_sr", "sample_rate", "sr", "fs"):
-            if hasattr(dataset, attr):
-                sr = getattr(dataset, attr)
-                break
-        if hop is not None and sr is not None and sr != 0:
-            spp = float(hop) / float(sr)
-    if spp is None:
-        print("[WARN] Could not determine sec_per_frame from dataset; defaulting to 1.0s/frame")
-        spp = 1.0
-    return float(spp)
-
-
-def _compute_chirp_lengths_and_gaps(x_i_np: np.ndarray, sec_per_frame: float):
-    """Given chirp intervals (frames) shaped (K, 2), return:
-    - lengths_sec: length of each chirp in seconds
-    - gaps_sec: time between chirps in seconds (gaps[0] = NaN)
-    - starts_sec: start time of each chirp in seconds
-    """
-    if x_i_np.ndim != 2 or x_i_np.shape[1] < 2:
-        raise ValueError("x_i must be shaped (K, 2) with [start, end] in frames")
-    starts = x_i_np[:, 0].astype(np.float64)
-    ends = x_i_np[:, 1].astype(np.float64)
-    lengths_sec = (ends - starts) * sec_per_frame
-    gaps_sec = np.full_like(lengths_sec, np.nan, dtype=np.float64)
-    if len(starts) > 1:
-        gaps_sec[1:] = (starts[1:] - ends[:-1]) * sec_per_frame
-    starts_sec = starts * sec_per_frame
-    return lengths_sec, gaps_sec, starts_sec
-
-
-def _window_time_mats(x_i_np: np.ndarray, sec_per_frame: float):
-    """Compute two matrices with shape (K, K) for start,last indices:
-    - win_time_chirps_sec[r,c]: sum of chirp durations from r..c (inclusive). Does NOT include gaps.
-    - win_time_total_sec[r,c]: total span from start[r] to end[c]. Includes gaps.
-    Cells with c <= r are NaN to match loss computation logic.
-    """
-    K = x_i_np.shape[0]
-    starts = x_i_np[:, 0].astype(np.float64)
-    ends = x_i_np[:, 1].astype(np.float64)
-    chirp_len = (ends - starts) * sec_per_frame
-    win_time_chirps_sec = np.full((K, K), np.nan, dtype=np.float64)
-    win_time_total_sec = np.full((K, K), np.nan, dtype=np.float64)
-    for r in range(K):
-        acc = 0.0
-        for c in range(r + 1, K):  # c == r is invalid in current loss loop
-            acc += chirp_len[c] if c == r else chirp_len[c]
-            # Sum of durations r..c
-            win_time_chirps_sec[r, c] = np.sum(chirp_len[r : c + 1])
-            # Total span including gaps
-            win_time_total_sec[r, c] = (ends[c] - starts[r]) * sec_per_frame
-    return win_time_chirps_sec, win_time_total_sec
-
-
-def _plot_chirp_time_lines(starts_sec: np.ndarray, gaps_sec: np.ndarray, *, out_dir: str, tag: str, filename: str):
-    os.makedirs(out_dir, exist_ok=True)
-    # 1) Time of chirp (start time) vs chirp number
-    fig1, ax1 = plt.subplots(figsize=(10, 4))
-    ax1.plot(np.arange(len(starts_sec)), starts_sec, marker='o', linewidth=1.0)
-    ax1.set_xlabel('Chirp #')
-    ax1.set_ylabel('Start time (s)')
-    ax1.set_title('Chirp start time vs chirp #')
-    fig1.tight_layout()
-    p1 = os.path.join(out_dir, f"line_chirp_time_{tag}_{filename}.png")
-    fig1.savefig(p1, dpi=200, bbox_inches='tight')
-    plt.close(fig1)
-
-    # 2) Time between chirps vs chirp number
-    fig2, ax2 = plt.subplots(figsize=(10, 4))
-    ax2.plot(np.arange(len(gaps_sec)), gaps_sec, marker='o', linewidth=1.0)
-    ax2.set_xlabel('Chirp #')
-    ax2.set_ylabel('Gap to previous chirp (s)')
-    ax2.set_title('Time between chirps vs chirp # (pre-compactify)')
-    fig2.tight_layout()
-    p2 = os.path.join(out_dir, f"line_chirp_gap_{tag}_{filename}.png")
-    fig2.savefig(p2, dpi=200, bbox_inches='tight')
-    plt.close(fig2)
-
-    return p1, p2
-
-
-def _plot_time_heatmaps(win_time_chirps_sec: np.ndarray, win_time_total_sec: np.ndarray, *, out_dir: str, tag: str, filename: str):
-    os.makedirs(out_dir, exist_ok=True)
-    # Heatmap 1: loss-window time (chirp durations only)
-    figA, axA = plt.subplots(figsize=(10, 8))
-    A = np.ma.masked_invalid(win_time_chirps_sec)
-    imA = axA.imshow(A, origin='lower', aspect='auto', interpolation='nearest')
-    axA.set_title('Window time (s) – chirp durations only (no gaps)')
-    axA.set_xlabel('last_block (c)')
-    axA.set_ylabel('start_block (r)')
-    cbarA = figA.colorbar(imA, ax=axA)
-    cbarA.set_label('Seconds', rotation=270, labelpad=12)
-    figA.tight_layout()
-    h1 = os.path.join(out_dir, f"hm_window_chirps_{tag}_{filename}.png")
-    figA.savefig(h1, dpi=250, bbox_inches='tight')
-    plt.close(figA)
-
-    # Heatmap 2: total modeled time (includes gaps)
-    figB, axB = plt.subplots(figsize=(10, 8))
-    B = np.ma.masked_invalid(win_time_total_sec)
-    imB = axB.imshow(B, origin='lower', aspect='auto', interpolation='nearest')
-    axB.set_title('Total modeled time (s) – includes gaps between chirps')
-    axB.set_xlabel('last_block (c)')
-    axB.set_ylabel('start_block (r)')
-    cbarB = figB.colorbar(imB, ax=axB)
-    cbarB.set_label('Seconds', rotation=270, labelpad=12)
-    figB.tight_layout()
-    h2 = os.path.join(out_dir, f"hm_window_total_{tag}_{filename}.png")
-    figB.savefig(h2, dpi=250, bbox_inches='tight')
-    plt.close(figB)
-
-    return h1, h2
 
 
 def parse_args():
@@ -181,7 +49,7 @@ def prepare_sample(model, dataset, index, device):
     return x, x_i, N, filename
 
 
-def compute_loss(model, x, x_i, N, start_block, last_block, n_blocks, isolate_block):
+def compute_loss(model, x, x_i, N, start_block, last_block, n_blocks, isolate_block, x_dt=None, x_lt=None):
     """
     Compute masked MSE loss for a given block configuration.
     Returns: (loss, xs, x_is, bool_mask, pred, mblock, indices)
@@ -198,12 +66,21 @@ def compute_loss(model, x, x_i, N, start_block, last_block, n_blocks, isolate_bl
             else:
                 indices = list(range(start_block, min(start_block + n_blocks, N.max().item()))) + [last_block]
 
+        if x_dt is not None :
+            dt = x_dt[indices].sum().item()
+        else :
+            dt = float('nan')
+        if x_lt is not None :
+            lt = x_lt[indices].sum().item()
+        else :
+            lt = float('nan')
+
         xs, x_is = model.sample_data_indices(x.clone(), x_i.clone(), N.clone(), indices)
         mblock = [len(indices) - 1]
         h, idx_restore, bool_mask, bool_pad, T = model.forward_encoder(xs, x_is, mblock=mblock)
         pred = model.forward_decoder(h, idx_restore, T, bool_pad=bool_pad, attend_to_padded=False)
         loss = model.loss_mse(xs, pred, bool_mask)
-        return loss, xs, x_is, bool_mask, pred, mblock, indices
+        return loss, xs, x_is, bool_mask, pred, mblock, indices, dt, lt
     except RuntimeError as e:
         msg = str(e).lower()
         if ("out of memory" in msg or "cuda" in msg) and torch.cuda.is_available():
@@ -359,16 +236,19 @@ def save_reconstruction(
 def process_file(model, dataset, index, device):
     x, x_i, x_l, x_f, N, filename = dataset[index]
 
-    # === Compute timing arrays BEFORE compactify ===
-    sec_per_frame = _get_sec_per_frame(dataset)
-    x_i_pre = x_i.detach().cpu().numpy() if isinstance(x_i, torch.Tensor) else np.asarray(x_i)
-    pre_lengths_sec, pre_gaps_sec, pre_starts_sec = _compute_chirp_lengths_and_gaps(x_i_pre, sec_per_frame)
-
     x = x.unsqueeze(0).float().to(device)
     x_i = x_i.unsqueeze(0).to(device)
     N = torch.tensor([N], dtype=torch.long, device=device)
 
+    # Compute chirp start/end/dt/lt
+    starts = x_i[0, :N.item(), 0]
+    ends   = x_i[0, :N.item(), 1]
+    x_dt = torch.cat([torch.tensor([0.0], device=device), starts[1:] - ends[:-1]])
+    x_lt = ends - starts
+
     x, x_i = model.compactify_data(x.clone(), x_i.clone(), N.clone())
+
+
     # Ensure chirp labels align in length with chirp boundaries (trim trailing padding labels)
     if isinstance(x_l, torch.Tensor):
         x_l = x_l[: x_i.shape[1]]
@@ -381,14 +261,6 @@ def process_file(model, dataset, index, device):
     else:
         x_f = torch.as_tensor(x_f)[: x_i.shape[1]]
 
-    # === Compute timing arrays AFTER compactify (using trimmed/interpreted chirp intervals) ===
-    x_i_post = x_i[0] if x_i.dim() == 3 else x_i  # handle potential batch dim added by compactify
-    x_i_post_np = x_i_post.detach().cpu().numpy() if isinstance(x_i_post, torch.Tensor) else np.asarray(x_i_post)
-    post_lengths_sec, post_gaps_sec, post_starts_sec = _compute_chirp_lengths_and_gaps(x_i_post_np, sec_per_frame)
-
-    # Heatmap bases for time accounting (shape aligns with loss matrices)
-    hm_chirps_sec, hm_total_sec = _window_time_mats(x_i_post_np[: N.item()], sec_per_frame)
-
     print(f"  Filename: {filename}")
     print(f"  Spectrogram shape: {x.shape}")
     print(f"  Chirp intervals shape: {x_i.shape}")
@@ -396,41 +268,46 @@ def process_file(model, dataset, index, device):
     print(f"  Chirp feats shape: {x_f.shape}")
     print(f"  Number of valid chirps: {N.item()}")
 
-    def compute_losses(x, x_i, N, isolate_block=False):
+    def compute_losses(x, x_i, N, x_dt, x_lt, isolate_block=False):
         n_blocks = 10
         n_valid_chirps = N.max().item()
-        # Fill with NaNs so missing entries don't bias averages
         losses = torch.full((n_valid_chirps, n_valid_chirps), float('nan'), device=device)
-        print(f"\nComputing losses for {losses.numel()} (rows × starts)...")
-        # Compute an accurate total for the progress bar
-        with tqdm(total=((n_valid_chirps - 1) * (n_valid_chirps - 1)), desc="Computing losses") as pbar:
+        dt_mat = torch.full((n_valid_chirps, n_valid_chirps), float('nan'), device=device)
+        lt_mat = torch.full((n_valid_chirps, n_valid_chirps), float('nan'), device=device)
+        print(f"\nComputing losses/dt/lt for {losses.numel()} (rows × starts)...")
+        with tqdm(total=((n_valid_chirps - 1) * (n_valid_chirps - 1)), desc="Computing losses/dt/lt") as pbar:
             for last_block in range(1, n_valid_chirps):
                 for start_block in range(0, n_valid_chirps - 1):
+                    # Reconstruct the indices the same way compute_loss does
+                    if isolate_block:
+                        indices = [start_block, last_block]
+                    else:
+                        if start_block < last_block:
+                            indices = list(range(start_block, min(start_block + n_blocks, last_block))) + [last_block]
+                        else:
+                            indices = list(range(start_block, min(start_block + n_blocks, n_valid_chirps))) + [last_block]
+                    # Compute dt/lt via span [first:last)
+                    if len(indices) >= 2:
+                        s = int(indices[0])
+                        e = int(indices[-1])
+                        dt_val = torch.sum(x_dt[s:e]).item()
+                        lt_val = torch.sum(x_lt[s:e]).item()
+                    else:
+                        dt_val = float('nan')
+                        lt_val = float('nan')
                     with torch.no_grad():
                         loss, *_ = compute_loss(model, x, x_i, N, start_block, last_block, n_blocks, isolate_block)
-                    val = float('nan') if torch.isnan(loss) else loss.item()
-                    losses[start_block, last_block] = val
+                    losses[start_block, last_block] = float('nan') if torch.isnan(loss) else loss.item()
+                    dt_mat[start_block, last_block] = dt_val
+                    lt_mat[start_block, last_block] = lt_val
                     pbar.update(1)
-        return losses
+        return losses, dt_mat, lt_mat
 
-    all_losses = compute_losses(x, x_i, N, isolate_block=False)
-    isolated_losses = compute_losses(x, x_i, N, isolate_block=True)
+    all_losses, all_dt, all_lt = compute_losses(x, x_i, N, x_dt, x_lt, isolate_block=False)
+    # isolated disabled for now
+    # iso_losses, iso_dt, iso_lt = compute_losses(x, x_i, N, x_dt, x_lt, isolate_block=True)
 
-    return isolated_losses, all_losses, filename, x_l, x_f, {
-        "sec_per_frame": sec_per_frame,
-        "pre": {
-            "lengths_sec": pre_lengths_sec,
-            "gaps_sec": pre_gaps_sec,
-            "starts_sec": pre_starts_sec,
-        },
-        "post": {
-            "lengths_sec": post_lengths_sec,
-            "gaps_sec": post_gaps_sec,
-            "starts_sec": post_starts_sec,
-            "hm_chirps_sec": hm_chirps_sec,
-            "hm_total_sec": hm_total_sec,
-        },
-    }
+    return all_losses, all_dt, all_lt, filename, x_l, x_f
 
 
 def main():
@@ -520,33 +397,12 @@ def main():
     # === Default: loss/plotting mode ===
     def process_and_plot(i: int):
         print(f"\nLoading sample at index {i}")
-        isolated_losses, all_losses, filename, x_l, x_f, timing = process_file(model, dataset, i, device)
+        all_losses, all_dt, all_lt, filename, x_l, x_f = process_file(model, dataset, i, device)
 
-        iso_np = isolated_losses.detach().cpu().numpy()
         all_np = all_losses.detach().cpu().numpy()
+        dt_np = all_dt.detach().cpu().numpy()
+        lt_np = all_lt.detach().cpu().numpy()
         labels_np = x_l.detach().cpu().numpy().astype(int).reshape(-1)
-
-        # === New modular plots for timing analysis ===
-        try:
-            # Lines (pre-compactify timing as requested)
-            _plot_chirp_time_lines(
-                timing["pre"]["starts_sec"],
-                timing["pre"]["gaps_sec"],
-                out_dir=images_dir,
-                tag=f"idx{i}",
-                filename=filename,
-            )
-
-            # Heatmaps from post-compactify intervals
-            _plot_time_heatmaps(
-                timing["post"]["hm_chirps_sec"],
-                timing["post"]["hm_total_sec"],
-                out_dir=images_dir,
-                tag=f"idx{i}",
-                filename=filename,
-            )
-        except Exception as e:
-            print(f"[WARN] Timing plots failed: {e}")
 
         # Diagnostics: summarize chirp labels
         uniq, counts = np.unique(labels_np, return_counts=True)
@@ -698,8 +554,9 @@ def main():
             print(f"Saved: {loss_hm_out}")
 
         # Heatmaps use the full sparse matrices (with chirp label strips)
-        plot_heatmap(iso_np, tag='isolated', labels_np=labels_np, x_f_np=x_f)
         plot_heatmap(all_np, tag='allblocks', labels_np=labels_np, x_f_np=x_f)
+        plot_heatmap(dt_np,  tag='allblocks_dt', labels_np=labels_np, x_f_np=x_f)
+        plot_heatmap(lt_np,  tag='allblocks_lt', labels_np=labels_np, x_f_np=x_f)
 
     # If a single index is specified, only process that file; otherwise process all
     if args.index >= 0:
