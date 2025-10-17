@@ -66,13 +66,13 @@ def compute_loss(model, x, x_i, N, start_block, last_block, n_blocks, isolate_bl
             else:
                 indices = list(range(start_block, min(start_block + n_blocks, N.max().item()))) + [last_block]
 
-        if x_dt is not None :
+        if x_dt is not None:
             dt = x_dt[indices].sum().item()
-        else :
+        else:
             dt = float('nan')
-        if x_lt is not None :
+        if x_lt is not None:
             lt = x_lt[indices].sum().item()
-        else :
+        else:
             lt = float('nan')
 
         xs, x_is = model.sample_data_indices(x.clone(), x_i.clone(), N.clone(), indices)
@@ -241,13 +241,12 @@ def process_file(model, dataset, index, device):
     N = torch.tensor([N], dtype=torch.long, device=device)
 
     # Compute chirp start/end/dt/lt
-    starts = x_i[0, :N.item(), 0]
-    ends   = x_i[0, :N.item(), 1]
+    starts = x_i[0, : N.item(), 0]
+    ends = x_i[0, : N.item(), 1]
     x_dt = torch.cat([torch.tensor([0.0], device=device), starts[1:] - ends[:-1]])
     x_lt = ends - starts
 
     x, x_i = model.compactify_data(x.clone(), x_i.clone(), N.clone())
-
 
     # Ensure chirp labels align in length with chirp boundaries (trim trailing padding labels)
     if isinstance(x_l, torch.Tensor):
@@ -285,16 +284,13 @@ def process_file(model, dataset, index, device):
                         if start_block < last_block:
                             indices = list(range(start_block, min(start_block + n_blocks, last_block))) + [last_block]
                         else:
-                            indices = list(range(start_block, min(start_block + n_blocks, n_valid_chirps))) + [last_block]
-                    # Compute dt/lt via span [first:last)
-                    if len(indices) >= 2:
-                        s = int(indices[0])
-                        e = int(indices[-1])
-                        dt_val = torch.sum(x_dt[s:e]).item()
-                        lt_val = torch.sum(x_lt[s:e]).item()
-                    else:
-                        dt_val = float('nan')
-                        lt_val = float('nan')
+                            indices = list(range(start_block, min(start_block + n_blocks, n_valid_chirps))) + [
+                                last_block
+                            ]
+
+                    dt_val = x_dt[indices].sum().item()
+                    lt_val = x_lt[indices].sum().item()
+
                     with torch.no_grad():
                         loss, *_ = compute_loss(model, x, x_i, N, start_block, last_block, n_blocks, isolate_block)
                     losses[start_block, last_block] = float('nan') if torch.isnan(loss) else loss.item()
@@ -488,6 +484,7 @@ def main():
 
             # Use 3-class mapping: -1 -> white (no chirp), 0 -> light blue (L), 1 -> dark blue (R)
             from matplotlib.colors import BoundaryNorm
+
             lbl_x = labels_adj[:Wh].astype(int)
             lbl_y = labels_adj[:Hh].astype(int)
             cmap_lbl = ListedColormap(["#ffffff", "#add8e6", "#00008b"]).copy()
@@ -500,12 +497,26 @@ def main():
             ax_strip_y = divider.append_axes("left", size="3%", pad=0.45, sharey=ax_hm)
 
             # Bottom strip (x-axis): 1 × Wh
-            ax_strip_x.imshow(lbl_x[np.newaxis, :], aspect='auto', cmap=cmap_lbl, norm=norm_lbl, interpolation='nearest', origin='lower')
+            ax_strip_x.imshow(
+                lbl_x[np.newaxis, :],
+                aspect='auto',
+                cmap=cmap_lbl,
+                norm=norm_lbl,
+                interpolation='nearest',
+                origin='lower',
+            )
             ax_strip_x.set_xlim(ax_hm.get_xlim())
             ax_strip_x.axis('off')
 
             # Left strip (y-axis): Hh × 1 (origin lower to match heatmap orientation)
-            ax_strip_y.imshow(lbl_y[:, np.newaxis], aspect='auto', cmap=cmap_lbl, norm=norm_lbl, interpolation='nearest', origin='lower')
+            ax_strip_y.imshow(
+                lbl_y[:, np.newaxis],
+                aspect='auto',
+                cmap=cmap_lbl,
+                norm=norm_lbl,
+                interpolation='nearest',
+                origin='lower',
+            )
             ax_strip_y.set_ylim(ax_hm.get_ylim())
             ax_strip_y.axis('off')
 
@@ -528,10 +539,14 @@ def main():
             def _imshow_left_strip(values_1d, label_text):
                 ax_lf = divider.append_axes("left", size="3%", pad=0.18, sharey=ax_hm)
                 strip = np.ma.masked_invalid(values_1d[:, np.newaxis])
-                ax_lf.imshow(strip, aspect='auto', cmap=plt.get_cmap('viridis'), interpolation='nearest', origin='lower')
+                ax_lf.imshow(
+                    strip, aspect='auto', cmap=plt.get_cmap('viridis'), interpolation='nearest', origin='lower'
+                )
                 ax_lf.set_ylim(ax_hm.get_ylim())
                 ax_lf.axis('off')
-                ax_lf.text(0.5, 1.0, label_text, transform=ax_lf.transAxes, fontsize=6, ha='center', va='top', rotation=90)
+                ax_lf.text(
+                    0.5, 1.0, label_text, transform=ax_lf.transAxes, fontsize=6, ha='center', va='top', rotation=90
+                )
 
             # Determine extents matching heatmap dimensions
             Hh, Wh = loss_mat_np.shape
@@ -555,8 +570,8 @@ def main():
 
         # Heatmaps use the full sparse matrices (with chirp label strips)
         plot_heatmap(all_np, tag='allblocks', labels_np=labels_np, x_f_np=x_f)
-        plot_heatmap(dt_np,  tag='allblocks_dt', labels_np=labels_np, x_f_np=x_f)
-        plot_heatmap(lt_np,  tag='allblocks_lt', labels_np=labels_np, x_f_np=x_f)
+        plot_heatmap(dt_np, tag='allblocks_dt', labels_np=labels_np, x_f_np=x_f)
+        plot_heatmap(lt_np, tag='allblocks_lt', labels_np=labels_np, x_f_np=x_f)
 
     # If a single index is specified, only process that file; otherwise process all
     if args.index >= 0:
@@ -575,6 +590,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
