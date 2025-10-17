@@ -437,16 +437,25 @@ def main():
 
             # Add chirp label strips along axes using shared axes for pixel-perfect alignment
             Hh, Wh = loss_mat_np.shape
-            lbl_x = labels_np[:Wh]
-            lbl_y = labels_np[:Hh]
-            # Mask any values not in {0,1}
-            lbl_x = lbl_x.astype(float)
-            lbl_x[(lbl_x != 0) & (lbl_x != 1)] = np.nan
-            lbl_y = lbl_y.astype(float)
-            lbl_y[(lbl_y != 0) & (lbl_y != 1)] = np.nan
+            # Adjust labels based on presence of chirp in x_f: if label says a bird but that bird has no chirp (>0) at index, mark -1
+            if isinstance(x_f_np, torch.Tensor):
+                x_f_np = x_f_np.detach().cpu().numpy()
+            labels_adj = labels_np.copy()
+            L_call = x_f_np[:, 0, 3].astype(float)  # call channel for left bird
+            R_call = x_f_np[:, 1, 3].astype(float)  # call channel for right bird
+            for idx in range(min(len(labels_adj), x_f_np.shape[0])):
+                if labels_adj[idx] == 0 and not (L_call[idx] > 0):
+                    labels_adj[idx] = -1
+                elif labels_adj[idx] == 1 and not (R_call[idx] > 0):
+                    labels_adj[idx] = -1
 
-            cmap_lbl = ListedColormap(["#add8e6", "#00008b"]).copy()
-            cmap_lbl.set_bad(color='black')
+            # Use 3-class mapping: -1 -> white (no chirp), 0 -> light blue (L), 1 -> dark blue (R)
+            from matplotlib.colors import BoundaryNorm
+            lbl_x = labels_adj[:Wh].astype(int)
+            lbl_y = labels_adj[:Hh].astype(int)
+            cmap_lbl = ListedColormap(["#ffffff", "#add8e6", "#00008b"]).copy()
+            bounds = [-1.5, -0.5, 0.5, 1.5]
+            norm_lbl = BoundaryNorm(bounds, cmap_lbl.N)
 
             divider = make_axes_locatable(ax_hm)
             # Increase pad to leave room for axis labels and ticks
@@ -454,14 +463,12 @@ def main():
             ax_strip_y = divider.append_axes("left", size="3%", pad=0.45, sharey=ax_hm)
 
             # Bottom strip (x-axis): 1 × Wh
-            strip_x = np.ma.masked_invalid(lbl_x[np.newaxis, :])
-            ax_strip_x.imshow(strip_x, aspect='auto', cmap=cmap_lbl, interpolation='nearest', origin='lower')
+            ax_strip_x.imshow(lbl_x[np.newaxis, :], aspect='auto', cmap=cmap_lbl, norm=norm_lbl, interpolation='nearest', origin='lower')
             ax_strip_x.set_xlim(ax_hm.get_xlim())
             ax_strip_x.axis('off')
 
             # Left strip (y-axis): Hh × 1 (origin lower to match heatmap orientation)
-            strip_y = np.ma.masked_invalid(lbl_y[:, np.newaxis])
-            ax_strip_y.imshow(strip_y, aspect='auto', cmap=cmap_lbl, interpolation='nearest', origin='lower')
+            ax_strip_y.imshow(lbl_y[:, np.newaxis], aspect='auto', cmap=cmap_lbl, norm=norm_lbl, interpolation='nearest', origin='lower')
             ax_strip_y.set_ylim(ax_hm.get_ylim())
             ax_strip_y.axis('off')
 
@@ -470,7 +477,8 @@ def main():
             if isinstance(x_f_np, torch.Tensor):
                 x_f_np = x_f_np.detach().cpu().numpy()
 
-            var_names = ["x", "y", "z", "call", "song", "cage_noise"]
+            var_names = ["x", "y", "z"]
+            var_indices = [0, 1, 2]
 
             def _imshow_bottom_strip(values_1d, label_text):
                 ax_b = divider.append_axes("bottom", size="3%", pad=0.12, sharex=ax_hm)
@@ -493,7 +501,7 @@ def main():
 
             # Create strips for each bird and variable (order: L bird0 vars, then R bird1 vars)
             for bird_idx, bird_tag in enumerate(["L", "R"]):
-                for vi, vname in enumerate(var_names):
+                for vi, vname in zip(var_indices, var_names):
                     vec = x_f_np[:, bird_idx, vi].astype(float)
                     # Bottom strips align with width (columns)
                     _imshow_bottom_strip(vec[:Wh], f"{bird_tag} {vname}")
@@ -529,3 +537,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
