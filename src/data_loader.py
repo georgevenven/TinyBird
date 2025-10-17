@@ -98,6 +98,28 @@ class SpectogramDataset(Dataset):
         padded[:n_copy] = vec[:n_copy]
         return padded, N
 
+    def pad_chirp_feats(self, chirp_feats, max_N, pad_value=-1.0):
+        """
+        Pad chirp_feats (N, 2, 6) to shape (max_N, 2, 6) with pad_value.
+
+        Args:
+            chirp_feats (torch.Tensor): Tensor of shape (N, 2, 6).
+            max_N (int): Target number of rows after padding.
+            pad_value (float or int): Value to use for padding.
+
+        Returns:
+            padded (torch.Tensor): Tensor of shape (max_N, 2, 6).
+            length (int): Original number of rows N before padding.
+        """
+        feats = torch.as_tensor(chirp_feats)
+        assert feats.ndim == 3 and feats.shape[1] == 2 and feats.shape[2] == 6, \
+            f"Expected (N, 2, 6), got {feats.shape}"
+        N = feats.shape[0]
+        padded = torch.full((max_N, 2, 6), pad_value, dtype=feats.dtype)
+        n_copy = min(N, max_N)
+        padded[:n_copy] = feats[:n_copy]
+        return padded, N
+
 
     def __getitem__(self, index):
         path = self.file_dirs[index]   # pick actual .pt path
@@ -140,6 +162,25 @@ class SpectogramDataset(Dataset):
             chirp_intervals = chirp_intervals[:self.n_timebins]
             chirp_labels_pad = chirp_labels_pad[:self.n_timebins]
 
+        # Chirp features (N, 2, 6)
+        if 'chirp_feats' in f:
+            cf_np = f['chirp_feats']
+            chirp_feats = cf_np if isinstance(cf_np, torch.Tensor) else torch.as_tensor(cf_np)
+            # Ensure 3D shape (N, 2, 6)
+            assert chirp_feats.ndim == 3, f"chirp_feats must be 3D (N,2,6), got {chirp_feats.shape}"
+        else:
+            # Default to zeros for existing intervals when missing, will pad with -1 later
+            orig_N = chirp_int.shape[0]
+            chirp_feats = torch.zeros((orig_N, 2, 6), dtype=torch.float32)
+
+        chirp_feats_pad, N_feats = self.pad_chirp_feats(chirp_feats, self.n_timebins, pad_value=-1.0)
+
+        # Final consistency guard: ensure N matches across intervals, labels, feats
+        N = min(N, N_labels, N_feats)
+        chirp_intervals = chirp_intervals[:self.n_timebins]
+        chirp_labels_pad = chirp_labels_pad[:self.n_timebins]
+        chirp_feats_pad = chirp_feats_pad[:self.n_timebins]
+
         filename = path.stem
 
         # Apply z-score normalization
@@ -151,7 +192,7 @@ class SpectogramDataset(Dataset):
 
         spec = spec.unsqueeze(0)
 
-        return spec, chirp_intervals, chirp_labels_pad, N, filename
+        return spec, chirp_intervals, chirp_labels_pad, chirp_feats_pad, N, filename
 
     def __len__(self):
         return len(self.file_dirs)

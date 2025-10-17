@@ -369,6 +369,7 @@ def _save_outputs_pt_or_npz(
     chirp_intervals: np.ndarray,
     labels: np.ndarray,
     chirp_labels: np.ndarray,
+    chirp_feats: np.ndarray,
 ) -> None:
     if fmt == "pt":
         import torch
@@ -380,12 +381,48 @@ def _save_outputs_pt_or_npz(
                 "chirp_intervals": torch.from_numpy(chirp_intervals),
                 "labels": torch.from_numpy(labels),
                 "chirp_labels": torch.from_numpy(chirp_labels),
+                "chirp_feats": torch.from_numpy(chirp_feats),
             },
             out,
         )
     else:
         out = dst_dir / (stem + ".npz")
-        np.savez(out, s=S, chirp_intervals=chirp_intervals, labels=labels, chirp_labels=chirp_labels)
+        np.savez(out, s=S, chirp_intervals=chirp_intervals, labels=labels, chirp_labels=chirp_labels, chirp_feats=chirp_feats)
+
+
+def _extract_additional_features(fp: Path, chirp_intervals: np.ndarray, step: int, actual_sr: int) -> np.ndarray:
+    """Return (N,2,6) tensor of x,y,z,call,song,cage_noise for each chirp and side."""
+    try:
+        from additional_data import load_additional_data
+        add_data = load_additional_data(fp.name)
+    except Exception:
+        add_data = None
+
+    N = int(chirp_intervals.shape[0]) if chirp_intervals is not None else 0
+    extra_feats = np.full((N, 2, 6), np.nan, dtype=np.float32)
+
+    if N > 0 and add_data is not None:
+        sec_per_frame = step / float(actual_sr)
+        for i in range(N):
+            cs, ce = int(chirp_intervals[i, 0]), int(chirp_intervals[i, 1])
+            mid_t = ((cs + ce) * 0.5) * sec_per_frame
+            for side in (0, 1):
+                row = add_data.row_for_time_and_side(mid_t, side)
+                if row is None:
+                    continue
+                vals = [
+                    row.get("x", np.nan),
+                    row.get("y", np.nan),
+                    row.get("z", np.nan),
+                    row.get("call", np.nan),
+                    row.get("song", np.nan),
+                    row.get("cage_noise", np.nan),
+                ]
+                try:
+                    extra_feats[i, side, :] = np.asarray(vals, dtype=np.float32)
+                except Exception:
+                    pass
+    return extra_feats
 
 
 def _process_core(
@@ -442,6 +479,8 @@ def _process_core(
         if S.shape[1] < min_timebins:
             return {"file": str(fp), "skipped": True}
 
+        # Compute per‑chirp features from additional_data
+        chirp_feats = _extract_additional_features(fp, chirp_intervals, step, actual_sr)
         # labels identical to before
         labels = np.zeros(S.shape[1], dtype=np.int32)
         for lab, tb_on, tb_off in lab_map.get(fp.stem, []):
@@ -453,7 +492,7 @@ def _process_core(
         file_stats = {"file": Path(fp).stem, "path": str(fp), **stats}
 
         # ─── save outputs ────────────────────────────────────────────
-        _save_outputs_pt_or_npz(fmt, dst_dir, fp.stem, S, chirp_intervals, labels, chrip_labels)
+        _save_outputs_pt_or_npz(fmt, dst_dir, fp.stem, S, chirp_intervals, labels, chrip_labels, chirp_feats)
 
         # free memory fast (local scope GC will handle)
         return file_stats

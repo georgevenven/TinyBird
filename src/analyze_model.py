@@ -225,7 +225,7 @@ def save_reconstruction(
 
 
 def process_file(model, dataset, index, device):
-    x, x_i, x_l, N, filename = dataset[index]
+    x, x_i, x_l, x_f, N, filename = dataset[index]
 
     x = x.unsqueeze(0).float().to(device)
     x_i = x_i.unsqueeze(0).to(device)
@@ -238,10 +238,17 @@ def process_file(model, dataset, index, device):
     else:
         x_l = torch.as_tensor(x_l)[: x_i.shape[1]]
 
+    # Ensure chirp_feats align in length with chirp boundaries (trim trailing padding)
+    if isinstance(x_f, torch.Tensor):
+        x_f = x_f[: x_i.shape[1]]
+    else:
+        x_f = torch.as_tensor(x_f)[: x_i.shape[1]]
+
     print(f"  Filename: {filename}")
     print(f"  Spectrogram shape: {x.shape}")
     print(f"  Chirp intervals shape: {x_i.shape}")
     print(f"  Chirp labels shape: {x_l.shape}")
+    print(f"  Chirp feats shape: {x_f.shape}")
     print(f"  Number of valid chirps: {N.item()}")
 
     def compute_losses(x, x_i, N, isolate_block=False):
@@ -264,7 +271,7 @@ def process_file(model, dataset, index, device):
     all_losses = compute_losses(x, x_i, N, isolate_block=False)
     isolated_losses = compute_losses(x, x_i, N, isolate_block=True)
 
-    return isolated_losses, all_losses, filename, x_l
+    return isolated_losses, all_losses, filename, x_l, x_f
 
 
 def main():
@@ -354,7 +361,7 @@ def main():
     # === Default: loss/plotting mode ===
     def process_and_plot(i: int):
         print(f"\nLoading sample at index {i}")
-        isolated_losses, all_losses, filename, x_l = process_file(model, dataset, i, device)
+        isolated_losses, all_losses, filename, x_l, x_f = process_file(model, dataset, i, device)
 
         iso_np = isolated_losses.detach().cpu().numpy()
         all_np = all_losses.detach().cpu().numpy()
@@ -366,7 +373,7 @@ def main():
         for u, c in zip(uniq.tolist(), counts.tolist()):
             print(f"  label {u}: {c}")
 
-        def plot_heatmap(loss_mat_np, tag: str, labels_np):
+        def plot_heatmap(loss_mat_np, tag: str, labels_np, x_f_np):
             fig_hm, ax_hm = plt.subplots(figsize=(12, 8))
             loss_ma = np.ma.masked_invalid(loss_mat_np)
             # Colormap: low loss = green, high loss = red; NaNs = black
@@ -458,6 +465,41 @@ def main():
             ax_strip_y.set_ylim(ax_hm.get_ylim())
             ax_strip_y.axis('off')
 
+            # === Additional strips: 6 variables per bird (below & left), perfectly aligned ===
+            # x_f_np has shape (N, 2, 6)
+            if isinstance(x_f_np, torch.Tensor):
+                x_f_np = x_f_np.detach().cpu().numpy()
+
+            var_names = ["x", "y", "z", "call", "song", "cage_noise"]
+
+            def _imshow_bottom_strip(values_1d, label_text):
+                ax_b = divider.append_axes("bottom", size="3%", pad=0.12, sharex=ax_hm)
+                strip = np.ma.masked_invalid(values_1d[np.newaxis, :])
+                ax_b.imshow(strip, aspect='auto', cmap=plt.get_cmap('viridis'), interpolation='nearest', origin='lower')
+                ax_b.set_xlim(ax_hm.get_xlim())
+                ax_b.axis('off')
+                ax_b.text(0.0, 0.5, label_text, transform=ax_b.transAxes, fontsize=6, ha='left', va='center')
+
+            def _imshow_left_strip(values_1d, label_text):
+                ax_lf = divider.append_axes("left", size="3%", pad=0.18, sharey=ax_hm)
+                strip = np.ma.masked_invalid(values_1d[:, np.newaxis])
+                ax_lf.imshow(strip, aspect='auto', cmap=plt.get_cmap('viridis'), interpolation='nearest', origin='lower')
+                ax_lf.set_ylim(ax_hm.get_ylim())
+                ax_lf.axis('off')
+                ax_lf.text(0.5, 1.0, label_text, transform=ax_lf.transAxes, fontsize=6, ha='center', va='top', rotation=90)
+
+            # Determine extents matching heatmap dimensions
+            Hh, Wh = loss_mat_np.shape
+
+            # Create strips for each bird and variable (order: L bird0 vars, then R bird1 vars)
+            for bird_idx, bird_tag in enumerate(["L", "R"]):
+                for vi, vname in enumerate(var_names):
+                    vec = x_f_np[:, bird_idx, vi].astype(float)
+                    # Bottom strips align with width (columns)
+                    _imshow_bottom_strip(vec[:Wh], f"{bird_tag} {vname}")
+                    # Left strips align with height (rows)
+                    _imshow_left_strip(vec[:Hh], f"{bird_tag} {vname}")
+
             plt.tight_layout()
             # Add a small extra margin to leave room for axis labels and ticks
             plt.subplots_adjust(bottom=0.12, left=0.10)
@@ -467,8 +509,8 @@ def main():
             print(f"Saved: {loss_hm_out}")
 
         # Heatmaps use the full sparse matrices (with chirp label strips)
-        plot_heatmap(iso_np, tag='isolated', labels_np=labels_np)
-        plot_heatmap(all_np, tag='allblocks', labels_np=labels_np)
+        plot_heatmap(iso_np, tag='isolated', labels_np=labels_np, x_f_np=x_f)
+        plot_heatmap(all_np, tag='allblocks', labels_np=labels_np, x_f_np=x_f)
 
     # If a single index is specified, only process that file; otherwise process all
     if args.index >= 0:
