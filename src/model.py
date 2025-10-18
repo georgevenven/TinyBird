@@ -139,7 +139,9 @@ class TinyBird(nn.Module):
 
         return x_new, xi_new
 
-    def sample_data_seq_length(self, x: torch.Tensor, xi: torch.Tensor, N: torch.Tensor, seq_len: int, mblock: int = -1):
+    def sample_data_seq_length(
+        self, x: torch.Tensor, xi: torch.Tensor, N: torch.Tensor, seq_len: int, mblock: int = -1
+    ):
         """
         Sample random or fixed contiguous window of data, with the last block masked.
 
@@ -148,17 +150,19 @@ class TinyBird(nn.Module):
             xi: Chirp boundaries (B, N_max, 2)
             N: Valid chirp counts per item (B,)
             seq_len: Number of adjacent columns to sample
-            mblock: masked block index (or -1 for random) 
+            mblock: masked block index (or -1 for random)
 
         Returns:
             x_out: Windowed spectrograms (B, C, H, seq_len)
             xi_out: Remapped boundaries in window coordinates (B, n_blocks, 2)
         """
-        
+
         B, C, H, W = x.shape
         device = x.device
-        N = N.view(B, 1)
-        
+
+        N_idx = (N.view(-1).long() - 1).clamp_min(0)  # (B,)
+        last_ends = xi[torch.arange(B, device=xi.device), N_idx, 1]  # (B,)
+        seq_len = min(int(last_ends.max().item()), int(seq_len))
 
         # --- choose masked block per item ---
         if mblock >= 0:
@@ -175,12 +179,12 @@ class TinyBird(nn.Module):
             # Pick a (possibly different) valid block for each item with end >= seq_len
             mb_idx = torch.zeros(B, dtype=torch.long, device=device)
             for b in range(B):
-                n_b = int(N[b, 0].item())
+                n_b = int(N[b].item())
                 ends_b = xi[b, :n_b, 1].to(dtype=torch.long)
                 candidates = torch.nonzero(ends_b >= seq_len, as_tuple=False).squeeze(1)
                 assert candidates.numel() > 0, (
                     f"no valid mask block with end>=seq_len for item {b}; seq_len={seq_len},"
-                    f" max_end={int(ends_b.max().item()) if n_b>0 else -1}"
+                    f" max_end={int(ends_b.max().item()) if n_b > 0 else -1}"
                 )
                 # choose one candidate uniformly at random
                 r = int(torch.randint(low=0, high=candidates.numel(), size=(1,), device=device).item())
@@ -190,24 +194,27 @@ class TinyBird(nn.Module):
         x_out = torch.zeros(B, C, H, seq_len, device=device, dtype=x.dtype)
         mb_start_idx = torch.zeros(B, dtype=torch.long, device=device)
         for b in range(B):
-            end_col   = xi[b, mb_idx[b], 1]
+            end_col = xi[b, mb_idx[b], 1]
             start_col = max(0, end_col - seq_len)
-            x_out[b, :, :, :] = x[b, :, :, start_col:end_col ]
-            blocks = torch.nonzero( (xi[b,:,0]>=start_col) & (xi[b,:,1]<=end_col)  , as_tuple=False).squeeze(1)
-            mb_start_idx[b] = blocks[0] 
- 
+            x_out[b, :, :, :] = x[b, :, :, start_col:end_col]
+            blocks = torch.nonzero((xi[b, :, 0] >= start_col) & (xi[b, :, 1] <= end_col), as_tuple=False).squeeze(1)
+            mb_start_idx[b] = blocks[0]
+
         n_blocks = (mb_idx - mb_start_idx).clamp(min=0).min().item() + 1
 
         xi_out = torch.zeros(B, n_blocks, 2, device=device, dtype=xi.dtype)
         for b in range(B):
-            xi_out[b] = xi[b,  mb_idx[b].item() - n_blocks : mb_idx[b].item() + 1, :].clone()  # remap the boundaries to the new window
+            xi_out[b] = xi[
+                b, mb_idx[b].item() - n_blocks : mb_idx[b].item() + 1, :
+            ].clone()  # remap the boundaries to the new window
             offset = xi_out[b, -1, 1].item() - seq_len
             xi_out[b, :, :] = xi_out[b, :, :] - offset
 
-        assert (xi_out[:, -1, 1] == seq_len).all().item(), f"xi_out[b,:,1] should always be seq_len for all items in the batch. got {xi_out[:, :, 1]}"
+        assert (xi_out[:, -1, 1] == seq_len).all().item(), (
+            f"xi_out[b,:,1] should always be seq_len for all items in the batch. got {xi_out[:, :, 1]}"
+        )
 
         return x_out, xi_out
-
 
     def sample_data(self, x: torch.Tensor, xi: torch.Tensor, N: torch.Tensor, n_blocks: int, start: int = -1):
         """
@@ -301,10 +308,10 @@ class TinyBird(nn.Module):
         # separators are 1 column wide, consistent with compactify_data()
         b_ix = torch.arange(B, device=device)
         starts = xi[b_ix.unsqueeze(1), torch.tensor(valid, device=device), 0].long()  # (B, K)
-        ends   = xi[b_ix.unsqueeze(1), torch.tensor(valid, device=device), 1].long()  # (B, K)
-        widths = (ends - starts).clamp_min(0)                                         # (B, K)
-        widths_sum = widths.sum(dim=1)                                                # (B,)
-        out_widths = widths_sum + (K - 1)                                             # (B,)
+        ends = xi[b_ix.unsqueeze(1), torch.tensor(valid, device=device), 1].long()  # (B, K)
+        widths = (ends - starts).clamp_min(0)  # (B, K)
+        widths_sum = widths.sum(dim=1)  # (B,)
+        out_widths = widths_sum + (K - 1)  # (B,)
         max_width = int(out_widths.max().item())
 
         x_out = torch.zeros(B, C, H, max_width, device=device, dtype=x.dtype)
@@ -315,7 +322,7 @@ class TinyBird(nn.Module):
             for k, idx in enumerate(valid):
                 s0 = int(xi[b, idx, 0].item())
                 e0 = int(xi[b, idx, 1].item())
-                w  = max(0, e0 - s0)
+                w = max(0, e0 - s0)
                 if w > 0 and pos + w <= max_width:
                     # Copy all channels, not just channel 0
                     x_out[b, :, :, pos : pos + w] = x[b, :, :, s0:e0]
@@ -351,7 +358,7 @@ class TinyBird(nn.Module):
             xi: Chirp boundaries (B, N, 2)
             hw: Spatial dimensions (H, W)
             masked_blocks: Number of chirp blocks to mask (or 0)
-            mblock: Index of chirp block to mask (or -1) 
+            mblock: Index of chirp block to mask (or -1)
             iblock: Index of chirp block to isolate (or -1) (mblock and iblock are exclusive, and mblock must be set if iblock is set)
         Returns:
             Boolean mask (B, H*W) where True = masked patches
@@ -364,7 +371,7 @@ class TinyBird(nn.Module):
 
         if len(mblock) > 0:
             assert all((0 <= i < N) for i in mblock), f"invalid mblock indices N={N}, got {mblock}"
-            masked_blocks = 0# disable masked_blocks 
+            masked_blocks = 0  # disable masked_blocks
         else:
             # if mblock is not set, ensure masked_blocks is valid
             assert masked_blocks > 0, f"masked_blocks must be greater than 0, got {masked_blocks}"
@@ -376,7 +383,7 @@ class TinyBird(nn.Module):
             assert len(mblock) > 0, f"mblock len={len(mblock)}. mblock must be set if iblock is set"
 
         starts = xi[:, :, 0].to(torch.long).clamp(min=0, max=W)  # (B, N)
-        ends   = xi[:, :, 1].to(torch.long).clamp(min=0, max=W)  # (B, N)
+        ends = xi[:, :, 1].to(torch.long).clamp(min=0, max=W)  # (B, N)
         widths = (ends - starts).clamp(min=0)  # (B, N)
 
         # get n_block random blocks between 0 and N ensure there are no duplicates
@@ -441,7 +448,7 @@ class TinyBird(nn.Module):
 
             column_mask_args:
             masked_blocks: Number of chirp blocks to randomly mask (or 0)
-            mblock: Index of chirp block to mask (or -1) 
+            mblock: Index of chirp block to mask (or -1)
             iblock: Index of chirp block to isolate (or -1) (mblock and iblock are exclusive, and mblock must be set if iblock is set)
 
         Returns:
@@ -468,7 +475,7 @@ class TinyBird(nn.Module):
         bool_mask = self.build_column_mask(xi, hw=(H, W), **column_mask_args)
         # bool_mask : (B, H*W), True = masked (column-wise across H) bool_mask are exclusive
 
-        z_keep, idx_restore = self.mask(z, bool_mask )  # ensure the encoder never sees masked tokens
+        z_keep, idx_restore = self.mask(z, bool_mask)  # ensure the encoder never sees masked tokens
         # z_keep: Kept tokens (B, keep_count, D)
         # idx_restore: Permutation indices to restore original order (B, T)
 
@@ -487,12 +494,7 @@ class TinyBird(nn.Module):
         z = self.apply_position_encoding(z)  # (B, T, D_enc)
         return self.encoder(z)  # (B, T, D_enc)
 
-    def forward_decoder(
-        self,
-        h: torch.Tensor,
-        idx_restore: torch.Tensor,
-        T: int
-    ):
+    def forward_decoder(self, h: torch.Tensor, idx_restore: torch.Tensor, T: int):
         """
         Project encoder outputs to decoder width → insert learned mask tokens → unshuffle back to the
         original token order → add decoder positional encodings → run the Transformer decoder → predict
@@ -536,9 +538,11 @@ class TinyBird(nn.Module):
         y_full = torch.cat([y, mask_tokens], dim=1)  # kept-first layout
         y_full = torch.gather(y_full, 1, idx_restore.unsqueeze(-1).expand(B, T, D_dec))
 
-        pos_dec = self.encoder_to_decoder(self.pos_enc[:, :T, :])  # (1, T, D_dec) decoder pos-encs derived by projecting encoder pos-encs
+        pos_dec = self.encoder_to_decoder(
+            self.pos_enc[:, :T, :]
+        )  # (1, T, D_dec) decoder pos-encs derived by projecting encoder pos-encs
 
-        y_full = y_full + pos_dec 
+        y_full = y_full + pos_dec
 
         d = self.decoder(y_full)  # (B, T, D_dec)
         pred = self.decoder_to_pixel(d)  # Final per-token patch prediction: (B, T, P). P is pixels per patch
@@ -647,7 +651,7 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(
-        f"[TinyBird test] device={device}, mels={config["mels"]}, timebins={config["num_timebins"]}, "
+        f"[TinyBird test] device={device}, mels={config['mels']}, timebins={config['num_timebins']}, "
         f"patch={config['patch_size']}, max_seq={config['max_seq']}"
     )
 
