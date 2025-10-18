@@ -159,10 +159,12 @@ class TinyBird(nn.Module):
 
         B, C, H, W = x.shape
         device = x.device
-
+        print("--------------------------------")
         N_idx = (N.view(-1).long() - 1).clamp_min(0)  # (B,)
         last_ends = xi[torch.arange(B, device=xi.device), N_idx, 1]  # (B,)
+        print(f"before seq_len: {seq_len}")
         seq_len = min(int(last_ends.max().item()), int(seq_len))
+        print(f"seq_len: {seq_len}")
 
         # --- choose masked block per item ---
         if mblock >= 0:
