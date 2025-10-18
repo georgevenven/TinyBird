@@ -71,9 +71,7 @@ def try_one_step(
 
     try:
         with amp_autocast_if(use_amp):
-            h, idx_restore, bool_mask, bool_pad, T = model.forward_encoder(
-                x, xi, frac=float(config.get("mask_p", 0.75))
-            )
+            h, idx_restore, bool_mask, bool_pad, T = model.forward_encoder(x, xi, frac=float(config.get("mask_p", 0.1)))
             pred = model.forward_decoder(h, idx_restore, T, bool_pad=bool_pad)
             loss = model.loss_mse(x, pred, bool_mask)
 

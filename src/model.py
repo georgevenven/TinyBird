@@ -139,9 +139,75 @@ class TinyBird(nn.Module):
 
         return x_new, xi_new
 
+    def sample_data_seq_length(self, x: torch.Tensor, xi: torch.Tensor, N: torch.Tensor, seq_len: int, mblock: int = -1):
+        """
+        Sample random or fixed contiguous window of data, with the last block masked.
 
+        Args:
+            x: Spectrograms (B, C, H, W)
+            xi: Chirp boundaries (B, N_max, 2)
+            N: Valid chirp counts per item (B,)
+            seq_len: Number of adjacent columns to sample
+            mblock: masked block index (or -1 for random) 
 
+        Returns:
+            x_out: Windowed spectrograms (B, C, H, seq_len)
+            xi_out: Remapped boundaries in window coordinates (B, n_blocks, 2)
+        """
         
+        B, C, H, W = x.shape
+        device = x.device
+        N = N.view(B, 1)
+        
+
+        # --- choose masked block per item ---
+        if mblock >= 0:
+            # Ensure mblock is valid across batch and its end >= seq_len (so we can right-align window)
+            n_min = int(N.min().item())
+            assert 0 <= mblock < n_min, f"mblock index out of range for min(N)={n_min}: {mblock}"
+            ends = xi[:, mblock, 1].to(dtype=torch.long)
+            assert bool((ends >= seq_len).all().item()), (
+                f"masked block end must be >= seq_len for all items; seq_len={seq_len},"
+                f" min_end={int(ends.min().item())}"
+            )
+            mb_idx = torch.full((B,), int(mblock), device=device, dtype=torch.long)
+        else:
+            # Pick a (possibly different) valid block for each item with end >= seq_len
+            mb_idx = torch.zeros(B, dtype=torch.long, device=device)
+            for b in range(B):
+                n_b = int(N[b, 0].item())
+                ends_b = xi[b, :n_b, 1].to(dtype=torch.long)
+                candidates = torch.nonzero(ends_b >= seq_len, as_tuple=False).squeeze(1)
+                assert candidates.numel() > 0, (
+                    f"no valid mask block with end>=seq_len for item {b}; seq_len={seq_len},"
+                    f" max_end={int(ends_b.max().item()) if n_b>0 else -1}"
+                )
+                # choose one candidate uniformly at random
+                r = int(torch.randint(low=0, high=candidates.numel(), size=(1,), device=device).item())
+                mb_idx[b] = candidates[r]
+
+        # --- window the spectrogram x_out to the desired seq_len. Ensure that the window ends on the last column of the masked block. ---
+        x_out = torch.zeros(B, C, H, seq_len, device=device, dtype=x.dtype)
+        mb_start_idx = torch.zeros(B, dtype=torch.long, device=device)
+        for b in range(B):
+            end_col   = xi[b, mb_idx[b], 1]
+            start_col = max(0, end_col - seq_len)
+            x_out[b, :, :, :] = x[b, :, :, start_col:end_col ]
+            blocks = torch.nonzero( (xi[b,:,0]>=start_col) & (xi[b,:,1]<=end_col)  , as_tuple=False).squeeze(1)
+            mb_start_idx[b] = blocks[0] 
+ 
+        n_blocks = (mb_idx - mb_start_idx).clamp(min=0).min().item() + 1
+
+        xi_out = torch.zeros(B, n_blocks, 2, device=device, dtype=xi.dtype)
+        for b in range(B):
+            xi_out[b] = xi[b,  mb_idx[b].item() - n_blocks : mb_idx[b].item() + 1, :].clone()  # remap the boundaries to the new window
+            offset = xi_out[b, -1, 1].item() - seq_len
+            xi_out[b, :, :] = xi_out[b, :, :] - offset
+
+        assert (xi_out[:, -1, 1] == seq_len).all().item(), f"xi_out[b,:,1] should always be seq_len for all items in the batch. got {xi_out[:, :, 1]}"
+
+        return x_out, xi_out
+
 
     def sample_data(self, x: torch.Tensor, xi: torch.Tensor, N: torch.Tensor, n_blocks: int, start: int = -1):
         """
