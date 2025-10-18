@@ -330,18 +330,16 @@ class Trainer:
         N = N.to(self.device, non_blocking=True)  # (B, 1) # number of chirp intervals
 
         mblock, iblock, frac, n_blocks = [], [], 0.0, 11
-        # if random.random() < 0.75:
-        mblock = [n_blocks - 1]
-        iblock = []
-        # start = random.randint(3, mblock[0] - 1)
-        # if random.random() < 0.25:
-        #     iblock = [start]
-        # else:
-        #     iblock = list(range(start, mblock[0]))
-        # else:
-        #     frac = 0.5
-
-        attend_to_padded = True  # True if random.random() < 0.25 else False
+        # # if random.random() < 0.75:
+        # mblock = [n_blocks - 1]
+        # iblock = []
+        # # start = random.randint(3, mblock[0] - 1)
+        # # if random.random() < 0.25:
+        # #     iblock = [start]
+        # # else:
+        # #     iblock = list(range(start, mblock[0]))
+        # # else:
+        # #     frac = 0.5
 
         if is_training:
             self.tinybird.train()
@@ -355,21 +353,22 @@ class Trainer:
                 if self.use_amp:
                     with torch.amp.autocast('cuda'):
                         x, x_i = self.tinybird.compactify_data(x, x_i, N)
-                        x, x_i = self.tinybird.sample_data(x, x_i, N, n_blocks=n_blocks)
+
+                        x, x_i = self.tinybird.sample_data_seq_length(x, x_i, N, seq_len=8000)
+
+                        mblock = [x_i.shape[1] - 1]
+                        # x, x_i = self.tinybird.sample_data(x, x_i, N, n_blocks=n_blocks)
 
                         # if x.shape[-1] > 3000:
                         #     masked_blocks, frac = 0, 0.5
 
                         log_batch_shapes(
-                            "train_batch", step_num, x, x_i, N, n_blocks, frac, patch_size=self.config["patch_size"]
+                            "train_batch", step_num, x, x_i, N, x_i.shape[1], frac, patch_size=self.config["patch_size"]
                         )
-                        print(f"mblock: {mblock}, iblock: {iblock}, frac: {frac}")
-                        h, idx_restore, bool_mask, bool_pad, T = self.tinybird.forward_encoder(
+                        h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(
                             x, x_i, frac=frac, mblock=mblock, iblock=iblock
                         )
-                        pred = self.tinybird.forward_decoder(
-                            h, idx_restore, T, bool_pad=bool_pad, attend_to_padded=attend_to_padded
-                        )
+                        pred = self.tinybird.forward_decoder(h, idx_restore, T)
                         loss = self.tinybird.loss_mse(x, pred, bool_mask)
                 else:
                     x, x_i = self.tinybird.compactify_data(x, x_i, N)
@@ -381,10 +380,10 @@ class Trainer:
                     log_batch_shapes(
                         "train_batch", step_num, x, x_i, N, n_blocks, frac, patch_size=self.config["patch_size"]
                     )
-                    h, idx_restore, bool_mask, bool_pad, T = self.tinybird.forward_encoder(
+                    h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(
                         x, x_i, masked_blocks=masked_blocks, frac=frac
                     )
-                    pred = self.tinybird.forward_decoder(h, idx_restore, T, bool_pad=bool_pad)
+                    pred = self.tinybird.forward_decoder(h, idx_restore, T)
                     loss = self.tinybird.loss_mse(x, pred, bool_mask)
 
         # Backward pass only for training
@@ -456,13 +455,13 @@ class Trainer:
                 with torch.amp.autocast('cuda'):
                     x, x_i = self.tinybird.compactify_data(x, x_i, N)
                     x, x_i = self.tinybird.sample_data(x, x_i, N, n_blocks=3)
-                    h, idx_restore, bool_mask, bool_pad, T = self.tinybird.forward_encoder(x, x_i, frac=0.5)
-                    pred = self.tinybird.forward_decoder(h, idx_restore, T, bool_pad=bool_pad)
+                    h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x, x_i, frac=0.5)
+                    pred = self.tinybird.forward_decoder(h, idx_restore, T)
             else:
                 x, x_i = self.tinybird.compactify_data(x, x_i, N)
                 x, x_i = self.tinybird.sample_data(x, x_i, N, n_blocks=3)
-                h, idx_restore, bool_mask, bool_pad, T = self.tinybird.forward_encoder(x, x_i, frac=0.5)
-                pred = self.tinybird.forward_decoder(h, idx_restore, T, bool_pad=bool_pad)
+                h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x, x_i, frac=0.5)
+                pred = self.tinybird.forward_decoder(h, idx_restore, T)
 
         # Depatchify prediction to get back (B, 1, H, W) format
         def depatchify(pred_patches):
@@ -866,12 +865,12 @@ if __name__ == "__main__":
         config['is_continuing'] = False
 
     # Calculate seq_len from num_timebins and patch dimensions
-    assert (
-        config["num_timebins"] % config["patch_width"] == 0
-    ), f"num_timebins ({config['num_timebins']}) must be divisible by patch_width ({config['patch_width']})"
-    assert (
-        config["mels"] % config["patch_height"] == 0
-    ), f"mels ({config['mels']}) must be divisible by patch_height ({config['patch_height']})"
+    assert config["num_timebins"] % config["patch_width"] == 0, (
+        f"num_timebins ({config['num_timebins']}) must be divisible by patch_width ({config['patch_width']})"
+    )
+    assert config["mels"] % config["patch_height"] == 0, (
+        f"mels ({config['mels']}) must be divisible by patch_height ({config['patch_height']})"
+    )
 
     # Configure patch size and max sequence length for model
     config["patch_size"] = (config["patch_height"], config["patch_width"])

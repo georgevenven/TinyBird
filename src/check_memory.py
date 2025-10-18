@@ -59,7 +59,7 @@ def try_one_step(
     B = batch_size
 
     # Synthetic batch that exercises the same shapes your code expects
-    # xi: 1 block covering the entire window (so masking/pad paths run)
+    # xi: 1 block covering the entire window (so masking paths run)
     x = torch.randn(B, 1, H, W, device=device, dtype=torch.float32)
     xi = torch.tensor([[[0, W]]], device=device, dtype=torch.long).expand(B, 1, 2).contiguous()
     # N unused in probe (forward_encoder signature doesn’t need it)
@@ -71,8 +71,8 @@ def try_one_step(
 
     try:
         with amp_autocast_if(use_amp):
-            h, idx_restore, bool_mask, bool_pad, T = model.forward_encoder(x, xi, frac=float(config.get("mask_p", 0.1)))
-            pred = model.forward_decoder(h, idx_restore, T, bool_pad=bool_pad)
+            h, idx_restore, bool_mask, T = model.forward_encoder(x, xi, frac=float(config.get("mask_p", 0.1)))
+            pred = model.forward_decoder(h, idx_restore, T)
             loss = model.loss_mse(x, pred, bool_mask)
 
         if use_amp:
@@ -82,7 +82,7 @@ def try_one_step(
             loss.backward()
 
         # No optimizer step needed — backward is the heavy lift
-        del x, xi, h, idx_restore, bool_mask, bool_pad, pred, loss
+        del x, xi, h, idx_restore, bool_mask, pred, loss
         torch.cuda.synchronize(device)
         peak = torch.cuda.max_memory_allocated(device)
         return True, int(peak)

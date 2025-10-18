@@ -382,7 +382,7 @@ class TinyBird(nn.Module):
             assert len(mblock) > 0, f"mblock len={len(mblock)}. mblock must be set if iblock is set"
 
         starts = xi[:, :, 0].to(torch.long).clamp(min=0, max=W)  # (B, N)
-        ends = xi[:, :, 1].to(torch.long).clamp(min=0, max=W)  # (B, N)
+        ends   = xi[:, :, 1].to(torch.long).clamp(min=0, max=W)  # (B, N)
         widths = (ends - starts).clamp(min=0)  # (B, N)
 
         # get n_block random blocks between 0 and N ensure there are no duplicates
@@ -398,55 +398,14 @@ class TinyBird(nn.Module):
         else:  # frac > 0
             m_w = min(0, min(W - 1, int(round(float(frac) * W))))  # width of the mask, no block selected
 
-        pad2d = torch.zeros(B, W, dtype=torch.bool, device=device)  # pad2d is boolean padding of the spectrogram
         mask2d = torch.zeros(B, W, dtype=torch.bool, device=device)  # mask2d is a boolean mask of the spectrogram
 
         for b in range(B):
-            st_i = [int(v) for v in starts[b].tolist()]
             end_i = [int(v) for v in ends[b].tolist()]
-
-            if len(iblock) > 0:
-                pad2d[b, 0 : min(st_i)] = True  # pad partial blocks if iblock is not set
-                pad2d[b, max(end_i) : W] = True  # pad partial blocks if iblock is not set
-
-            # ensure that "remaining" can't include the isolated blocks, as this is where information comes from.
-            for ib in iblock:
-                pad2d[b, st_i[ib] : end_i[ib]] = True  # this will be reset to False later
-
-            # Specified mask block will not be padded, it will be masked even if iblock was set
             for blk in mask_blocks:
                 mask2d[b, end_i[blk] - m_w : end_i[blk]] = True
 
-            # randomly select remaining columns to keep mask width constant for each item in the batch
-            # remaining = ((~mask2d[b]) & (~pad2d[b])).nonzero(as_tuple=False).squeeze(1)
-            # remaining = remaining[torch.randperm(remaining.numel(), device=device)[: m_w - int(mask2d[b].sum().item())]]
-            # mask2d[b, remaining] = True
-
-            if len(iblock) > 0:
-                for blk in range(N):
-                    if (blk not in iblock) and (blk not in mask_blocks):
-                        if st_i[blk] - 1 > 0:
-                            pad2d[b, st_i[blk] - 1] = True
-                        pad2d[b, st_i[blk] : end_i[blk]] = True  # not in an iblock or a mask_block so pad
-                    else:
-                        pad2d[b, st_i[blk] : end_i[blk]] = False  # in an iblock or a mask_block so don't pad
-
-            # pad2d[b, remaining] = False
-
-        # print("mask_blocks", mask_blocks, "iblock", iblock)
-        # print("pad2d", pad2d[0, :])
-        # print("mask2d", mask2d[0, :])
-        # assert False, "breaking..."
-
-        pad2d = (
-            pad2d.unsqueeze(1).expand(B, H, W).flatten(1, 2).to(device=device, dtype=torch.bool)
-        )  # (B,W) -> (B,1,W)->(B, H, W) -> (B, H*W)
-        mask2d = (
-            mask2d.unsqueeze(1).expand(-1, H, -1).flatten(1, 2).to(device=device, dtype=torch.bool)
-        )  # (B,W) -> (B,1,W)->(B, H, W) -> (B, H*W)
-        assert not (pad2d & mask2d).any(), "pad2d and mask2d overlap (both True at some positions)"
-
-        return pad2d, mask2d
+        return mask2d
 
     def mask(self, z: torch.Tensor, bool_mask: torch.Tensor):
         """
@@ -515,18 +474,15 @@ class TinyBird(nn.Module):
         z, H, W = self.tokenize_spectrogram(x)  # (B, T, D_enc), H, W
         z = self.apply_position_encoding(z)  # (B, T, D_enc)
 
-        bool_pad, bool_mask = self.build_column_mask(xi, hw=(H, W), **column_mask_args)
-        # bool_pad  : (B, H*W), True = padded (column-wise across H)
-        # bool_mask : (B, H*W), True = masked (column-wise across H) pad_mask & bool_mask are exclusive
+        bool_mask = self.build_column_mask(xi, hw=(H, W), **column_mask_args)
+        # bool_mask : (B, H*W), True = masked (column-wise across H) bool_mask are exclusive
 
-        z_keep, idx_restore = self.mask(
-            z, (bool_pad | bool_mask)
-        )  # ensure the encoder never sees padded or masked tokens
+        z_keep, idx_restore = self.mask(z, bool_mask )  # ensure the encoder never sees masked tokens
         # z_keep: Kept tokens (B, keep_count, D)
         # idx_restore: Permutation indices to restore original order (B, T)
 
         h = self.encoder(z_keep)  # (B, keep, D_enc)
-        return h, idx_restore, bool_mask, bool_pad, H * W  # (B, keep, D_enc), (B, T), (B, T), (B,T), T
+        return h, idx_restore, bool_mask, H * W  # (B, keep, D_enc), (B, T), (B, T), (B,T), T
 
     def forward_encoder_inference(self, x: torch.Tensor):
         """
@@ -544,9 +500,7 @@ class TinyBird(nn.Module):
         self,
         h: torch.Tensor,
         idx_restore: torch.Tensor,
-        T: int,
-        bool_pad: torch.Tensor = None,
-        attend_to_padded: bool = True,
+        T: int
     ):
         """
         Project encoder outputs to decoder width → insert learned mask tokens → unshuffle back to the
@@ -558,7 +512,6 @@ class TinyBird(nn.Module):
             idx_restore: (B, T) permutation indices that map the kept-first layout back to the original
                          token order (kept ∪ masked). Produced by `mask(...)` in the encoder path.
             T:           int total number of tokens in the **full** sequence (kept + masked) after patching.
-            bool_pad:    (B, T) boolean mask of padded tokens.
 
         Returns:
             pred:        (B, T, P) per-token predictions, where P = patch_height * patch_width.
@@ -592,25 +545,16 @@ class TinyBird(nn.Module):
         y_full = torch.cat([y, mask_tokens], dim=1)  # kept-first layout
         y_full = torch.gather(y_full, 1, idx_restore.unsqueeze(-1).expand(B, T, D_dec))
 
-        # 3) Replace padded positions with pad token.
-        if bool_pad is not None:
-            y_full = torch.where(bool_pad.unsqueeze(-1), self.pad_token.expand(B, T, D_dec), y_full)
 
         pos_dec = self.encoder_to_decoder(
             self.pos_enc[:, :T, :]
         )  # (1, T, D_dec) decoder pos-encs derived by projecting encoder pos-encs
 
-        # bool_pad: (B, T) True = padded
-        y_full = y_full + pos_dec * (~bool_pad).unsqueeze(-1)
+        y_full = y_full + pos_dec 
         # y_full = y_full + pos_dec
 
-        if attend_to_padded:
-            d = self.decoder(y_full)  # (B, T, D_dec)
-        else:
-            assert (
-                bool_pad.shape == y_full.shape[:2]
-            ), f"shape mismatch bool_pad.shape={bool_pad.shape}, y_full.shape={y_full.shape[:2]}"
-            d = self.decoder(y_full, src_key_padding_mask=bool_pad)
+ 
+        d = self.decoder(y_full)  # (B, T, D_dec)
         pred = self.decoder_to_pixel(d)  # Final per-token patch prediction: (B, T, P). P is pixels per patch
         return pred
 
@@ -744,7 +688,7 @@ if __name__ == "__main__":
         x, xi = model.sample_data(x, xi, N, n_blocks=3)
         print(f"[TinyBird test] after window_data: x={tuple(x.shape)}, xi={tuple(xi.shape)}")
 
-        h, idx_restore, bool_mask, bool_pad, T = model.forward_encoder(x, xi)
+        h, idx_restore, bool_mask, T = model.forward_encoder(x, xi)
 
     print(
         f"[TinyBird test] encoder outputs:"
