@@ -323,7 +323,9 @@ class Trainer:
         if torch.cuda.is_available() and not self._mem_reported:
             torch.cuda.reset_peak_memory_stats(self.device)
 
-        spectrograms, chirp_intervals, _, N, _ = batch
+        # spec, chirp_intervals, chirp_labels_pad, chirp_feats_pad, N, filename
+        spectrograms, chirp_intervals, _, _, N, _ = batch
+
         x = spectrograms.to(self.device, non_blocking=True).float()  # (B, 1, H, W)
         x_i = chirp_intervals.to(self.device, non_blocking=True)  # (B, N, 2)
         N = N.to(self.device, non_blocking=True)  # (B, 1) # number of chirp intervals
