@@ -159,12 +159,18 @@ class TinyBird(nn.Module):
 
         B, C, H, W = x.shape
         device = x.device
-        print("--------------------------------")
-        N_idx = (N.view(-1).long() - 1).clamp_min(0)  # (B,)
-        last_ends = xi[torch.arange(B, device=xi.device), N_idx, 1]  # (B,)
-        print(f"before seq_len: {seq_len}")
-        seq_len = min(int(last_ends.max().item()), int(seq_len))
-        print(f"seq_len: {seq_len}")
+
+        Nv = N.view(-1).long()  # (B,)
+        ends = xi[:, :, 1].long()  # (B, N_max)
+
+        # mask out invalid blocks beyond each item's N
+        idx = torch.arange(ends.size(1), device=xi.device).unsqueeze(0)  # (1, N_max)
+        valid_mask = idx < Nv.unsqueeze(1)  # (B, N_max)
+        ends_valid = ends.masked_fill(~valid_mask, -1)
+
+        # per-item max end, then batch-min cap
+        max_end_per_item = ends_valid.max(dim=1).values  # (B,)
+        seq_len = min(int(seq_len), int(max_end_per_item.min().item()))
 
         # --- choose masked block per item ---
         if mblock >= 0:
@@ -181,8 +187,8 @@ class TinyBird(nn.Module):
             # Pick a (possibly different) valid block for each item with end >= seq_len
             mb_idx = torch.zeros(B, dtype=torch.long, device=device)
             for b in range(B):
-                n_b = int(N[b].item())
-                ends_b = xi[b, :n_b, 1].to(dtype=torch.long)
+                n_b = int(Nv[b].item())
+                ends_b = ends[b, :n_b]
                 candidates = torch.nonzero(ends_b >= seq_len, as_tuple=False).squeeze(1)
                 assert candidates.numel() > 0, (
                     f"no valid mask block with end>=seq_len for item {b}; seq_len={seq_len},"
