@@ -340,7 +340,6 @@ class TinyBird(nn.Module):
         xi: torch.Tensor,
         hw: (None, None),
         masked_blocks: int = -1,
-        frac: float = -1.0,
         mblock: list = [],
         iblock: list = [],
         half_mask: bool = False,
@@ -352,13 +351,11 @@ class TinyBird(nn.Module):
             xi: Chirp boundaries (B, N, 2)
             hw: Spatial dimensions (H, W)
             masked_blocks: Number of chirp blocks to mask (or 0)
-            frac: Fraction of columns to mask 0.0-1.0 (or 0.0)
-            mblock: Index of chirp block to mask (or -1) (if specified, sets masked_blocks and frac to 1 and 0)
+            mblock: Index of chirp block to mask (or -1) 
             iblock: Index of chirp block to isolate (or -1) (mblock and iblock are exclusive, and mblock must be set if iblock is set)
         Returns:
             Boolean mask (B, H*W) where True = masked patches
 
-        Note: Exactly one of masked_blocks or frac must be > 0
         """
         assert xi.dim() == 3 and xi.size(2) == 2, f"xi must be (B, N, 2), got {tuple(xi.shape)}"
         H, W = hw
@@ -367,14 +364,11 @@ class TinyBird(nn.Module):
 
         if len(mblock) > 0:
             assert all((0 <= i < N) for i in mblock), f"invalid mblock indices N={N}, got {mblock}"
-            masked_blocks, frac = 0, 0.0  # disable masked_blocks and frac behavior if mblock is set
+            masked_blocks = 0# disable masked_blocks 
         else:
-            # if mblock is not set, ensure masked_blocks and frac are valid
-            assert (masked_blocks > 0) ^ (
-                frac > 0
-            ), f"either masked_blocks or frac must be greater than 0 not both, got {masked_blocks} and {frac}"
+            # if mblock is not set, ensure masked_blocks is valid
+            assert masked_blocks > 0, f"masked_blocks must be greater than 0, got {masked_blocks}"
             assert masked_blocks < N, f"masked_blocks must be less than N, got {masked_blocks} and {N}"
-            assert frac < 1, f"frac must be between 0 and 1, got {frac}"
 
         if len(iblock) > 0:
             # if iblock is set, ensure mblock is set
@@ -395,8 +389,6 @@ class TinyBird(nn.Module):
         elif masked_blocks > 0:
             mask_blocks = torch.randperm(N, device=device)[:masked_blocks].tolist()  # randomly select n_blocks blocks
             m_w = min([int(widths[b, mask_blocks].sum().item()) for b in range(B)])  # max width of the blocks
-        else:  # frac > 0
-            m_w = min(0, min(W - 1, int(round(float(frac) * W))))  # width of the mask, no block selected
 
         mask2d = torch.zeros(B, W, dtype=torch.bool, device=device)  # mask2d is a boolean mask of the spectrogram
 
@@ -449,8 +441,7 @@ class TinyBird(nn.Module):
 
             column_mask_args:
             masked_blocks: Number of chirp blocks to randomly mask (or 0)
-            frac: Fraction of columns to mask 0.0-1.0 (or 0.0) [ masked_blocks and frac are exclusive]
-            mblock: Index of chirp block to mask (or -1) (if specified, sets masked_blocks to 1 and frac to 0)
+            mblock: Index of chirp block to mask (or -1) 
             iblock: Index of chirp block to isolate (or -1) (mblock and iblock are exclusive, and mblock must be set if iblock is set)
 
         Returns:
@@ -545,15 +536,10 @@ class TinyBird(nn.Module):
         y_full = torch.cat([y, mask_tokens], dim=1)  # kept-first layout
         y_full = torch.gather(y_full, 1, idx_restore.unsqueeze(-1).expand(B, T, D_dec))
 
-
-        pos_dec = self.encoder_to_decoder(
-            self.pos_enc[:, :T, :]
-        )  # (1, T, D_dec) decoder pos-encs derived by projecting encoder pos-encs
+        pos_dec = self.encoder_to_decoder(self.pos_enc[:, :T, :])  # (1, T, D_dec) decoder pos-encs derived by projecting encoder pos-encs
 
         y_full = y_full + pos_dec 
-        # y_full = y_full + pos_dec
 
- 
         d = self.decoder(y_full)  # (B, T, D_dec)
         pred = self.decoder_to_pixel(d)  # Final per-token patch prediction: (B, T, P). P is pixels per patch
         return pred

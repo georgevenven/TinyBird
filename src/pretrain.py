@@ -65,11 +65,11 @@ def cuda_mem_scope(device, step=None):
                 pass
 
 
-def log_batch_shapes(tag, step_num, x, x_i, N, n_blocks, frac, patch_size=(32, 1)):
+def log_batch_shapes(tag, step_num, x, x_i, N, n_blocks, patch_size=(32, 1)):
     H, W = int(x.size(2)), int(x.size(3))
     ph, pw = patch_size
     num_tokens = (H // ph) * (W // pw)
-    print(f"x={tuple(x.shape)}, x_i={tuple(x_i.shape)}, N={tuple(N.shape)}, n_blocks={n_blocks}, frac={frac}")
+    print(f"x={tuple(x.shape)}, x_i={tuple(x_i.shape)}, N={tuple(N.shape)}, n_blocks={n_blocks}")
     try:
         wandb.log(
             {
@@ -78,7 +78,6 @@ def log_batch_shapes(tag, step_num, x, x_i, N, n_blocks, frac, patch_size=(32, 1
                 f"{tag}/W": W,
                 f"{tag}/num_tokens": int(num_tokens),
                 f"{tag}/n_blocks": int(n_blocks),
-                f"{tag}/frac": float(frac),
             },
             step=int(step_num) if step_num is not None else None,
             commit=False,
@@ -329,7 +328,7 @@ class Trainer:
         x_i = chirp_intervals.to(self.device, non_blocking=True)  # (B, N, 2)
         N = N.to(self.device, non_blocking=True)  # (B, 1) # number of chirp intervals
 
-        mblock, iblock, frac, n_blocks = [], [], 0.0, 11
+        mblock, iblock, n_blocks = [], [], 11
         # # if random.random() < 0.75:
         # mblock = [n_blocks - 1]
         # iblock = []
@@ -338,8 +337,6 @@ class Trainer:
         # #     iblock = [start]
         # # else:
         # #     iblock = list(range(start, mblock[0]))
-        # # else:
-        # #     frac = 0.5
 
         if is_training:
             self.tinybird.train()
@@ -359,14 +356,11 @@ class Trainer:
                         mblock = [x_i.shape[1] - 1]
                         # x, x_i = self.tinybird.sample_data(x, x_i, N, n_blocks=n_blocks)
 
-                        # if x.shape[-1] > 3000:
-                        #     masked_blocks, frac = 0, 0.5
-
                         log_batch_shapes(
-                            "train_batch", step_num, x, x_i, N, x_i.shape[1], frac, patch_size=self.config["patch_size"]
+                            "train_batch", step_num, x, x_i, N, x_i.shape[1], patch_size=self.config["patch_size"]
                         )
                         h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(
-                            x, x_i, frac=frac, mblock=mblock, iblock=iblock
+                            x, x_i, mblock=mblock, iblock=iblock
                         )
                         pred = self.tinybird.forward_decoder(h, idx_restore, T)
                         loss = self.tinybird.loss_mse(x, pred, bool_mask)
@@ -374,15 +368,8 @@ class Trainer:
                     x, x_i = self.tinybird.compactify_data(x, x_i, N)
                     x, x_i = self.tinybird.sample_data(x, x_i, N, n_blocks=n_blocks)
 
-                    if x.shape[-1] > 3000:
-                        masked_blocks, frac = 0, 0.5
-
-                    log_batch_shapes(
-                        "train_batch", step_num, x, x_i, N, n_blocks, frac, patch_size=self.config["patch_size"]
-                    )
-                    h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(
-                        x, x_i, masked_blocks=masked_blocks, frac=frac
-                    )
+                    log_batch_shapes("train_batch", step_num, x, x_i, N, n_blocks, patch_size=self.config["patch_size"])
+                    h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x, x_i, masked_blocks=1)
                     pred = self.tinybird.forward_decoder(h, idx_restore, T)
                     loss = self.tinybird.loss_mse(x, pred, bool_mask)
 
@@ -455,12 +442,12 @@ class Trainer:
                 with torch.amp.autocast('cuda'):
                     x, x_i = self.tinybird.compactify_data(x, x_i, N)
                     x, x_i = self.tinybird.sample_data(x, x_i, N, n_blocks=3)
-                    h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x, x_i, frac=0.5)
+                    h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x, x_i, masked_blocks=1)
                     pred = self.tinybird.forward_decoder(h, idx_restore, T)
             else:
                 x, x_i = self.tinybird.compactify_data(x, x_i, N)
                 x, x_i = self.tinybird.sample_data(x, x_i, N, n_blocks=3)
-                h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x, x_i, frac=0.5)
+                h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x, x_i, masked_blocks=1)
                 pred = self.tinybird.forward_decoder(h, idx_restore, T)
 
         # Depatchify prediction to get back (B, 1, H, W) format
