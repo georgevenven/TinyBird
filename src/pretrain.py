@@ -432,7 +432,8 @@ class Trainer:
 
     def save_reconstruction(self, batch, step_num):
         """Save reconstruction visualization comparing input and output spectrograms."""
-        spectrograms, chirp_intervals, _, N, _ = batch
+        # spec, chirp_intervals, chirp_labels_pad, chirp_feats_pad, N, filename
+        spectrograms, chirp_intervals, _, _, N, _ = batch
         x = spectrograms.to(self.device, non_blocking=True).float()  # (B, 1, H, W)
         x_i = chirp_intervals.to(self.device, non_blocking=True)  # (B, N, 2)
         N = N.to(self.device, non_blocking=True)  # (B, 1) # number of chirp intervals
