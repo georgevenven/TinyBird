@@ -212,9 +212,12 @@ class TinyBird(nn.Module):
 
         xi_out = torch.zeros(B, n_blocks, 2, device=device, dtype=xi.dtype)
         for b in range(B):
-            xi_out[b] = xi[
-                b, mb_idx[b].item() - n_blocks : mb_idx[b].item() + 1, :
-            ].clone()  # remap the boundaries to the new window
+            # start index so that we take exactly n_blocks ending at mb_idx[b] (inclusive)
+            start_idx = int(mb_idx[b].item()) - (n_blocks - 1)
+            # By construction, start_idx >= mb_start_idx[b], because n_blocks is the batch-min.
+            xi_slice = xi[b, start_idx : int(mb_idx[b].item()) + 1, :].clone()
+            # xi_slice has shape (n_blocks, 2)
+            xi_out[b] = xi_slice
             offset = xi_out[b, -1, 1].item() - seq_len
             xi_out[b, :, :] = xi_out[b, :, :] - offset
 
