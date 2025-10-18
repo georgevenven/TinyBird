@@ -353,6 +353,7 @@ class Trainer:
                     with torch.amp.autocast('cuda'):
                         x, x_i = self.tinybird.compactify_data(x, x_i, N)
 
+                        print(f"before sample_data_seq_length x:{x.shape}, x_i:{x_i.shape}, N:{N.tolist()}")
                         x, x_i = self.tinybird.sample_data_seq_length(x, x_i, N, seq_len=8000)
 
                         mblock = [x_i.shape[1] - 1]
