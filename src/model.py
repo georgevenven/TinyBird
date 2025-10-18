@@ -202,10 +202,10 @@ class TinyBird(nn.Module):
         x_out = torch.zeros(B, C, H, seq_len, device=device, dtype=x.dtype)
         mb_start_idx = torch.zeros(B, dtype=torch.long, device=device)
         for b in range(B):
-            end_col = xi[b, mb_idx[b], 1]
+            end_col   = int(xi[b, mb_idx[b], 1].item())
             start_col = max(0, end_col - seq_len)
             x_out[b, :, :, :] = x[b, :, :, start_col:end_col]
-            blocks = torch.nonzero((xi[b, :, 0] >= start_col) & (xi[b, :, 1] <= end_col), as_tuple=False).squeeze(1)
+            blocks = torch.nonzero( xi[b, :, 0] >= start_col, as_tuple=False).squeeze(1)
             mb_start_idx[b] = blocks[0]
 
         n_blocks = (mb_idx - mb_start_idx).clamp(min=0).min().item() + 1
