@@ -3,8 +3,8 @@
 Probe the maximum seq_len (time columns) that fits in GPU memory for a range of batch sizes.
 
 Usage:
-  python probe_max_seq_len.py --config /path/to/config.json \
-      --batches 8,16,32,64 --start_len 4096 --min_len 256 --cap 262144 --amp
+  python check_memory.py --config /path/to/config.json \
+      --batches 2,3,4,5,6 --start_len 4096 --min_len 256 --cap 262144 --amp
 
 Notes:
 - This uses your actual TinyBird.forward_encoder/decoder/loss paths, so results are realistic.
@@ -28,6 +28,7 @@ from model import TinyBird
 
 # ---------- small helpers ----------
 
+
 @contextlib.contextmanager
 def amp_autocast_if(amp_enabled: bool):
     if amp_enabled and torch.cuda.is_available():
@@ -42,11 +43,7 @@ def round_down_to_multiple(x: int, multiple: int) -> int:
 
 
 def try_one_step(
-    model: TinyBird,
-    config: Dict,
-    seq_len: int,
-    batch_size: int,
-    device: torch.device,
+    model: TinyBird, config: Dict, seq_len: int, batch_size: int, device: torch.device
 ) -> Tuple[bool, int]:
     """
     Do a full forward + loss + backward for a synthetic batch and report if it fits.
@@ -75,7 +72,7 @@ def try_one_step(
     try:
         with amp_autocast_if(use_amp):
             h, idx_restore, bool_mask, bool_pad, T = model.forward_encoder(
-                x, xi, n_blocks=0, frac=float(config.get("mask_p", 0.75))
+                x, xi, frac=float(config.get("mask_p", 0.75))
             )
             pred = model.forward_decoder(h, idx_restore, T, bool_pad=bool_pad)
             loss = model.loss_mse(x, pred, bool_mask)
@@ -104,13 +101,7 @@ def try_one_step(
 
 
 def find_max_seq_len(
-    model: TinyBird,
-    config: Dict,
-    batch_size: int,
-    device: torch.device,
-    min_len: int,
-    start_len: int,
-    max_len_cap: int,
+    model: TinyBird, config: Dict, batch_size: int, device: torch.device, min_len: int, start_len: int, max_len_cap: int
 ) -> Tuple[int, int]:
     """
     Find the largest seq_len that fits for a given batch size.
@@ -188,11 +179,13 @@ def pretty_bytes(n: int) -> str:
 
 # ---------- main ----------
 
+
 def main():
     ap = argparse.ArgumentParser(description="Probe max seq_len per batch size using TinyBird.")
     ap.add_argument("--config", required=True, type=str, help="Path to JSON config (same format as pretrain.py)")
-    ap.add_argument("--batches", type=str, default="8,16,32,64",
-                    help="Comma-separated batch sizes to probe, e.g. '8,16,32,64'")
+    ap.add_argument(
+        "--batches", type=str, default="8,16,32,64", help="Comma-separated batch sizes to probe, e.g. '8,16,32,64'"
+    )
     ap.add_argument("--min_len", type=int, default=256, help="Minimum seq_len (time columns) to start probing")
     ap.add_argument("--start_len", type=int, default=4096, help="Initial seq_len to try before growing/shrinking")
     ap.add_argument("--cap", type=int, default=262144, help="Upper cap on seq_len during search")
@@ -210,10 +203,20 @@ def main():
 
     # Required config fields: ensure we have what TinyBird expects
     required = [
-        "mels", "num_timebins", "patch_height", "patch_width",
-        "enc_hidden_d", "enc_n_head", "enc_n_layer", "enc_dim_ff",
-        "dec_hidden_d", "dec_n_head", "dec_n_layer", "dec_dim_ff",
-        "dropout", "mask_p",
+        "mels",
+        "num_timebins",
+        "patch_height",
+        "patch_width",
+        "enc_hidden_d",
+        "enc_n_head",
+        "enc_n_layer",
+        "enc_dim_ff",
+        "dec_hidden_d",
+        "dec_n_head",
+        "dec_n_layer",
+        "dec_dim_ff",
+        "dropout",
+        "mask_p",
     ]
     missing = [k for k in required if k not in config]
     if missing:
@@ -248,8 +251,7 @@ def main():
     results = []
     for B in batch_sizes:
         best_len, peak = find_max_seq_len(
-            model, config, batch_size=B, device=device,
-            min_len=args.min_len, start_len=args.start_len, max_len_cap=capW
+            model, config, batch_size=B, device=device, min_len=args.min_len, start_len=args.start_len, max_len_cap=capW
         )
         results.append((B, best_len, peak))
         print(f"[probe] batch={B:>5} → max_seq_len={best_len:>7} cols  |  peak={pretty_bytes(peak)}")
