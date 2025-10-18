@@ -202,11 +202,13 @@ class TinyBird(nn.Module):
         x_out = torch.zeros(B, C, H, seq_len, device=device, dtype=x.dtype)
         mb_start_idx = torch.zeros(B, dtype=torch.long, device=device)
         for b in range(B):
-            end_col   = int(xi[b, mb_idx[b], 1].item())
-            start_col = max(0, end_col - seq_len)
+            end_col = int(xi[b, mb_idx[b], 1].item())
+            assert end_col >= seq_len, f"end_col={end_col} must be >= seq_len={seq_len}"
+            start_col = end_col - seq_len
+
             x_out[b, :, :, :] = x[b, :, :, start_col:end_col]
-            blocks = torch.nonzero( xi[b, :, 0] >= start_col, as_tuple=False).squeeze(1)
-            mb_start_idx[b] = blocks[0]
+            blocks = torch.nonzero(xi[b, :, 0] >= start_col, as_tuple=False).squeeze(1)
+            mb_start_idx[b] = blocks[0] if len(blocks) > 0 else 0
 
         n_blocks = (mb_idx - mb_start_idx).clamp(min=0).min().item() + 1
 
@@ -380,6 +382,9 @@ class TinyBird(nn.Module):
         device = xi.device
         B, N, _ = xi.shape
 
+        if N == 1:
+            half_mask = True
+
         if len(mblock) > 0:
             assert all((0 <= i < N) for i in mblock), f"invalid mblock indices N={N}, got {mblock}"
             masked_blocks = 0  # disable masked_blocks
@@ -402,11 +407,12 @@ class TinyBird(nn.Module):
         if len(mblock) > 0:
             mask_blocks = mblock
             m_w = min([int(widths[b, mask_blocks].sum().item()) for b in range(B)])  # max width of the blocks
-            if half_mask:
-                m_w = m_w // 2
         elif masked_blocks > 0:
             mask_blocks = torch.randperm(N, device=device)[:masked_blocks].tolist()  # randomly select n_blocks blocks
             m_w = min([int(widths[b, mask_blocks].sum().item()) for b in range(B)])  # max width of the blocks
+
+        if half_mask:
+            m_w = m_w // 2
 
         mask2d = torch.zeros(B, W, dtype=torch.bool, device=device)  # mask2d is a boolean mask of the spectrogram
 
@@ -414,7 +420,7 @@ class TinyBird(nn.Module):
             end_i = [int(v) for v in ends[b].tolist()]
             for blk in mask_blocks:
                 s = max(0, end_i[blk] - m_w)
-                mask2d[b, s:end_i[blk]] = True
+                mask2d[b, s : end_i[blk]] = True
 
         # Expand the (B, W) column mask across H rows to get a (B, H*W) token mask
         # so it aligns with the patchified sequence length used by the encoder/decoder.
