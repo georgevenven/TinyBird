@@ -263,9 +263,19 @@ def process_file(model, dataset, index, device):
 
     # Compute chirp start/end/dt/lt
     starts = x_i[0, : N.item(), 0]
-    ends = x_i[0, : N.item(), 1]
+    ends   = x_i[0, : N.item(), 1]
     x_dt = torch.cat([torch.tensor([0.0], device=device), starts[1:] - ends[:-1]])
     x_lt = ends - starts
+
+    header = ["start", "end", "dt", "lt"]
+    header_str = " | ".join([f"{h:<10}" for h in header])
+    print(header_str)
+    print("-" * len(header_str))
+    for i in range(N.item()):
+        row = [starts[i].item(), ends[i].item(), x_dt[i].item(), x_lt[i].item()]
+        #print row as a table with fixed width and alignments, make sure the ints are taking up the same width. there are no floats
+        print(f"{row[0]:<10} {row[1]:<10} {row[2]:<10} {row[3]:<10}")
+
 
     x, x_i = model.compactify_data(x.clone(), x_i.clone(), N.clone())
 
@@ -313,7 +323,7 @@ def process_file(model, dataset, index, device):
         all_losses, all_dt, all_lt = compute_losses(x, x_i, N, x_dt, x_lt)
         save_to_cache(filename, (all_losses, all_dt, all_lt))    
 
-    return all_losses, all_dt, all_lt, filename, x_l, x_f
+    return all_losses, all_dt, all_lt, filename, x_l, x_f, x_dt, x_lt
 
 
 def main():
@@ -403,12 +413,14 @@ def main():
     # === Default: loss/plotting mode ===
     def process_and_plot(i: int):
         print(f"\nLoading sample at index {i}")
-        all_losses, all_dt, all_lt, filename, x_l, x_f = process_file(model, dataset, i, device)
+        all_losses, all_dt, all_lt, filename, x_l, x_f, x_dt, x_lt = process_file(model, dataset, i, device)
 
         all_np = all_losses.detach().cpu().numpy()
         dt_np = all_dt.detach().cpu().numpy()
         lt_np = all_lt.detach().cpu().numpy()
         labels_np = x_l.detach().cpu().numpy().astype(int).reshape(-1)
+        x_dt_np = x_dt.detach().cpu().numpy()
+        x_lt_np = x_lt.detach().cpu().numpy()
 
         # Diagnostics: summarize chirp labels
         uniq, counts = np.unique(labels_np, return_counts=True)
@@ -588,15 +600,14 @@ def main():
             cmap_name='viridis',
         )
 
-        def plot_line_summaries(all_np, dt_np, lt_np, filename: str, index: int, images_dir: str = "images"):
+        def plot_line_summaries(all_np, x_dt_vec, x_lt_vec, filename: str, index: int, images_dir: str = "images"):
             """
             Create a single figure with two stacked panels:
               (Top) 3 line plots vs last_block (x-axis):
                 1) lowest achieved loss across start_block for each last_block
                 2) loss for the largest amount of context: start_block = last_block + 1
                 3) loss for fixed context length 10: start_block = last_block - 10
-              (Bottom) Δt and ℓt vs last_block on twin y-axes, using the same
-                       start_block selection as (2): start_block = last_block + 1.
+              (Bottom) Δt and ℓt vs last_block on twin y-axes, plotting raw x_dt and x_lt by index.
 
             Any out-of-bounds or invalid entries are left as NaN so no point is shown.
             """
@@ -609,8 +620,6 @@ def main():
             min_loss = np.full(cols, np.nan, dtype=float)
             maxctx_loss = np.full(cols, np.nan, dtype=float)  # start = last+1
             len10_loss = np.full(cols, np.nan, dtype=float)   # start = last-10
-            dt_vec = np.full(cols, np.nan, dtype=float)       # Δt @ start = last+1
-            lt_vec = np.full(cols, np.nan, dtype=float)       # ℓt @ start = last+1
 
             # Column-wise computation
             for last in range(cols):
@@ -625,12 +634,6 @@ def main():
                     val = all_np[sb, last]
                     if np.isfinite(val):
                         maxctx_loss[last] = val
-                    d = dt_np[sb, last]
-                    if np.isfinite(d):
-                        dt_vec[last] = d
-                    l = lt_np[sb, last]
-                    if np.isfinite(l):
-                        lt_vec[last] = l
 
                 # (3) fixed context length 10: start_block = last - 10
                 sb2 = last - 10
@@ -638,6 +641,13 @@ def main():
                     val2 = all_np[sb2, last]
                     if np.isfinite(val2):
                         len10_loss[last] = val2
+
+            # Align raw x_dt/x_lt to last_block domain
+            # We only plot up to the number of columns available in the loss matrix.
+            max_len = min(cols, len(x_dt_vec), len(x_lt_vec))
+            x_axis = np.arange(max_len)
+            dt_plot = np.array(x_dt_vec[:max_len], dtype=float)
+            lt_plot = np.array(x_lt_vec[:max_len], dtype=float)
 
             # === Figure layout ===
             fig = plt.figure(figsize=(14, 8))
@@ -656,13 +666,13 @@ def main():
 
             # Bottom panel: Δt and ℓt on twin y-axes (both vs last_block)
             ax_bot = fig.add_subplot(gs[1, 0], sharex=ax_top)
-            line_dt, = ax_bot.plot(x, dt_vec, label="Δt (gap)")
+            line_dt, = ax_bot.plot(x_axis, dt_plot, label="Δt (gap)")
             ax_bot.set_ylabel("Δt")
             ax_bot.set_xlabel("last_block (end index)")
             ax_bot.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
 
             ax_bot_r = ax_bot.twinx()
-            line_lt, = ax_bot_r.plot(x, lt_vec, label="ℓt (duration)")
+            line_lt, = ax_bot_r.plot(x_axis, lt_plot, label="ℓt (duration)")
             ax_bot_r.set_ylabel("ℓt")
 
             # Merge legends for bottom panel
@@ -677,7 +687,7 @@ def main():
             print(f"Saved: {out_path}")
 
         # === New: summary line figure (top: 3 loss curves; bottom: Δt & ℓt) ===
-        plot_line_summaries(all_np, dt_np, lt_np, filename, i, images_dir)
+        plot_line_summaries(all_np, x_dt_np, x_lt_np, filename, i, images_dir)
 
     # If a single index is specified, only process that file; otherwise process all
     if args.index >= 0:
