@@ -133,10 +133,9 @@ def compute_loss(model, x, x_i, N, start_block, last_block, x_dt, x_lt):
         h, idx_restore, bool_mask, T = model.forward_encoder(xs, x_is, mblock=mblock)
 
         B = xs.shape[0]
-        H = xs.shape[-2]
         W = xs.shape[-1]
 
-        bm = bool_mask.view(B, H, W)
+        bm = bool_mask.view(B, -1, W)
         bwidth = int(bm[0, 0, :].sum().item())
 
         assert bwidth == width, "bwidth != width for bwidth {bwidth} and width {width}"
