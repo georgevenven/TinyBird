@@ -353,7 +353,7 @@ def process_file(model, dataset, index, device):
             for last_block in range(1, n_valid_chirps):
                 for start_block in range(0, n_valid_chirps - 1):
                     with torch.no_grad():
-                        loss, dt_val, lt_val = compute_loss(model, x, x_i, N, start_block, last_block, x_dt, x_lt)
+                        loss, dt_val, lt_val, _, _, _, _, _, _ = compute_loss(model, x, x_i, N, start_block, last_block, x_dt, x_lt)
                     losses[start_block, last_block] = float('nan') if torch.isnan(loss) else loss
                     dt_mat[start_block, last_block] = dt_val
                     lt_mat[start_block, last_block] = lt_val
