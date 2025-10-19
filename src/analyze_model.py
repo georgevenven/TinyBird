@@ -140,7 +140,12 @@ def compute_loss(model, x, x_i, N, start_block, last_block, x_dt, x_lt):
         print("x_is.shape: ", x_is.shape)
 
         bm = bool_mask.view(B, -1, W)
-        bwidth = int(bm[0, 0, :].sum().item())
+
+        print("bm.shape: ", bm.shape)
+
+        bwidth = int(bm.sum().item())
+        print("bwidth: ", bwidth)
+        print("width: ", width)
 
         assert bwidth == width, f"bwidth != width for bwidth {bwidth} and width {width}"
 
