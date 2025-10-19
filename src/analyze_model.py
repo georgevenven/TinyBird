@@ -138,7 +138,7 @@ def compute_loss(model, x, x_i, N, start_block, last_block, x_dt, x_lt):
         bm = bool_mask.view(B, -1, W)
         bwidth = int(bm[0, 0, :].sum().item())
 
-        assert bwidth == width, "bwidth != width for bwidth {bwidth} and width {width}"
+        assert bwidth == width, f"bwidth != width for bwidth {bwidth} and width {width}"
 
         pred = model.forward_decoder(h, idx_restore, T)
         loss = model.loss_mse(xs, pred, bool_mask)
