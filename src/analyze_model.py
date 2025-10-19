@@ -120,6 +120,14 @@ def compute_loss(model, x, x_i, N, start_block, last_block, x_dt, x_lt):
 
     try:
         xs, x_is = model.sample_data_indices(x.clone(), x_i.clone(), N.clone(), indices)
+        assert x_is.shape[1] == len(indices), "x_is.shape[1] != len(indices) for indices length {len(indices)} and x_is.shape[1] {x_is.shape[1]}"
+
+        width      = (x_is[0,-1,1] - x_is[0,-1,0])
+        spec_width = (x_i[0,last_block,1] - x_i[0,last_block,0])
+        assert width == spec_width, "width != spec_width for width {width} and spec_width {spec_width}"
+
+
+
         h, idx_restore, bool_mask, T = model.forward_encoder(xs, x_is, mblock=mblock)
         pred = model.forward_decoder(h, idx_restore, T)
         loss = model.loss_mse(xs, pred, bool_mask)
