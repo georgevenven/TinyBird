@@ -98,7 +98,8 @@ def prepare_sample(model, dataset, index, device):
     else:
         x_f = torch.as_tensor(x_f)[: x_i.shape[1]]
 
-    return x, x_i, x_l, x_f,x_dt, x_lt, N, filename
+    return x, x_i, x_l, x_f, x_dt, x_lt, N, filename
+
 
 def compute_loss(model, x, x_i, N, start_block, last_block, x_dt, x_lt):
     """
@@ -120,15 +121,22 @@ def compute_loss(model, x, x_i, N, start_block, last_block, x_dt, x_lt):
 
     try:
         xs, x_is = model.sample_data_indices(x.clone(), x_i.clone(), N.clone(), indices)
-        assert x_is.shape[1] == len(indices), "x_is.shape[1] != len(indices) for indices length {len(indices)} and x_is.shape[1] {x_is.shape[1]}"
 
-        width      = int((x_is[0,-1,1] - x_is[0,-1,0]).item())
-        spec_width = int((x_i[0,last_block,1] - x_i[0,last_block,0]).item())
+        assert x_is.shape[1] == len(indices), (
+            "x_is.shape[1] != len(indices) for indices length {len(indices)} and x_is.shape[1] {x_is.shape[1]}"
+        )
+
+        width = int((x_is[0, -1, 1] - x_is[0, -1, 0]).item())
+        spec_width = int((x_i[0, last_block, 1] - x_i[0, last_block, 0]).item())
         assert width == spec_width, "width != spec_width for width {width} and spec_width {spec_width}"
 
-
-
         h, idx_restore, bool_mask, T = model.forward_encoder(xs, x_is, mblock=mblock)
+
+        # check with assert to see that the width of bool_mask==true is the same as the width calculated above
+        assert bool_mask[0, 0, -1].sum().item() == width, (
+            "bool_mask.sum().item() != width for bool_mask[0,0,-1].sum().item()  {bool_mask[0,0,-1].sum().item() } and width {width}"
+        )
+
         pred = model.forward_decoder(h, idx_restore, T)
         loss = model.loss_mse(xs, pred, bool_mask)
         return loss, dt, lt, xs, x_is, bool_mask, pred, mblock, indices
@@ -217,11 +225,11 @@ def save_reconstruction(model, x, x_i, N, last_block, x_dt, x_lt, *, filename, i
     fig = plt.figure(figsize=(14, 10))
     gs = GridSpec(3, 2, width_ratios=[3.5, 1.4], height_ratios=[1, 1, 1], wspace=0.10, hspace=0.08)
 
-    ax_in_full  = fig.add_subplot(gs[0, 0])
+    ax_in_full = fig.add_subplot(gs[0, 0])
     ax_rec_full = fig.add_subplot(gs[1, 0], sharex=ax_in_full, sharey=ax_in_full)
     ax_err_full = fig.add_subplot(gs[2, 0], sharex=ax_in_full, sharey=ax_in_full)
 
-    ax_in_zoom  = fig.add_subplot(gs[0, 1], sharey=ax_in_full)
+    ax_in_zoom = fig.add_subplot(gs[0, 1], sharey=ax_in_full)
     ax_rec_zoom = fig.add_subplot(gs[1, 1], sharey=ax_in_full)
     ax_err_zoom = fig.add_subplot(gs[2, 1], sharey=ax_in_full)
 
@@ -255,7 +263,7 @@ def save_reconstruction(model, x, x_i, N, last_block, x_dt, x_lt, *, filename, i
     zoom_has_span = true_idxs.size > 0
     if zoom_has_span:
         span_start = int(true_idxs.min())
-        span_end   = int(true_idxs.max() + 1)  # exclusive
+        span_end = int(true_idxs.max() + 1)  # exclusive
     else:
         span_start, span_end = 0, 1  # harmless fallback to 1 column
 
@@ -279,13 +287,25 @@ def save_reconstruction(model, x, x_i, N, last_block, x_dt, x_lt, *, filename, i
 
     # === Right-hand zoom panels: crop to the masked span, keep exact masked width ===
     if zoom_has_span:
-        xs_crop     = xs_cpu[:, span_start:span_end]
-        xrec_crop   = x_rec_cpu[:, span_start:span_end]
-        diff_crop   = diff[:, span_start:span_end]
+        xs_crop = xs_cpu[:, span_start:span_end]
+        xrec_crop = x_rec_cpu[:, span_start:span_end]
+        diff_crop = diff[:, span_start:span_end]
 
-        ax_in_zoom.imshow(  xs_crop,   cmap=cmap,      vmin=vmin,   vmax=vmax,   origin='lower', aspect='auto', interpolation='nearest')
-        ax_rec_zoom.imshow( xrec_crop, cmap=cmap,      vmin=vmin,   vmax=vmax,   origin='lower', aspect='auto', interpolation='nearest')
-        ax_err_zoom.imshow( diff_crop, cmap=cmap_diff, vmin=-max_abs, vmax=max_abs, origin='lower', aspect='auto', interpolation='nearest')
+        ax_in_zoom.imshow(
+            xs_crop, cmap=cmap, vmin=vmin, vmax=vmax, origin='lower', aspect='auto', interpolation='nearest'
+        )
+        ax_rec_zoom.imshow(
+            xrec_crop, cmap=cmap, vmin=vmin, vmax=vmax, origin='lower', aspect='auto', interpolation='nearest'
+        )
+        ax_err_zoom.imshow(
+            diff_crop,
+            cmap=cmap_diff,
+            vmin=-max_abs,
+            vmax=max_abs,
+            origin='lower',
+            aspect='auto',
+            interpolation='nearest',
+        )
 
         ax_in_zoom.set_title('Masked span (Input)')
         ax_rec_zoom.set_title('Masked span (Reconstruction)')
@@ -305,7 +325,7 @@ def save_reconstruction(model, x, x_i, N, last_block, x_dt, x_lt, *, filename, i
             axz.axis('off')
 
     # Draw separators
-    _draw_separators(ax_in_full,  x_is[0].detach().cpu().numpy())
+    _draw_separators(ax_in_full, x_is[0].detach().cpu().numpy())
     _draw_separators(ax_rec_full, x_is[0].detach().cpu().numpy())
     _draw_separators(ax_err_full, x_is[0].detach().cpu().numpy())
     # Add colorbars for each panel
@@ -329,10 +349,7 @@ def save_reconstruction(model, x, x_i, N, last_block, x_dt, x_lt, *, filename, i
 
 
 def process_file(model, dataset, index, device):
-
     x, x_i, x_l, x_f, x_dt, x_lt, N, filename = prepare_sample(model, dataset, index, device)
-
-
 
     print(f"  Filename: {filename}")
     print(f"  Spectrogram shape: {x.shape}")
@@ -421,7 +438,7 @@ def main():
 
         def run_reconstruction(i: int):
             print(f"\nLoading sample at index {i}")
-            x, x_i, x_l, x_f,x_dt, x_lt, N, filename = prepare_sample(model, dataset, i, device)
+            x, x_i, x_l, x_f, x_dt, x_lt, N, filename = prepare_sample(model, dataset, i, device)
 
             for last_block in range(args.start_block, args.last_block + 1):
                 print(f"Generating reconstruction for last_block={last_block}")
