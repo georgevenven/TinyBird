@@ -143,8 +143,10 @@ def compute_loss(model, x, x_i, N, start_block, last_block, x_dt, x_lt):
 
         print("bm.shape: ", bm.shape)
 
-        bwidth = int(bm.sum().item())
+        bwidth = int(bm[0, 0, :].sum().item())
+
         print("bwidth: ", bwidth)
+        print("bm width: ", int(bm.sum().item()))
         print("width: ", width)
 
         assert bwidth == width, f"bwidth != width for bwidth {bwidth} and width {width}"
