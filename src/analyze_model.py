@@ -24,10 +24,12 @@ import pickle
 CACHE_DIR = "cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
 
+
 def _cache_path_for(filename: str):
     # Sanitize filename to a safe key
     safe = filename.replace(os.sep, "_").replace(" ", "_")
     return os.path.join(CACHE_DIR, f"{safe}.pkl")
+
 
 def load_from_cache(filename: str):
     path = _cache_path_for(filename)
@@ -38,6 +40,7 @@ def load_from_cache(filename: str):
         except Exception as e:
             print(f"Warning: failed to load cache {path}: {e}")
     return None
+
 
 def save_to_cache(filename: str, data):
     path = _cache_path_for(filename)
@@ -70,13 +73,32 @@ def parse_args():
 
 
 def prepare_sample(model, dataset, index, device):
-    x, x_i, x_l, N, filename = dataset[index]
+    x, x_i, x_l, x_f, N, filename = dataset[index]
     x = x.unsqueeze(0).float().to(device)
     x_i = x_i.unsqueeze(0).to(device)
     N = torch.tensor([N], dtype=torch.long, device=device)
-    x, x_i = model.compactify_data(x.clone(), x_i.clone(), N.clone())
-    return x, x_i, N, filename
 
+    # Compute chirp start/end/dt/lt
+    starts = x_i[0, : N.item(), 0]
+    ends = x_i[0, : N.item(), 1]
+    x_dt = torch.cat([torch.tensor([0.0], device=device), starts[1:] - ends[:-1]])
+    x_lt = ends - starts
+
+    x, x_i = model.compactify_data(x.clone(), x_i.clone(), N.clone())
+
+    # Ensure chirp labels align in length with chirp boundaries (trim trailing padding labels)
+    if isinstance(x_l, torch.Tensor):
+        x_l = x_l[: x_i.shape[1]]
+    else:
+        x_l = torch.as_tensor(x_l)[: x_i.shape[1]]
+
+    # Ensure chirp_feats align in length with chirp boundaries (trim trailing padding)
+    if isinstance(x_f, torch.Tensor):
+        x_f = x_f[: x_i.shape[1]]
+    else:
+        x_f = torch.as_tensor(x_f)[: x_i.shape[1]]
+
+    return x, x_i, x_l, x_f,x_dt, x_lt, N, filename
 
 def compute_loss(model, x, x_i, N, start_block, last_block, x_dt, x_lt):
     """
@@ -94,14 +116,14 @@ def compute_loss(model, x, x_i, N, start_block, last_block, x_dt, x_lt):
     lt = x_lt[indices].sum().item()
 
     if start_block == last_block:
-        return torch.tensor(float('nan'), device=x.device), dt, lt
+        return torch.tensor(float('nan'), device=x.device), dt, lt, None, None, None, None, None, None
 
     try:
         xs, x_is = model.sample_data_indices(x.clone(), x_i.clone(), N.clone(), indices)
         h, idx_restore, bool_mask, T = model.forward_encoder(xs, x_is, mblock=mblock)
         pred = model.forward_decoder(h, idx_restore, T)
         loss = model.loss_mse(xs, pred, bool_mask)
-        return loss, dt, lt
+        return loss, dt, lt, xs, x_is, bool_mask, pred, mblock, indices
     except RuntimeError as e:
         msg = str(e).lower()
         if ("out of memory" in msg or "cuda" in msg) and torch.cuda.is_available():
@@ -109,20 +131,18 @@ def compute_loss(model, x, x_i, N, start_block, last_block, x_dt, x_lt):
                 torch.cuda.empty_cache()
             except Exception:
                 pass
-            return torch.tensor(float('nan'), device=x.device), dt, lt
+            return torch.tensor(float('nan'), device=x.device), dt, lt, None, None, None, None, None, None
         else:
             raise
 
 
-def save_reconstruction(
-    model, x, x_i, N, start_block, last_block, n_blocks, isolate_block, *, filename, index, images_dir='images'
-):
+def save_reconstruction(model, x, x_i, N, last_block, x_dt, x_lt, *, filename, index, images_dir='images'):
     """
     Save a side-by-side reconstruction visualization for a given block configuration.
     Returns: (output_path, loss)
     """
-    loss, xs, x_is, bool_mask, pred, mblock, indices = compute_loss(
-        model, x, x_i, N, start_block, last_block, n_blocks, isolate_block
+    loss, dt, lt, xs, x_is, bool_mask, pred, mblock, indices = compute_loss(
+        model, x, x_i, N, start_block=last_block + 1, last_block=last_block, x_dt=x_dt, x_lt=x_lt
     )
     if xs is None or pred is None or bool_mask is None:
         return None, loss
@@ -239,57 +259,21 @@ def save_reconstruction(
     indices_str = str(indices)
     mblock_str = mblock[0] if mblock is not None and len(mblock) > 0 else 'N/A'
     loss_str = f"{loss.item():.6f}" if loss is not None and torch.isfinite(loss) else "NaN"
-    title = (
-        f"{filename}, idx={index}, start={start_block}, last={last_block}, n_blocks={n_blocks}, "
-        f"isolate_block={isolate_block}, indices={indices_str}, mblock={mblock_str}, loss={loss_str}"
-    )
+    title = f"{filename}, idx={index}, last={last_block},  indices={indices_str}, mblock={mblock_str}, loss={loss_str}"
     fig.suptitle(title, fontsize=11)
     plt.tight_layout(rect=[0, 0.03, 1, 0.96])
     os.makedirs(images_dir, exist_ok=True)
-    out_path = os.path.join(
-        images_dir, f"reconstruction_idx{index}_start{start_block}_last{last_block}_iso{int(isolate_block)}.png"
-    )
+    out_path = os.path.join(images_dir, f"reconstruction_idx{index}_last{last_block}.png")
     fig.savefig(out_path, dpi=200, bbox_inches='tight')
     plt.close(fig)
     return out_path, loss
 
 
 def process_file(model, dataset, index, device):
-    x, x_i, x_l, x_f, N, filename = dataset[index]
 
-    x = x.unsqueeze(0).float().to(device)
-    x_i = x_i.unsqueeze(0).to(device)
-    N = torch.tensor([N], dtype=torch.long, device=device)
-
-    # Compute chirp start/end/dt/lt
-    starts = x_i[0, : N.item(), 0]
-    ends   = x_i[0, : N.item(), 1]
-    x_dt = torch.cat([torch.tensor([0.0], device=device), starts[1:] - ends[:-1]])
-    x_lt = ends - starts
-
-    header = ["start", "end", "dt", "lt"]
-    header_str = " | ".join([f"{h:<10}" for h in header])
-    print(header_str)
-    print("-" * len(header_str))
-    for i in range(N.item()):
-        row = [starts[i].item(), ends[i].item(), x_dt[i].item(), x_lt[i].item()]
-        #print row as a table with fixed width and alignments, make sure the ints are taking up the same width. there are no floats
-        print(f"{row[0]:<10} {row[1]:<10} {row[2]:<10} {row[3]:<10}")
+    x, x_i, x_l, x_f, x_dt, x_lt, N, filename = prepare_sample(model, dataset, index, device)
 
 
-    x, x_i = model.compactify_data(x.clone(), x_i.clone(), N.clone())
-
-    # Ensure chirp labels align in length with chirp boundaries (trim trailing padding labels)
-    if isinstance(x_l, torch.Tensor):
-        x_l = x_l[: x_i.shape[1]]
-    else:
-        x_l = torch.as_tensor(x_l)[: x_i.shape[1]]
-
-    # Ensure chirp_feats align in length with chirp boundaries (trim trailing padding)
-    if isinstance(x_f, torch.Tensor):
-        x_f = x_f[: x_i.shape[1]]
-    else:
-        x_f = torch.as_tensor(x_f)[: x_i.shape[1]]
 
     print(f"  Filename: {filename}")
     print(f"  Spectrogram shape: {x.shape}")
@@ -321,7 +305,7 @@ def process_file(model, dataset, index, device):
         all_losses, all_dt, all_lt = cached
     else:
         all_losses, all_dt, all_lt = compute_losses(x, x_i, N, x_dt, x_lt)
-        save_to_cache(filename, (all_losses, all_dt, all_lt))    
+        save_to_cache(filename, (all_losses, all_dt, all_lt))
 
     return all_losses, all_dt, all_lt, filename, x_l, x_f, x_dt, x_lt
 
@@ -374,28 +358,30 @@ def main():
     reconstruction_mode = (args.start_block is not None) and (args.last_block is not None)
     if reconstruction_mode:
         print("\nReconstruction-only mode enabled.")
-        print(
-            f"Params: start_block={args.start_block}, last_block={args.last_block}, isolate_block={args.isolate_block}"
-        )
+        print(f"Params: start_block={args.start_block}, last_block={args.last_block}")
 
         def run_reconstruction(i: int):
             print(f"\nLoading sample at index {i}")
-            x, x_i, N, filename = prepare_sample(model, dataset, i, device)
-            n_blocks = min(10, int(args.last_block - args.start_block))
-            out_path, loss = save_reconstruction(
-                model,
-                x,
-                x_i,
-                N,
-                args.start_block,
-                args.last_block,
-                n_blocks,
-                args.isolate_block,
-                filename=filename,
-                index=i,
-                images_dir=images_dir,
-            )
-            print(f"Saved reconstruction → {out_path}")
+            x, x_i, x_l, x_f,x_dt, x_lt, N, filename = prepare_sample(model, dataset, i, device)
+
+            for last_block in range(args.start_block, args.last_block + 1):
+                print(f"Generating reconstruction for last_block={last_block}")
+                out_path, loss = save_reconstruction(
+                    model,
+                    x,
+                    x_i,
+                    N,
+                    last_block=last_block,
+                    x_dt=x_dt,
+                    x_lt=x_lt,
+                    filename=filename,
+                    index=i,
+                    images_dir=images_dir,
+                )
+                if out_path is not None:
+                    print(f"Saved reconstruction → {out_path} (loss={loss})")
+                else:
+                    print(f"Skipped reconstruction for last_block={last_block} (NaN or error)")
 
         if args.index >= 0:
             if args.index >= len(dataset):
@@ -619,7 +605,7 @@ def main():
             # Prepare vectors filled with NaN. Matplotlib will skip NaNs.
             min_loss = np.full(cols, np.nan, dtype=float)
             maxctx_loss = np.full(cols, np.nan, dtype=float)  # start = last+1
-            len10_loss = np.full(cols, np.nan, dtype=float)   # start = last-10
+            len10_loss = np.full(cols, np.nan, dtype=float)  # start = last-10
 
             # Column-wise computation
             for last in range(cols):
@@ -666,13 +652,13 @@ def main():
 
             # Bottom panel: Δt and ℓt on twin y-axes (both vs last_block)
             ax_bot = fig.add_subplot(gs[1, 0], sharex=ax_top)
-            line_dt, = ax_bot.plot(x_axis, dt_plot, label="Δt (gap)")
+            (line_dt,) = ax_bot.plot(x_axis, dt_plot, color='tab:blue', label="Δt (gap)")
             ax_bot.set_ylabel("Δt")
             ax_bot.set_xlabel("last_block (end index)")
             ax_bot.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
 
             ax_bot_r = ax_bot.twinx()
-            line_lt, = ax_bot_r.plot(x_axis, lt_plot, label="ℓt (duration)")
+            (line_lt,) = ax_bot_r.plot(x_axis, lt_plot, color='tab:orange', label="ℓt (duration)")
             ax_bot_r.set_ylabel("ℓt")
 
             # Merge legends for bottom panel
