@@ -417,9 +417,8 @@ class TinyBird(nn.Module):
                 s = max(0, end_i[blk] - m_w)
                 mask2d[b, s : end_i[blk]] = True
 
-        # Expand the (B, W) column mask across H rows to get a (B, H*W) token mask
-        # so it aligns with the patchified sequence length used by the encoder/decoder.
-        mask = mask2d.repeat_interleave(H, dim=1)  # (B, H*W)
+
+        mask = mask2d.unsqueeze(1).expand(B, H, W).reshape(B, H*W)
         return mask
 
     def mask(self, z: torch.Tensor, bool_mask: torch.Tensor):
