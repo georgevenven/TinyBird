@@ -19,6 +19,35 @@ from data_loader import SpectogramDataset
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 
+import pickle
+
+CACHE_DIR = "cache"
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+def _cache_path_for(filename: str):
+    # Sanitize filename to a safe key
+    safe = filename.replace(os.sep, "_").replace(" ", "_")
+    return os.path.join(CACHE_DIR, f"{safe}.pkl")
+
+def load_from_cache(filename: str):
+    path = _cache_path_for(filename)
+    if os.path.exists(path):
+        try:
+            with open(path, "rb") as f:
+                return pickle.load(f)
+        except Exception as e:
+            print(f"Warning: failed to load cache {path}: {e}")
+    return None
+
+def save_to_cache(filename: str, data):
+    path = _cache_path_for(filename)
+    try:
+        with open(path, "wb") as f:
+            pickle.dump(data, f)
+    except Exception as e:
+        print(f"Warning: failed to save cache {path}: {e}")
+
+
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="Analyze TinyBird model on spectrogram data")
@@ -276,7 +305,13 @@ def process_file(model, dataset, index, device):
                     pbar.update(1)
         return losses, dt_mat, lt_mat
 
-    all_losses, all_dt, all_lt = compute_losses(x, x_i, N, x_dt, x_lt)
+    cached = load_from_cache(filename)
+    if cached is not None:
+        print(f"Loaded cached matrices for {filename}")
+        all_losses, all_dt, all_lt = cached
+    else:
+        all_losses, all_dt, all_lt = compute_losses(x, x_i, N, x_dt, x_lt)
+        save_to_cache(filename, (all_losses, all_dt, all_lt))    
 
     return all_losses, all_dt, all_lt, filename, x_l, x_f
 
@@ -552,6 +587,97 @@ def main():
             note='ℓt: amount of time in blocks (durations). Rows = start_block, Cols = last_block.',
             cmap_name='viridis',
         )
+
+        def plot_line_summaries(all_np, dt_np, lt_np, filename: str, index: int, images_dir: str = "images"):
+            """
+            Create a single figure with two stacked panels:
+              (Top) 3 line plots vs last_block (x-axis):
+                1) lowest achieved loss across start_block for each last_block
+                2) loss for the largest amount of context: start_block = last_block + 1
+                3) loss for fixed context length 10: start_block = last_block - 10
+              (Bottom) Δt and ℓt vs last_block on twin y-axes, using the same
+                       start_block selection as (2): start_block = last_block + 1.
+
+            Any out-of-bounds or invalid entries are left as NaN so no point is shown.
+            """
+            from matplotlib.gridspec import GridSpec
+
+            rows, cols = all_np.shape
+            x = np.arange(cols)
+
+            # Prepare vectors filled with NaN. Matplotlib will skip NaNs.
+            min_loss = np.full(cols, np.nan, dtype=float)
+            maxctx_loss = np.full(cols, np.nan, dtype=float)  # start = last+1
+            len10_loss = np.full(cols, np.nan, dtype=float)   # start = last-10
+            dt_vec = np.full(cols, np.nan, dtype=float)       # Δt @ start = last+1
+            lt_vec = np.full(cols, np.nan, dtype=float)       # ℓt @ start = last+1
+
+            # Column-wise computation
+            for last in range(cols):
+                col = all_np[:, last]
+                # (1) lowest achieved loss for this last_block
+                if np.isfinite(col).any():
+                    min_loss[last] = np.nanmin(col)
+
+                # (2) largest context: start_block = last + 1
+                sb = last + 1
+                if 0 <= sb < rows:
+                    val = all_np[sb, last]
+                    if np.isfinite(val):
+                        maxctx_loss[last] = val
+                    d = dt_np[sb, last]
+                    if np.isfinite(d):
+                        dt_vec[last] = d
+                    l = lt_np[sb, last]
+                    if np.isfinite(l):
+                        lt_vec[last] = l
+
+                # (3) fixed context length 10: start_block = last - 10
+                sb2 = last - 10
+                if 0 <= sb2 < rows:
+                    val2 = all_np[sb2, last]
+                    if np.isfinite(val2):
+                        len10_loss[last] = val2
+
+            # === Figure layout ===
+            fig = plt.figure(figsize=(14, 8))
+            gs = GridSpec(2, 1, height_ratios=[3.0, 1.6], hspace=0.25)
+
+            # Top panel: three loss curves
+            ax_top = fig.add_subplot(gs[0, 0])
+            ax_top.plot(x, min_loss, label="Min loss vs last_block")
+            ax_top.plot(x, maxctx_loss, label="Loss @ start=last_block+1 (max context)")
+            ax_top.plot(x, len10_loss, label="Loss @ start=last_block-10 (context len 10)")
+            ax_top.set_xlabel("last_block (end index)")
+            ax_top.set_ylabel("Loss (MSE)")
+            ax_top.set_title(f"Loss vs last_block – Index {index}, File: {filename}")
+            ax_top.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
+            ax_top.legend(loc="best")
+
+            # Bottom panel: Δt and ℓt on twin y-axes (both vs last_block)
+            ax_bot = fig.add_subplot(gs[1, 0], sharex=ax_top)
+            line_dt, = ax_bot.plot(x, dt_vec, label="Δt (gap)")
+            ax_bot.set_ylabel("Δt")
+            ax_bot.set_xlabel("last_block (end index)")
+            ax_bot.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
+
+            ax_bot_r = ax_bot.twinx()
+            line_lt, = ax_bot_r.plot(x, lt_vec, label="ℓt (duration)")
+            ax_bot_r.set_ylabel("ℓt")
+
+            # Merge legends for bottom panel
+            lines_left, labels_left = ax_bot.get_legend_handles_labels()
+            lines_right, labels_right = ax_bot_r.get_legend_handles_labels()
+            ax_bot.legend(lines_left + lines_right, labels_left + labels_right, loc="best")
+
+            # Save
+            out_path = os.path.join(images_dir, f"summary_lines_{index}_{filename}.png")
+            fig.savefig(out_path, dpi=300, bbox_inches='tight')
+            plt.close(fig)
+            print(f"Saved: {out_path}")
+
+        # === New: summary line figure (top: 3 loss curves; bottom: Δt & ℓt) ===
+        plot_line_summaries(all_np, dt_np, lt_np, filename, i, images_dir)
 
     # If a single index is specified, only process that file; otherwise process all
     if args.index >= 0:
