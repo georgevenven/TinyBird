@@ -1,39 +1,30 @@
 {
-    "run_name": "tinybird_twins_v1",
-    "train_dir": "/mnt/birdconv/tb_conv_spec_ss320_mel128",
-    "val_dir": "/mnt/birdconv/tb_conv_spec_ss320_mel128_val",
-    "run_dir": "/mnt/birdconv/tb_conv_runs",
-    
-  
-    "steps": 3000,
-    "lr": 0.0002,
-    "batch_size": 8,
-  
-    "patch_height": 32,
-    "patch_width": 1,
-    "mels": 128,
-    "num_timebins": 30001,
-  
-    "dropout": 0.1,
-    "mask_p": 0.75,
-    "eval_every": 100,
-  
-    "amp": true,
-    "weight_decay": 0.0,
-  
-    "enc_hidden_d": 384,
-    "enc_n_head": 6,
-    "enc_n_layer": 6,
-    "enc_dim_ff": 1536,
-  
-    "dec_hidden_d": 192,
-    "dec_n_head": 6,
-    "dec_n_layer": 3,
-    "dec_dim_ff": 768,
-  
-    "wandb_project": "tinybird-test",
-    "wandb_entity": null,
-    "wandb_mode": "online",
-  
-    "fallback_random": false
-  }
+  "run_name": "tinybird_twins_v1",
+  "train_dir": "/mnt/birdconv/tb_conv_spec_ss320_mel128",
+  "val_dir": "/mnt/birdconv/tb_conv_spec_ss320_mel128_val",
+  "run_dir": "/mnt/birdconv/tb_conv_runs",
+  "steps": 6000,
+  "lr": 0.0002,
+  "batch_size": 8,
+  "patch_height": 32,
+  "patch_width": 1,
+  "mels": 128,
+  "num_timebins": 30001,
+  "dropout": 0.1,
+  "mask_p": 0.75,
+  "eval_every": 100,
+  "amp": true,
+  "weight_decay": 0.0,
+  "enc_hidden_d": 384,
+  "enc_n_head": 6,
+  "enc_n_layer": 6,
+  "enc_dim_ff": 1536,
+  "dec_hidden_d": 192,
+  "dec_n_head": 6,
+  "dec_n_layer": 3,
+  "dec_dim_ff": 768,
+  "wandb_project": "tinybird-test",
+  "wandb_entity": null,
+  "wandb_mode": "online",
+  "fallback_random": false
+}
