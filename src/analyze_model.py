@@ -48,29 +48,30 @@ def prepare_sample(model, dataset, index, device):
     x, x_i = model.compactify_data(x.clone(), x_i.clone(), N.clone())
     return x, x_i, N, filename
 
+
 def compute_loss(model, x, x_i, N, start_block, last_block, x_dt, x_lt):
     """
     Compute masked MSE loss for a given block configuration.
     Returns: (loss, xs, x_is, bool_mask, pred, mblock, indices)
     """
+
+    indices = list(range(last_block + 1, N.max().item())) + list(range(last_block + 1))
+    start_index = indices.index(start_block)
+
+    indices = indices[start_index:]
+    mblock = [len(indices) - 1]
+
+    dt = x_dt[indices].sum().item()
+    lt = x_lt[indices].sum().item()
+
+    if start_block == last_block:
+        return torch.tensor(float('nan'), device=x.device), dt, lt
+
     try:
-        if start_block == last_block:
-            return torch.tensor(float('nan'), device=x.device), None, None, None, None, None, None
-
-        indices     = list(range(last_block + 1, N.max().item())) + list(range(last_block + 1))
-        start_index = indices.index(start_block)
-
-        indices = indices[start_index:]
-        mblock  = [len(indices) - 1]
-
-        dt = x_dt[indices].sum().item()
-        lt = x_lt[indices].sum().item()
-
         xs, x_is = model.sample_data_indices(x.clone(), x_i.clone(), N.clone(), indices)
         h, idx_restore, bool_mask, T = model.forward_encoder(xs, x_is, mblock=mblock)
         pred = model.forward_decoder(h, idx_restore, T)
         loss = model.loss_mse(xs, pred, bool_mask)
-
         return loss, dt, lt
     except RuntimeError as e:
         msg = str(e).lower()
@@ -79,7 +80,7 @@ def compute_loss(model, x, x_i, N, start_block, last_block, x_dt, x_lt):
                 torch.cuda.empty_cache()
             except Exception:
                 pass
-            return torch.tensor(float('nan'), device=x.device), None, None, None, None, None, None
+            return torch.tensor(float('nan'), device=x.device), dt, lt
         else:
             raise
 
@@ -274,6 +275,7 @@ def process_file(model, dataset, index, device):
                     lt_mat[start_block, last_block] = lt_val
                     pbar.update(1)
         return losses, dt_mat, lt_mat
+
     all_losses, all_dt, all_lt = compute_losses(x, x_i, N, x_dt, x_lt)
 
     return all_losses, all_dt, all_lt, filename, x_l, x_f
@@ -379,7 +381,17 @@ def main():
         for u, c in zip(uniq.tolist(), counts.tolist()):
             print(f"  label {u}: {c}")
 
-        def plot_heatmap(mat_np, title: str, cbar_label: str, tag: str, labels_np, x_f_np, *, note: str | None = None, cmap_name: str | None = None):
+        def plot_heatmap(
+            mat_np,
+            title: str,
+            cbar_label: str,
+            tag: str,
+            labels_np,
+            x_f_np,
+            *,
+            note: str | None = None,
+            cmap_name: str | None = None,
+        ):
             fig_hm, ax_hm = plt.subplots(figsize=(12, 8))
             data_ma = np.ma.masked_invalid(mat_np)
             # Choose colormap (default depends on tag)
@@ -404,14 +416,7 @@ def main():
             ax_hm.set_title(f'{title}\nIndex {i}, File: {filename}', fontsize=14, pad=20)
 
             if note:
-                ax_hm.annotate(
-                    note,
-                    xy=(0.99, 0.01),
-                    xycoords='axes fraction',
-                    fontsize=8,
-                    ha='right',
-                    va='bottom',
-                )
+                ax_hm.annotate(note, xy=(0.99, 0.01), xycoords='axes fraction', fontsize=8, ha='right', va='bottom')
 
             # === Overlay: for each x (column), mark the y with the smallest finite value ===
             arr = np.array(mat_np, dtype=float)
@@ -428,16 +433,7 @@ def main():
                 diam_in = 2.0 * min(cell_w_in, cell_h_in)
                 diam_pt = diam_in * 72.0
                 s = diam_pt**2
-                ax_hm.scatter(
-                    cols,
-                    ys,
-                    s=s,
-                    c="#ff1493",
-                    marker='o',
-                    edgecolors='white',
-                    linewidths=0.4,
-                    zorder=7,
-                )
+                ax_hm.scatter(cols, ys, s=s, c="#ff1493", marker='o', edgecolors='white', linewidths=0.4, zorder=7)
 
             # === Chirp label strips (reused for all heatmaps) ===
             Hh, Wh = mat_np.shape
@@ -453,6 +449,7 @@ def main():
                     labels_adj[idx2] = -1
 
             from matplotlib.colors import BoundaryNorm
+
             lbl_x = labels_adj[:Wh].astype(int)
             lbl_y = labels_adj[:Hh].astype(int)
             cmap_lbl = ListedColormap(["#ffffff", "#add8e6", "#00008b"]).copy()
@@ -502,10 +499,14 @@ def main():
             def _imshow_left_strip(values_1d, label_text):
                 ax_lf = divider.append_axes("left", size="3%", pad=0.18, sharey=ax_hm)
                 strip = np.ma.masked_invalid(values_1d[:, np.newaxis])
-                ax_lf.imshow(strip, aspect='auto', cmap=plt.get_cmap('viridis'), interpolation='nearest', origin='lower')
+                ax_lf.imshow(
+                    strip, aspect='auto', cmap=plt.get_cmap('viridis'), interpolation='nearest', origin='lower'
+                )
                 ax_lf.set_ylim(ax_hm.get_ylim())
                 ax_lf.axis('off')
-                ax_lf.text(0.5, 1.0, label_text, transform=ax_lf.transAxes, fontsize=6, ha='center', va='top', rotation=90)
+                ax_lf.text(
+                    0.5, 1.0, label_text, transform=ax_lf.transAxes, fontsize=6, ha='center', va='top', rotation=90
+                )
 
             for bird_idx, bird_tag in enumerate(["L", "R"]):
                 for vi, vname in zip(var_indices, var_names):
