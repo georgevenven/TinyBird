@@ -132,25 +132,14 @@ def compute_loss(model, x, x_i, N, start_block, last_block, x_dt, x_lt):
 
         h, idx_restore, bool_mask, T = model.forward_encoder(xs, x_is, mblock=mblock)
 
-        # Verify masked pixel width matches window width.
-        # bool_mask is (B, T). Convert to (B, Htok, Wtok) using the patch grid implied by xs.
-        B, C, H_img, W_img = xs.shape
-        ph, pw = model.patch_size
-        Htok = max(1, H_img // ph)
-        Wtok = max(1, W_img // pw)
-        try:
-            bm = bool_mask.view(B, Htok, Wtok)
-        except RuntimeError:
-            # If reshape fails due to T mismatch, skip the assertion safely.
-            bm = None
-        if bm is not None:
-            # A pixel column is masked if ANY token in that token-column is masked.
-            col_mask_tok = bm.any(dim=1)[0]  # (Wtok,)
-            masked_cols = int(col_mask_tok.sum().item())
-            masked_px_width = masked_cols * pw
-            assert masked_px_width == width, (
-                f"masked_px_width ({masked_px_width}) != width ({width}); H={H_img}, W={W_img}, ph={ph}, pw={pw}, Htok={Htok}, Wtok={Wtok}"
-            )
+        B = xs.shape[0]
+        H = xs.shape[-2]
+        W = xs.shape[-1]
+
+        bm = bool_mask.view(B, H, W)
+        bwidth = int(bm[0, 0, :].sum().item())
+
+        assert bwidth == width, "bwidth != width for bwidth {bwidth} and width {width}"
 
         pred = model.forward_decoder(h, idx_restore, T)
         loss = model.loss_mse(xs, pred, bool_mask)

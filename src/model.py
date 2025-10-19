@@ -1,10 +1,5 @@
-from numpy._core.numeric import False_
-import torch, math
-from torch import nn
-
 import torch
-import torch.nn as nn
-import math
+from torch import nn
 
 
 class TinyBird(nn.Module):
