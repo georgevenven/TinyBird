@@ -135,6 +135,10 @@ def compute_loss(model, x, x_i, N, start_block, last_block, x_dt, x_lt):
         B = xs.shape[0]
         W = xs.shape[-1]
 
+        print("bool_mask.shape: ", bool_mask.shape)
+        print("xs.shape: ", xs.shape)
+        print("x_is.shape: ", x_is.shape)
+
         bm = bool_mask.view(B, -1, W)
         bwidth = int(bm[0, 0, :].sum().item())
 
