@@ -48,8 +48,7 @@ def prepare_sample(model, dataset, index, device):
     x, x_i = model.compactify_data(x.clone(), x_i.clone(), N.clone())
     return x, x_i, N, filename
 
-
-def compute_loss(model, x, x_i, N, start_block, last_block, n_blocks, isolate_block, x_dt=None, x_lt=None):
+def compute_loss(model, x, x_i, N, start_block, last_block, x_dt, x_lt):
     """
     Compute masked MSE loss for a given block configuration.
     Returns: (loss, xs, x_is, bool_mask, pred, mblock, indices)
@@ -58,29 +57,21 @@ def compute_loss(model, x, x_i, N, start_block, last_block, n_blocks, isolate_bl
         if start_block == last_block:
             return torch.tensor(float('nan'), device=x.device), None, None, None, None, None, None
 
-        if isolate_block:
-            indices = [start_block, last_block]
-        else:
-            if start_block < last_block:
-                indices = list(range(start_block, min(start_block + n_blocks, last_block))) + [last_block]
-            else:
-                indices = list(range(start_block, min(start_block + n_blocks, N.max().item()))) + [last_block]
+        indices     = list(range(last_block + 1, N.max().item())) + list(range(last_block + 1))
+        start_index = indices.index(start_block)
 
-        if x_dt is not None:
-            dt = x_dt[indices].sum().item()
-        else:
-            dt = float('nan')
-        if x_lt is not None:
-            lt = x_lt[indices].sum().item()
-        else:
-            lt = float('nan')
+        indices = indices[start_index:]
+        mblock  = [len(indices) - 1]
+
+        dt = x_dt[indices].sum().item()
+        lt = x_lt[indices].sum().item()
 
         xs, x_is = model.sample_data_indices(x.clone(), x_i.clone(), N.clone(), indices)
-        mblock = [len(indices) - 1]
         h, idx_restore, bool_mask, T = model.forward_encoder(xs, x_is, mblock=mblock)
         pred = model.forward_decoder(h, idx_restore, T)
         loss = model.loss_mse(xs, pred, bool_mask)
-        return loss, xs, x_is, bool_mask, pred, mblock, indices, dt, lt
+
+        return loss, dt, lt
     except RuntimeError as e:
         msg = str(e).lower()
         if ("out of memory" in msg or "cuda" in msg) and torch.cuda.is_available():
@@ -267,8 +258,7 @@ def process_file(model, dataset, index, device):
     print(f"  Chirp feats shape: {x_f.shape}")
     print(f"  Number of valid chirps: {N.item()}")
 
-    def compute_losses(x, x_i, N, x_dt, x_lt, isolate_block=False):
-        n_blocks = 10
+    def compute_losses(x, x_i, N, x_dt, x_lt):
         n_valid_chirps = N.max().item()
         losses = torch.full((n_valid_chirps, n_valid_chirps), float('nan'), device=device)
         dt_mat = torch.full((n_valid_chirps, n_valid_chirps), float('nan'), device=device)
@@ -277,31 +267,14 @@ def process_file(model, dataset, index, device):
         with tqdm(total=((n_valid_chirps - 1) * (n_valid_chirps - 1)), desc="Computing losses/dt/lt") as pbar:
             for last_block in range(1, n_valid_chirps):
                 for start_block in range(0, n_valid_chirps - 1):
-                    # Reconstruct the indices the same way compute_loss does
-                    if isolate_block:
-                        indices = [start_block, last_block]
-                    else:
-                        if start_block < last_block:
-                            indices = list(range(start_block, min(start_block + n_blocks, last_block))) + [last_block]
-                        else:
-                            indices = list(range(start_block, min(start_block + n_blocks, n_valid_chirps))) + [
-                                last_block
-                            ]
-
-                    dt_val = x_dt[indices].sum().item()
-                    lt_val = x_lt[indices].sum().item()
-
                     with torch.no_grad():
-                        loss, *_ = compute_loss(model, x, x_i, N, start_block, last_block, n_blocks, isolate_block)
-                    losses[start_block, last_block] = float('nan') if torch.isnan(loss) else loss.item()
+                        loss, dt_val, lt_val = compute_loss(model, x, x_i, N, start_block, last_block, x_dt, x_lt)
+                    losses[start_block, last_block] = float('nan') if torch.isnan(loss) else loss
                     dt_mat[start_block, last_block] = dt_val
                     lt_mat[start_block, last_block] = lt_val
                     pbar.update(1)
         return losses, dt_mat, lt_mat
-
-    all_losses, all_dt, all_lt = compute_losses(x, x_i, N, x_dt, x_lt, isolate_block=False)
-    # isolated disabled for now
-    # iso_losses, iso_dt, iso_lt = compute_losses(x, x_i, N, x_dt, x_lt, isolate_block=True)
+    all_losses, all_dt, all_lt = compute_losses(x, x_i, N, x_dt, x_lt)
 
     return all_losses, all_dt, all_lt, filename, x_l, x_f
 
@@ -406,85 +379,80 @@ def main():
         for u, c in zip(uniq.tolist(), counts.tolist()):
             print(f"  label {u}: {c}")
 
-        def plot_heatmap(loss_mat_np, tag: str, labels_np, x_f_np):
+        def plot_heatmap(mat_np, title: str, cbar_label: str, tag: str, labels_np, x_f_np, *, note: str | None = None, cmap_name: str | None = None):
             fig_hm, ax_hm = plt.subplots(figsize=(12, 8))
-            loss_ma = np.ma.masked_invalid(loss_mat_np)
-            # Colormap: low loss = green, high loss = red; NaNs = black
-            cmap = plt.get_cmap('RdYlGn_r').copy()
+            data_ma = np.ma.masked_invalid(mat_np)
+            # Choose colormap (default depends on tag)
+            if cmap_name is None:
+                cmap_name = 'RdYlGn_r' if tag.startswith('loss') else 'viridis'
+            cmap = plt.get_cmap(cmap_name).copy()
             cmap.set_bad(color='black')
             # Scale to finite data range
-            vmin = float(np.nanmin(loss_ma)) if np.isfinite(np.nanmin(loss_ma)) else 0.0
-            vmax = float(np.nanmax(loss_ma)) if np.isfinite(np.nanmax(loss_ma)) else 1.0
+            vmin = float(np.nanmin(data_ma)) if np.isfinite(np.nanmin(data_ma)) else 0.0
+            vmax = float(np.nanmax(data_ma)) if np.isfinite(np.nanmax(data_ma)) else 1.0
             if vmax <= vmin:
                 vmax = vmin + 1.0
-            im_hm = ax_hm.imshow(loss_ma, aspect='auto', cmap=cmap, origin='lower', vmin=vmin, vmax=vmax)
+            im_hm = ax_hm.imshow(data_ma, aspect='auto', cmap=cmap, origin='lower', vmin=vmin, vmax=vmax)
             cbar_hm = plt.colorbar(im_hm, ax=ax_hm)
-            cbar_hm.set_label('Loss (MSE)', rotation=270, labelpad=20, fontsize=12)
-            ax_hm.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
-            mode_label = (
-                'Isolated Block Mode (isolate_block=True)'
-                if tag == 'isolated'
-                else 'All Blocks Mode (isolate_block=False)'
-            )
-            ax_hm.set_title(f'Loss (MSE) Heatmap – {mode_label}\nIndex {i}, File: {filename}', fontsize=14, pad=20)
-            ax_hm.annotate(
-                'NaN = black; low = green; high = red. Sparse near diagonal due to windowing.',
-                xy=(0.99, 0.01),
-                xycoords='axes fraction',
-                fontsize=8,
-                ha='right',
-                va='bottom',
-            )
+            cbar_hm.set_label(cbar_label, rotation=270, labelpad=20, fontsize=12)
 
-            # === Overlay: for each x (column), mark the y with the smallest finite loss ===
-            arr = np.array(loss_mat_np, dtype=float)
+            # Axes labels reflect matrix semantics: rows=start_block, cols=last_block
+            ax_hm.set_xlabel('last_block (end index)')
+            ax_hm.set_ylabel('start_block (start index)')
+
+            ax_hm.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+            ax_hm.set_title(f'{title}\nIndex {i}, File: {filename}', fontsize=14, pad=20)
+
+            if note:
+                ax_hm.annotate(
+                    note,
+                    xy=(0.99, 0.01),
+                    xycoords='axes fraction',
+                    fontsize=8,
+                    ha='right',
+                    va='bottom',
+                )
+
+            # === Overlay: for each x (column), mark the y with the smallest finite value ===
+            arr = np.array(mat_np, dtype=float)
             finite_mask = np.isfinite(arr)
-            # Columns that have at least one finite value
             cols = np.where(finite_mask.any(axis=0))[0]
             if cols.size > 0:
-                # Replace non-finite with +inf so argmin ignores them
                 arr_inf = arr.copy()
                 arr_inf[~finite_mask] = np.inf
                 ys = np.argmin(arr_inf[:, cols], axis=0)
-                # Compute marker size ~ size of one heatmap cell
                 fig = ax_hm.figure
                 bbox = ax_hm.get_window_extent().transformed(fig.dpi_scale_trans.inverted())
-                # cell sizes (in inches)
                 cell_w_in = (bbox.width) / max(1, arr.shape[1])
                 cell_h_in = (bbox.height) / max(1, arr.shape[0])
-                # diameter ~ 1.2 of the smaller cell dimension (slightly larger than a cell)
                 diam_in = 2.0 * min(cell_w_in, cell_h_in)
-                # convert diameter (inches) to points, then to area (points^2)
                 diam_pt = diam_in * 72.0
                 s = diam_pt**2
                 ax_hm.scatter(
                     cols,
                     ys,
                     s=s,
-                    c="#ff1493",  # brighter pink
+                    c="#ff1493",
                     marker='o',
                     edgecolors='white',
                     linewidths=0.4,
                     zorder=7,
                 )
 
-            # Add chirp label strips along axes using shared axes for pixel-perfect alignment
-            Hh, Wh = loss_mat_np.shape
-            # Adjust labels based on presence of chirp in x_f: if label says a bird but that bird has no chirp (>0) at index, mark -1
+            # === Chirp label strips (reused for all heatmaps) ===
+            Hh, Wh = mat_np.shape
             if isinstance(x_f_np, torch.Tensor):
                 x_f_np = x_f_np.detach().cpu().numpy()
             labels_adj = labels_np.copy()
-            L_call = x_f_np[:, 0, 3].astype(float)  # call channel for left bird
-            R_call = x_f_np[:, 1, 3].astype(float)  # call channel for right bird
-            for idx in range(min(len(labels_adj), x_f_np.shape[0])):
-                if labels_adj[idx] == 0 and not (L_call[idx] > 0):
-                    labels_adj[idx] = -1
-                elif labels_adj[idx] == 1 and not (R_call[idx] > 0):
-                    labels_adj[idx] = -1
+            L_call = x_f_np[:, 0, 3].astype(float)
+            R_call = x_f_np[:, 1, 3].astype(float)
+            for idx2 in range(min(len(labels_adj), x_f_np.shape[0])):
+                if labels_adj[idx2] == 0 and not (L_call[idx2] > 0):
+                    labels_adj[idx2] = -1
+                elif labels_adj[idx2] == 1 and not (R_call[idx2] > 0):
+                    labels_adj[idx2] = -1
 
-            # Use 3-class mapping: -1 -> white (no chirp), 0 -> light blue (L), 1 -> dark blue (R)
             from matplotlib.colors import BoundaryNorm
-
             lbl_x = labels_adj[:Wh].astype(int)
             lbl_y = labels_adj[:Hh].astype(int)
             cmap_lbl = ListedColormap(["#ffffff", "#add8e6", "#00008b"]).copy()
@@ -492,11 +460,9 @@ def main():
             norm_lbl = BoundaryNorm(bounds, cmap_lbl.N)
 
             divider = make_axes_locatable(ax_hm)
-            # Increase pad to leave room for axis labels and ticks
             ax_strip_x = divider.append_axes("bottom", size="3%", pad=0.3, sharex=ax_hm)
             ax_strip_y = divider.append_axes("left", size="3%", pad=0.45, sharey=ax_hm)
 
-            # Bottom strip (x-axis): 1 × Wh
             ax_strip_x.imshow(
                 lbl_x[np.newaxis, :],
                 aspect='auto',
@@ -508,7 +474,6 @@ def main():
             ax_strip_x.set_xlim(ax_hm.get_xlim())
             ax_strip_x.axis('off')
 
-            # Left strip (y-axis): Hh × 1 (origin lower to match heatmap orientation)
             ax_strip_y.imshow(
                 lbl_y[:, np.newaxis],
                 aspect='auto',
@@ -520,11 +485,9 @@ def main():
             ax_strip_y.set_ylim(ax_hm.get_ylim())
             ax_strip_y.axis('off')
 
-            # === Additional strips: 6 variables per bird (below & left), perfectly aligned ===
-            # x_f_np has shape (N, 2, 6)
+            # Additional feature strips (reused)
             if isinstance(x_f_np, torch.Tensor):
                 x_f_np = x_f_np.detach().cpu().numpy()
-
             var_names = ["x", "y", "z"]
             var_indices = [0, 1, 2]
 
@@ -539,39 +502,55 @@ def main():
             def _imshow_left_strip(values_1d, label_text):
                 ax_lf = divider.append_axes("left", size="3%", pad=0.18, sharey=ax_hm)
                 strip = np.ma.masked_invalid(values_1d[:, np.newaxis])
-                ax_lf.imshow(
-                    strip, aspect='auto', cmap=plt.get_cmap('viridis'), interpolation='nearest', origin='lower'
-                )
+                ax_lf.imshow(strip, aspect='auto', cmap=plt.get_cmap('viridis'), interpolation='nearest', origin='lower')
                 ax_lf.set_ylim(ax_hm.get_ylim())
                 ax_lf.axis('off')
-                ax_lf.text(
-                    0.5, 1.0, label_text, transform=ax_lf.transAxes, fontsize=6, ha='center', va='top', rotation=90
-                )
+                ax_lf.text(0.5, 1.0, label_text, transform=ax_lf.transAxes, fontsize=6, ha='center', va='top', rotation=90)
 
-            # Determine extents matching heatmap dimensions
-            Hh, Wh = loss_mat_np.shape
-
-            # Create strips for each bird and variable (order: L bird0 vars, then R bird1 vars)
             for bird_idx, bird_tag in enumerate(["L", "R"]):
                 for vi, vname in zip(var_indices, var_names):
                     vec = x_f_np[:, bird_idx, vi].astype(float)
-                    # Bottom strips align with width (columns)
                     _imshow_bottom_strip(vec[:Wh], f"{bird_tag} {vname}")
-                    # Left strips align with height (rows)
                     _imshow_left_strip(vec[:Hh], f"{bird_tag} {vname}")
 
             plt.tight_layout()
-            # Add a small extra margin to leave room for axis labels and ticks
             plt.subplots_adjust(bottom=0.12, left=0.10)
-            loss_hm_out = os.path.join(images_dir, f"loss_heatmap_{tag}_{i}_{filename}.png")
-            fig_hm.savefig(loss_hm_out, dpi=300, bbox_inches='tight')
+            out_path = os.path.join(images_dir, f"heatmap_{tag}_{i}_{filename}.png")
+            fig_hm.savefig(out_path, dpi=300, bbox_inches='tight')
             plt.close(fig_hm)
-            print(f"Saved: {loss_hm_out}")
+            print(f"Saved: {out_path}")
 
         # Heatmaps use the full sparse matrices (with chirp label strips)
-        plot_heatmap(all_np, tag='allblocks', labels_np=labels_np, x_f_np=x_f)
-        plot_heatmap(dt_np, tag='allblocks_dt', labels_np=labels_np, x_f_np=x_f)
-        plot_heatmap(lt_np, tag='allblocks_lt', labels_np=labels_np, x_f_np=x_f)
+        plot_heatmap(
+            all_np,
+            title='Loss (MSE) Heatmap – All Blocks Mode',
+            cbar_label='Loss (MSE)',
+            tag='loss_allblocks',
+            labels_np=labels_np,
+            x_f_np=x_f,
+            note='NaN = black; low = green; high = red. Sparse near diagonal due to windowing.',
+            cmap_name='RdYlGn_r',
+        )
+        plot_heatmap(
+            dt_np,
+            title='Δt Heatmap – gap between blocks (time between masked start and last block)',
+            cbar_label='Time between blocks',
+            tag='dt',
+            labels_np=labels_np,
+            x_f_np=x_f,
+            note='Δt: amount of time between blocks (gaps). Rows = start_block, Cols = last_block.',
+            cmap_name='viridis',
+        )
+        plot_heatmap(
+            lt_np,
+            title='ℓt Heatmap – time within blocks (duration of included blocks)',
+            cbar_label='Time within blocks',
+            tag='lt',
+            labels_np=labels_np,
+            x_f_np=x_f,
+            note='ℓt: amount of time in blocks (durations). Rows = start_block, Cols = last_block.',
+            cmap_name='viridis',
+        )
 
     # If a single index is specified, only process that file; otherwise process all
     if args.index >= 0:
