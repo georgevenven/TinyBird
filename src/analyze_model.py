@@ -121,36 +121,7 @@ def compute_loss(model, x, x_i, N, start_block, last_block, x_dt, x_lt):
 
     try:
         xs, x_is = model.sample_data_indices(x.clone(), x_i.clone(), N.clone(), indices)
-
-        assert x_is.shape[1] == len(indices), (
-            "x_is.shape[1] != len(indices) for indices length {len(indices)} and x_is.shape[1] {x_is.shape[1]}"
-        )
-
-        width = int((x_is[0, -1, 1] - x_is[0, -1, 0]).item())
-        spec_width = int((x_i[0, last_block, 1] - x_i[0, last_block, 0]).item())
-        assert width == spec_width, "width != spec_width for width {width} and spec_width {spec_width}"
-
         h, idx_restore, bool_mask, T = model.forward_encoder(xs, x_is, mblock=mblock)
-
-        B = xs.shape[0]
-        W = xs.shape[-1]
-
-        print("bool_mask.shape: ", bool_mask.shape)
-        print("xs.shape: ", xs.shape)
-        print("x_is.shape: ", x_is.shape)
-
-        bm = bool_mask.view(B, -1, W)
-
-        print("bm.shape: ", bm.shape)
-
-        bwidth = int(bm[0, 0, :].sum().item())
-
-        print("bwidth: ", bwidth)
-        print("bm width: ", int(bm.sum().item()))
-        print("width: ", width)
-
-        assert bwidth == width, f"bwidth != width for bwidth {bwidth} and width {width}"
-
         pred = model.forward_decoder(h, idx_restore, T)
         loss = model.loss_mse(xs, pred, bool_mask)
         return loss, dt, lt, xs, x_is, bool_mask, pred, mblock, indices
