@@ -203,14 +203,29 @@ def save_reconstruction(model, x, x_i, N, last_block, x_dt, x_lt, *, filename, i
     x_rec_cpu = x_rec[0, 0].detach().cpu().numpy()
     vmin = min(np.nanmin(xs_cpu), np.nanmin(x_rec_cpu))
     vmax = max(np.nanmax(xs_cpu), np.nanmax(x_rec_cpu))
-    fig, axs = plt.subplots(3, 1, figsize=(12, 12), sharex=True, sharey=True)
+    from matplotlib.gridspec import GridSpec
+
+    # Figure with right-hand zoom panes
+    fig = plt.figure(figsize=(14, 10))
+    gs = GridSpec(3, 2, width_ratios=[3.5, 1.4], height_ratios=[1, 1, 1], wspace=0.10, hspace=0.08)
+
+    ax_in_full  = fig.add_subplot(gs[0, 0])
+    ax_rec_full = fig.add_subplot(gs[1, 0], sharex=ax_in_full, sharey=ax_in_full)
+    ax_err_full = fig.add_subplot(gs[2, 0], sharex=ax_in_full, sharey=ax_in_full)
+
+    ax_in_zoom  = fig.add_subplot(gs[0, 1], sharey=ax_in_full)
+    ax_rec_zoom = fig.add_subplot(gs[1, 1], sharey=ax_in_full)
+    ax_err_zoom = fig.add_subplot(gs[2, 1], sharey=ax_in_full)
+
     cmap = plt.get_cmap('magma')
-    im0 = axs[0].imshow(xs_cpu, cmap=cmap, vmin=vmin, vmax=vmax, origin='lower', aspect='auto', interpolation='nearest')
-    axs[0].set_title('Input')
-    im1 = axs[1].imshow(
+    im0 = ax_in_full.imshow(
+        xs_cpu, cmap=cmap, vmin=vmin, vmax=vmax, origin='lower', aspect='auto', interpolation='nearest'
+    )
+    ax_in_full.set_title('Input')
+    im1 = ax_rec_full.imshow(
         x_rec_cpu, cmap=cmap, vmin=vmin, vmax=vmax, origin='lower', aspect='auto', interpolation='nearest'
     )
-    axs[1].set_title('Reconstruction')
+    ax_rec_full.set_title('Reconstruction')
     # Overlay masked region on panel 0 only
     col_mask = _column_mask_2d(bool_mask, H, W, model.patch_size)[0].cpu().numpy()
     # Find contiguous True spans in col_mask and draw axvspan
@@ -221,14 +236,23 @@ def save_reconstruction(model, x, x_i, N, last_block, x_dt, x_lt, *, filename, i
             start = i
             in_span = True
         elif not col_mask[i] and in_span:
-            axs[0].axvspan(start - 0.5, i - 0.5, alpha=0.25, color='yellow')
+            ax_in_full.axvspan(start - 0.5, i - 0.5, alpha=0.25, color='yellow')
             in_span = False
     if in_span:
-        axs[0].axvspan(start - 0.5, len(col_mask) - 0.5, alpha=0.25, color='yellow')
+        ax_in_full.axvspan(start - 0.5, len(col_mask) - 0.5, alpha=0.25, color='yellow')
+
+    # Determine the masked span (contiguous True region). If multiple spans, merge to min..max
+    col_mask_bool = col_mask.astype(bool)
+    true_idxs = np.where(col_mask_bool)[0]
+    zoom_has_span = true_idxs.size > 0
+    if zoom_has_span:
+        span_start = int(true_idxs.min())
+        span_end   = int(true_idxs.max() + 1)  # exclusive
+    else:
+        span_start, span_end = 0, 1  # harmless fallback to 1 column
+
     # Difference heatmap (reconstruction error) only within masked region
     diff = x_rec_cpu - xs_cpu
-    # Broadcast column mask to HxW and mask outside region
-    col_mask_bool = col_mask.astype(bool)
     mask_hw = ~np.broadcast_to(col_mask_bool, (H, W))
     diff_ma = np.ma.masked_array(diff, mask=mask_hw)
     # Symmetric color scale based on masked region
@@ -240,26 +264,53 @@ def save_reconstruction(model, x, x_i, N, last_block, x_dt, x_lt, *, filename, i
         max_abs = np.nanmax(np.abs(diff)) if np.isfinite(np.nanmax(np.abs(diff))) else 1.0
     cmap_diff = plt.get_cmap('coolwarm').copy()
     cmap_diff.set_bad(color='black')  # outside masked region
-    im2 = axs[2].imshow(
+    im2 = ax_err_full.imshow(
         diff_ma, cmap=cmap_diff, vmin=-max_abs, vmax=max_abs, origin='lower', aspect='auto', interpolation='nearest'
     )
-    axs[2].set_title('Reconstruction Error (masked region only)')
+    ax_err_full.set_title('Reconstruction Error (masked region only)')
+
+    # === Right-hand zoom panels: crop to the masked span, keep exact masked width ===
+    if zoom_has_span:
+        xs_crop     = xs_cpu[:, span_start:span_end]
+        xrec_crop   = x_rec_cpu[:, span_start:span_end]
+        diff_crop   = diff[:, span_start:span_end]
+
+        ax_in_zoom.imshow(  xs_crop,   cmap=cmap,      vmin=vmin,   vmax=vmax,   origin='lower', aspect='auto', interpolation='nearest')
+        ax_rec_zoom.imshow( xrec_crop, cmap=cmap,      vmin=vmin,   vmax=vmax,   origin='lower', aspect='auto', interpolation='nearest')
+        ax_err_zoom.imshow( diff_crop, cmap=cmap_diff, vmin=-max_abs, vmax=max_abs, origin='lower', aspect='auto', interpolation='nearest')
+
+        ax_in_zoom.set_title('Masked span (Input)')
+        ax_rec_zoom.set_title('Masked span (Reconstruction)')
+        ax_err_zoom.set_title('Masked span (Error)')
+
+        # Tighten x-lims to show exact masked width without padding
+        ax_in_zoom.set_xlim(0, xs_crop.shape[1])
+        ax_rec_zoom.set_xlim(0, xrec_crop.shape[1])
+        ax_err_zoom.set_xlim(0, diff_crop.shape[1])
+
+        # Hide y tick labels on zoom panes; keep y shared with left for alignment
+        for axz in (ax_in_zoom, ax_rec_zoom, ax_err_zoom):
+            axz.tick_params(axis='y', which='both', left=False, labelleft=False)
+    else:
+        # No masked span; hide zoom axes content
+        for axz in (ax_in_zoom, ax_rec_zoom, ax_err_zoom):
+            axz.axis('off')
+
     # Draw separators
-    _draw_separators(axs[0], x_is[0].detach().cpu().numpy())
-    _draw_separators(axs[1], x_is[0].detach().cpu().numpy())
-    _draw_separators(axs[2], x_is[0].detach().cpu().numpy())
+    _draw_separators(ax_in_full,  x_is[0].detach().cpu().numpy())
+    _draw_separators(ax_rec_full, x_is[0].detach().cpu().numpy())
+    _draw_separators(ax_err_full, x_is[0].detach().cpu().numpy())
     # Add colorbars for each panel
-    cbar0 = fig.colorbar(im0, ax=axs[0], fraction=0.025, pad=0.02)
+    cbar0 = fig.colorbar(im0, ax=ax_in_full, fraction=0.025, pad=0.02)
     cbar0.set_label('Amplitude', rotation=270, labelpad=12)
-    cbar1 = fig.colorbar(im1, ax=axs[1], fraction=0.025, pad=0.02)
+    cbar1 = fig.colorbar(im1, ax=ax_rec_full, fraction=0.025, pad=0.02)
     cbar1.set_label('Amplitude', rotation=270, labelpad=12)
-    cbar2 = fig.colorbar(im2, ax=axs[2], fraction=0.025, pad=0.02)
+    cbar2 = fig.colorbar(im2, ax=ax_err_full, fraction=0.025, pad=0.02)
     cbar2.set_label('Diff (recon - input)', rotation=270, labelpad=12)
     # Detailed title
-    indices_str = str(indices)
     mblock_str = mblock[0] if mblock is not None and len(mblock) > 0 else 'N/A'
     loss_str = f"{loss.item():.6f}" if loss is not None and torch.isfinite(loss) else "NaN"
-    title = f"{filename}, idx={index}, last={last_block},  indices={indices_str}, mblock={mblock_str}, loss={loss_str}"
+    title = f"{filename}, idx={index}, last={last_block}, mblock={mblock_str}, loss={loss_str}"
     fig.suptitle(title, fontsize=11)
     plt.tight_layout(rect=[0, 0.03, 1, 0.96])
     os.makedirs(images_dir, exist_ok=True)
