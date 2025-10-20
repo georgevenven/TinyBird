@@ -421,7 +421,7 @@ class TinyBird(nn.Module):
 
         for block in mask_blocks:
             if half_mask:
-                start = max(0, (ends[0, block] - starts[0, block]) // 2)
+                start = starts[0, block] + max(0, (ends[0, block] - starts[0, block]) // 2)
             else:
                 start = starts[0, block]
             mask2d[:, start : ends[0, block]] = True
