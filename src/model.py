@@ -384,7 +384,9 @@ class TinyBird(nn.Module):
             assert all((0 <= i < N) for i in mblock), f"invalid mblock indices N={N}, got {mblock}"
             masked_blocks = 0  # disable masked_blocks
         else:
-            assert (0 < masked_blocks <= N), f"masked_blocks must be greater than 0 and less than or equal to N, got {masked_blocks} and {N}"
+            assert 0 < masked_blocks <= N, (
+                f"masked_blocks must be greater than 0 and less than or equal to N, got {masked_blocks} and {N}"
+            )
 
         if len(iblock) > 0:
             # if iblock is set, ensure mblock is set
@@ -393,31 +395,38 @@ class TinyBird(nn.Module):
 
         starts = xi[:, :, 0].to(torch.long).clamp(min=0, max=W)  # (B, N)
         ends = xi[:, :, 1].to(torch.long).clamp(min=0, max=W)  # (B, N)
-        widths = (ends - starts).clamp(min=0)  # (B, N)
+        # widths = (ends - starts).clamp(min=0)  # (B, N)
 
         if len(mblock) > 0:
             mask_blocks = mblock
         elif masked_blocks > 0:
             mask_blocks = torch.randperm(N, device=device)[:masked_blocks].tolist()  # randomly select n_blocks blocks
 
-        m_ws = [None] * len(mask_blocks)
-        for index, block in enumerate(mask_blocks):
-            m_w = min([int(widths[b, block].sum().item()) for b in range(B)])
-            if half_mask:
-                m_w = m_w // 2
-            m_ws[index]=m_w
-    
+        # only look at the first item in the batch
+        # m_ws = [None] * len(mask_blocks)
+        # for index, block in enumerate(mask_blocks):
+        #     m_w = min([int(widths[b, block].sum().item()) for b in range(B)])
+        #     m_w = int(widths[0, block].sum().item())
+        #     if half_mask:
+        #         m_w = m_w // 2
+        #     m_ws[index] = m_w
 
         mask2d = torch.zeros(B, W, dtype=torch.bool, device=device)  # mask2d is a boolean mask of the spectrogram
 
-        for b in range(B):
-            end_i = [int(v) for v in ends[b].tolist()]
-            for index, block in enumerate(mask_blocks):
-                s = max(0, end_i[block] - m_ws[index])
-                mask2d[b, s : end_i[block]] = True
+        # for b in range(B):
+        #     end_i = [int(v) for v in ends[b].tolist()]
+        #     for index, block in enumerate(mask_blocks):
+        #         s = max(0, end_i[block] - m_ws[index])
+        #         mask2d[b, s : end_i[block]] = True
 
+        for block in mask_blocks:
+            if half_mask:
+                start = max(0, (ends[0, block] - starts[0, block]) // 2)
+            else:
+                start = starts[0, block]
+            mask2d[:, start : ends[0, block]] = True
 
-        mask = mask2d.unsqueeze(1).expand(B, H, W).reshape(B, H*W)
+        mask = mask2d.unsqueeze(1).expand(B, H, W).reshape(B, H * W)
         return mask
 
     def mask(self, z: torch.Tensor, bool_mask: torch.Tensor):
