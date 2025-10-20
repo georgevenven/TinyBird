@@ -354,9 +354,9 @@ class TinyBird(nn.Module):
         self,
         xi: torch.Tensor,
         hw: (None, None),
-        masked_blocks: int = -1,
         mblock: list = [],
         iblock: list = [],
+        masked_blocks: int = 0,
         half_mask: bool = False,
     ):
         """
@@ -384,9 +384,7 @@ class TinyBird(nn.Module):
             assert all((0 <= i < N) for i in mblock), f"invalid mblock indices N={N}, got {mblock}"
             masked_blocks = 0  # disable masked_blocks
         else:
-            # if mblock is not set, ensure masked_blocks is valid
-            assert masked_blocks > 0, f"masked_blocks must be greater than 0, got {masked_blocks}"
-            assert masked_blocks < N, f"masked_blocks must be less than N, got {masked_blocks} and {N}"
+            assert (0 < masked_blocks <= N), f"masked_blocks must be greater than 0 and less than or equal to N, got {masked_blocks} and {N}"
 
         if len(iblock) > 0:
             # if iblock is set, ensure mblock is set
@@ -397,25 +395,26 @@ class TinyBird(nn.Module):
         ends = xi[:, :, 1].to(torch.long).clamp(min=0, max=W)  # (B, N)
         widths = (ends - starts).clamp(min=0)  # (B, N)
 
-        # get n_block random blocks between 0 and N ensure there are no duplicates
-        mask_blocks = []
         if len(mblock) > 0:
             mask_blocks = mblock
-            m_w = min([int(widths[b, mask_blocks].sum().item()) for b in range(B)])  # max width of the blocks
         elif masked_blocks > 0:
             mask_blocks = torch.randperm(N, device=device)[:masked_blocks].tolist()  # randomly select n_blocks blocks
-            m_w = min([int(widths[b, mask_blocks].sum().item()) for b in range(B)])  # max width of the blocks
 
-        if half_mask:
-            m_w = m_w // 2
+        m_ws = [None] * len(mask_blocks)
+        for index, block in enumerate(mask_blocks):
+            m_w = min([int(widths[b, block].sum().item()) for b in range(B)])
+            if half_mask:
+                m_w = m_w // 2
+            m_ws[index]=m_w
+    
 
         mask2d = torch.zeros(B, W, dtype=torch.bool, device=device)  # mask2d is a boolean mask of the spectrogram
 
         for b in range(B):
             end_i = [int(v) for v in ends[b].tolist()]
-            for blk in mask_blocks:
-                s = max(0, end_i[blk] - m_w)
-                mask2d[b, s : end_i[blk]] = True
+            for index, block in enumerate(mask_blocks):
+                s = max(0, end_i[block] - m_ws[index])
+                mask2d[b, s : end_i[block]] = True
 
 
         mask = mask2d.unsqueeze(1).expand(B, H, W).reshape(B, H*W)
