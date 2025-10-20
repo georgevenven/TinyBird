@@ -142,8 +142,27 @@ def save_reconstruction(model, x, x_i, N, last_block, x_dt, x_lt, *, filename, i
     Save a side-by-side reconstruction visualization for a given block configuration.
     Returns: (output_path, loss)
     """
+    # Choose start_block using cached losses (best per-column), fallback to last_block+1
+    default_start = last_block + 1
+    best_start = default_start
+    try:
+        cached = load_from_cache(filename)
+        if cached is not None and len(cached) >= 1:
+            cached_losses = cached[0]
+            if torch.is_tensor(cached_losses):
+                col = cached_losses.detach().cpu().numpy()[:, last_block]
+            else:
+                col = np.array(cached_losses)[:, last_block]
+            # Pick the row index (start_block) with the lowest finite loss for this column
+            finite_mask = np.isfinite(col)
+            if finite_mask.any():
+                best_start = int(np.nanargmin(np.where(finite_mask, col, np.nan)))
+    except Exception as e:
+        # If anything goes wrong with cache logic, silently fall back
+        best_start = default_start
+
     loss, dt, lt, xs, x_is, bool_mask, pred, mblock, indices = compute_loss(
-        model, x, x_i, N, start_block=last_block + 1, last_block=last_block, x_dt=x_dt, x_lt=x_lt
+        model, x, x_i, N, start_block=best_start, last_block=last_block, x_dt=x_dt, x_lt=x_lt
     )
     if xs is None or pred is None or bool_mask is None:
         return None, loss
@@ -353,7 +372,7 @@ def process_file(model, dataset, index, device):
             for last_block in range(1, n_valid_chirps):
                 for start_block in range(0, n_valid_chirps - 1):
                     with torch.no_grad():
-                        loss, dt_val, lt_val, _, _, _, _, _, _ = compute_loss(model, x, x_i, N, start_block, last_block, x_dt, x_lt)
+                        loss, dt_val, lt_val, *_ = compute_loss(model, x, x_i, N, start_block, last_block, x_dt, x_lt)
                     losses[start_block, last_block] = float('nan') if torch.isnan(loss) else loss
                     dt_mat[start_block, last_block] = dt_val
                     lt_mat[start_block, last_block] = lt_val
