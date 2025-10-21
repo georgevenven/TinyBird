@@ -86,8 +86,8 @@ def test_file(model, dataset, index, device):
 
     # generate a torch array that goes from 0 to 10
     x = torch.arange(0, 10, device=device, dtype=torch.long)
-    x = x.view(1, 1, 1, 10).expand(1, 1, 3, 10).clone()   
-    x_i = torch.tensor([[0, 1], [2, 3], [4, 5], [6, 7], [8, 9]], device=device, dtype=torch.long)
+    x = x.view(1, 1, 1, 10).expand(1, 1, 3, 10).clone()
+    x_i = torch.tensor([[0, 1], [2, 3], [4, 5], [6, 7], [8, 10]], device=device, dtype=torch.long)
     x_i = x_i.unsqueeze(0)
     N = torch.tensor([5], device=device, dtype=torch.long)
     print("N shape: ", N.shape)
@@ -102,8 +102,8 @@ def test_file(model, dataset, index, device):
     print("x_sdi shape: ", x_sdi.shape)
     print("x_sdi[0,0,0,:]:", x_sdi[0, 0, 0, :].tolist())
     print("x_i_sdi shape: ", x_i_sdi.shape)
-    print("x_i_sdi[0,0,:,0]:", x_i_sdi[0,:, 0].tolist())
-    print("x_i_sdi[0,0,:,1]:", x_i_sdi[0,:, 1].tolist())
+    print("x_i_sdi[0,0,:,0]:", x_i_sdi[0, :, 0].tolist())
+    print("x_i_sdi[0,0,:,1]:", x_i_sdi[0, :, 1].tolist())
 
     print("remap_boundaries")
     x_r, x_i_r = model.remap_boundaries(x, x_i, N, move_block=2)
