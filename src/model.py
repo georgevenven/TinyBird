@@ -327,25 +327,22 @@ class TinyBird(nn.Module):
 
         for b in range(B):
             pos = 0
+            divider_pos = int(xi[b, 0, 1].item()) if len(valid) > 1 else -1
             for k, idx in enumerate(valid):
                 s0 = int(xi[b, idx, 0].item())
                 e0 = int(xi[b, idx, 1].item())
                 w = max(0, e0 - s0)
-                if w > 0 and pos + w <= max_width:
-                    # Copy all channels, not just channel 0
-                    x_out[b, :, :, pos : pos + w] = x[b, :, :, s0:e0]
-                    xi_out[b, k, 0] = pos
-                    xi_out[b, k, 1] = pos + w
-                    pos += w
-                else:
-                    # Degenerate case: zero-width or truncated by max_width; keep xi_out contiguous
-                    xi_out[b, k, 0] = pos
-                    xi_out[b, k, 1] = pos
+
+                # Copy all channels, not just channel 0
+                x_out[b, :, :, pos : pos + w] = x[b, :, :, s0:e0]
+                xi_out[b, k, 0] = pos
+                xi_out[b, k, 1] = pos + w
+                pos += w
+
                 # Insert separator if not the last selected block and room remains
-                if k < K - 1 and pos < max_width:
+                if k < K - 1 and divider_pos > 0:
                     # Use a separator column; e0 is end-exclusive so clamp to W-1
-                    e0_clamped = min(e0, W - 1)
-                    x_out[b, :, :, pos] = x[b, :, :, e0_clamped]
+                    x_out[b, :, :, pos] = x[b, :, :, divider_pos]
                     pos += 1
 
         return x_out, xi_out
