@@ -69,7 +69,49 @@ def parse_args():
     parser.add_argument(
         "--isolate-block", action="store_true", help="Use isolate_block=True during save_reconstruction"
     )
+    parser.add_argument("--test", action="store_true", help="Run the model in test mode (test logic placeholder).")
     return parser.parse_args()
+
+
+def test_file(model, dataset, index, device):
+    """
+    Loading sample at index 0
+    Filename: 1740770732_USA5483_USA5494.1168.0_300
+    Spectrogram shape: torch.Size([1, 1, 128, 2524])
+    Chirp intervals shape: torch.Size([1, 109, 2])
+    Chirp labels shape: torch.Size([109])
+    Chirp feats shape: torch.Size([109, 2, 6])
+    Number of valid chirps: 109
+    """
+
+    # generate a torch array that goes from 0 to 10
+    x = torch.arange(0, 10, device=device, dtype=torch.long)
+    x = x.view(1, 1, 1, 10).expand(1, 1, 3, 10).clone()   
+    x_i = torch.tensor([[0, 1], [2, 3], [4, 5], [6, 7], [8, 9]], device=device, dtype=torch.long)
+    x_i = x_i.unsqueeze(0)
+    N = torch.tensor([5], device=device, dtype=torch.long)
+    print("N shape: ", N.shape)
+    print("x shape: ", x.shape)
+    print("x[0,0,0,:]:", x[0, 0, 0, :].tolist())
+    print("x_i shape: ", x_i.shape)
+    print("x_i[0,0,:,0]:", x_i[0, 0, :, 0].tolist())
+    print("x_i[0,0,:,1]:", x_i[0, 0, :, 1].tolist())
+
+    print("sample_data_indices")
+    x_sdi, x_i_sdi = model.sample_data_indices(x, x_i, N, [3, 4, 0, 1, 2])
+    print("x_sdi shape: ", x_sdi.shape)
+    print("x_sdi[0,0,0,:]:", x_sdi[0, 0, 0, :].tolist())
+    print("x_i_sdi shape: ", x_i_sdi.shape)
+    print("x_i_sdi[0,0,:,0]:", x_i_sdi[0, 0, :, 0].tolist())
+    print("x_i_sdi[0,0,:,1]:", x_i_sdi[0, 0, :, 1].tolist())
+
+    print("remap_boundaries")
+    x_r, x_i_r = model.remap_boundaries(x, x_i, N, move_block=2)
+    print("x_r shape: ", x_r.shape)
+    print("x_r[0,0,0,:]:", x_r[0, 0, 0, :].tolist())
+    print("x_i_r shape: ", x_i_r.shape)
+    print("x_i_r[0,0,:,0]:", x_i_r[0, 0, :, 0].tolist())
+    print("x_i_r[0,0,:,1]:", x_i_r[0, 0, :, 1].tolist())
 
 
 def prepare_sample(model, dataset, index, device):
@@ -433,6 +475,22 @@ def main():
 
     images_dir = "images"
     os.makedirs(images_dir, exist_ok=True)
+
+    # === Test mode branch ===
+    if args.test:
+        print("\nTest mode enabled.")
+        if args.index >= 0:
+            if args.index >= len(dataset):
+                raise ValueError(f"Index {args.index} out of range. Dataset has {len(dataset)} files.")
+            test_file(model, dataset, args.index, device)
+        else:
+            print(f"\nProcessing all {len(dataset)} files (test mode)...")
+            for i in range(len(dataset)):
+                test_file(model, dataset, i, device)
+        print("\n" + "=" * 60)
+        print("Test mode complete!")
+        print("=" * 60)
+        return
 
     # === Reconstruction-only mode branch ===
     reconstruction_mode = (args.start_block is not None) and (args.last_block is not None)
