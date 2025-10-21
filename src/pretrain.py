@@ -336,8 +336,13 @@ class Trainer:
                 if self.use_amp:
                     with torch.amp.autocast('cuda'):
                         x, x_i = self.tinybird.compactify_data(x, x_i, N)
+
+                        #randomly remap the boundaries
+                        x, x_i = self.tinybird.remap_boundaries(x, x_i, N)
+
                         x, x_i = self.tinybird.sample_data_seq_length(x, x_i, N, seq_len=8000)
                         B, W, N = x.shape[0], x.shape[-1], x_i.shape[1]
+
 
                         if random.random() < 0.5:
                             mblock = [N - 1]

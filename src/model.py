@@ -350,6 +350,51 @@ class TinyBird(nn.Module):
 
         return x_out, xi_out
 
+    def remap_boundaries(self, x: torch.Tensor, xi: torch.Tensor, N: torch.Tensor, move_block: int = -1):
+        B, _, H, W = x.shape
+        device = x.device
+        N = N.view(B, 1)
+
+        if move_block >= 0:
+            assert 0 <= move_block < N.min().item(), (
+                f"move_block index out of range for min(N)={N.min().item()}: {move_block}"
+            )
+
+        x_out = x.clone()
+        xi_out = xi.clone()
+
+        for b in range(B):
+            # pick a random block between 0 and N[b]-1
+            Nb = int(N[b].item())
+            if Nb <= 0:
+                continue
+
+            if move_block >= 0 and move_block < Nb - 1:
+                # remap chosen block
+                block = min(int(move_block), Nb - 2)
+            else:
+                # remap random block
+                block = int(torch.randint(low=0, high=Nb - 1, size=(1,), device=device).item())
+
+            next_block = block + 1
+            last_block = Nb - 1
+
+            add_offset = xi[b, last_block, 1] - xi[b, block, 1]
+            sub_offset = xi[b, next_block, 0]
+
+            xi_out[b, 0 : Nb - next_block, :] = xi[b, next_block:Nb, :] - sub_offset
+            xi_out[b, Nb - next_block : Nb, :] = xi[b, 0:next_block, :] + add_offset
+
+            be = int(xi[b, block, 1].item())
+            nbb = be + 1
+            lbe = int(xi[b, last_block, 1].item())
+
+            x_out[b, :, :, 0 : lbe - nbb] = x[b, :, :, nbb:lbe]
+            x_out[b, :, :, lbe - nbb] = x[b, :, :, be]
+            x_out[b, :, :, lbe - nbb + 1 : lbe] = x[b, :, :, 0:be]
+
+        return x_out, xi_out
+
     def build_column_mask(
         self,
         xi: torch.Tensor,
