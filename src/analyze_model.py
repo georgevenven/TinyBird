@@ -94,24 +94,24 @@ def test_file(model, dataset, index, device):
     print("x shape: ", x.shape)
     print("x[0,0,0,:]:", x[0, 0, 0, :].tolist())
     print("x_i shape: ", x_i.shape)
-    print("x_i[0,0,:,0]:", x_i[0, 0, :, 0].tolist())
-    print("x_i[0,0,:,1]:", x_i[0, 0, :, 1].tolist())
+    print("x_i[0,0,:,0]:", x_i[0, :, 0].tolist())
+    print("x_i[0,0,:,1]:", x_i[0, :, 1].tolist())
 
     print("sample_data_indices")
     x_sdi, x_i_sdi = model.sample_data_indices(x, x_i, N, [3, 4, 0, 1, 2])
     print("x_sdi shape: ", x_sdi.shape)
     print("x_sdi[0,0,0,:]:", x_sdi[0, 0, 0, :].tolist())
     print("x_i_sdi shape: ", x_i_sdi.shape)
-    print("x_i_sdi[0,0,:,0]:", x_i_sdi[0, 0, :, 0].tolist())
-    print("x_i_sdi[0,0,:,1]:", x_i_sdi[0, 0, :, 1].tolist())
+    print("x_i_sdi[0,0,:,0]:", x_i_sdi[0,:, 0].tolist())
+    print("x_i_sdi[0,0,:,1]:", x_i_sdi[0,:, 1].tolist())
 
     print("remap_boundaries")
     x_r, x_i_r = model.remap_boundaries(x, x_i, N, move_block=2)
     print("x_r shape: ", x_r.shape)
     print("x_r[0,0,0,:]:", x_r[0, 0, 0, :].tolist())
     print("x_i_r shape: ", x_i_r.shape)
-    print("x_i_r[0,0,:,0]:", x_i_r[0, 0, :, 0].tolist())
-    print("x_i_r[0,0,:,1]:", x_i_r[0, 0, :, 1].tolist())
+    print("x_i_r[0,0,:,0]:", x_i_r[0, :, 0].tolist())
+    print("x_i_r[0,0,:,1]:", x_i_r[0, :, 1].tolist())
 
 
 def prepare_sample(model, dataset, index, device):
