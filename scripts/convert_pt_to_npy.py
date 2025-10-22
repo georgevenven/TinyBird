@@ -1,3 +1,7 @@
+####
+### DESTROY IN NEAR FUTURE THIS SCRIPT ###
+####
+
 import argparse
 from pathlib import Path
 

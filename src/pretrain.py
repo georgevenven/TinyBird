@@ -86,11 +86,6 @@ class Trainer():
         self.use_amp = config.get("amp", False)
         self.scaler = torch.cuda.amp.GradScaler() if self.use_amp else None
         
-        # Loss tracking
-        self.ema_train_loss = None
-        self.ema_val_loss = None
-        self.ema_alpha = 0.9
-        
         # Loss history for plotting
         self.train_loss_history = []
         self.val_loss_history = []
@@ -109,8 +104,6 @@ class Trainer():
             self.train_loss_history = training_state['train_losses']
             self.val_steps = training_state['steps']
             self.val_loss_history = training_state['val_losses']
-            self.ema_train_loss = training_state['last_ema_train_loss']
-            self.ema_val_loss = training_state['last_ema_val_loss']
             
             # Advance scheduler to correct step if training state was found
             if training_state['found_state']:
@@ -122,7 +115,7 @@ class Trainer():
         if not config.get('is_continuing', False):
             # Create new loss log for new training
             with open(self.loss_log_path, 'w') as f:
-                f.write("step,train_loss,ema_train_loss,val_loss,ema_val_loss\n")
+                f.write("step,train_loss,val_loss,gnorm,samples_processed\n")
         else:
             # Verify loss log exists for continuing training
             if not os.path.exists(self.loss_log_path):
@@ -139,6 +132,7 @@ class Trainer():
             
         Returns:
             loss: Scalar loss value
+            gnorm: Gradient norm (only for training, else None)
         """
         spectrograms, _ = batch
         x = spectrograms.to(self.device, non_blocking=True)  # (B, 1, H, W)
@@ -162,19 +156,24 @@ class Trainer():
                 loss = self.tinybird.loss_mse(x, pred, bool_mask)
         
         # Backward pass only for training
+        gnorm = None
         if is_training:
             if self.use_amp:
                 self.scaler.scale(loss).backward()
+                # Unscale gradients to compute true gradient norm
+                self.scaler.unscale_(self.optimizer)
+                gnorm = torch.nn.utils.clip_grad_norm_(self.tinybird.parameters(), float('inf'))
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
                 loss.backward()
+                gnorm = torch.nn.utils.clip_grad_norm_(self.tinybird.parameters(), float('inf'))
                 self.optimizer.step()
             
             # Update learning rate scheduler
             self.scheduler.step()
         
-        return loss.item()
+        return loss.item(), gnorm.item() if gnorm is not None else None
 
     def save_reconstruction(self, batch, step_num):
         """Save reconstruction visualization comparing input and output spectrograms."""
@@ -238,7 +237,7 @@ class Trainer():
                 train_batch = next(train_iter)
             
             # Training step
-            train_loss = self.step(train_batch, is_training=True)
+            train_loss, gnorm = self.step(train_batch, is_training=True)
             
             # Store training loss every step
             self.train_loss_history.append(train_loss)
@@ -253,36 +252,29 @@ class Trainer():
                     val_batch = next(val_iter)
                 
                 # Validation step (no gradients)
-                val_loss = self.step(val_batch, is_training=False)
+                val_loss, _ = self.step(val_batch, is_training=False)
                 
                 # Store validation loss
                 self.val_loss_history.append(val_loss)
                 self.val_steps.append(step_num)
                 
-                # Update EMA losses at the same interval (eval_every)
-                # Update EMA train loss
-                if self.ema_train_loss is None:
-                    self.ema_train_loss = train_loss
-                else:
-                    self.ema_train_loss = self.ema_alpha * self.ema_train_loss + (1 - self.ema_alpha) * train_loss
+                # Calculate samples processed
+                samples_processed = self.config["batch_size"] * (step_num + 1)
                 
-                # Update EMA val loss
-                if self.ema_val_loss is None:
-                    self.ema_val_loss = val_loss
-                else:
-                    self.ema_val_loss = self.ema_alpha * self.ema_val_loss + (1 - self.ema_alpha) * val_loss
+                # Calculate percentage complete
+                progress_pct = ((step_num - self.starting_step + 1) / total_steps) * 100
                 
                 # Print progress
                 current_lr = self.scheduler.get_last_lr()[0]
-                print(f"Step {step_num}: Train Loss = {train_loss:.6f}, "
-                      f"EMA Train = {self.ema_train_loss:.6f}, "
+                print(f"Step {step_num} ({progress_pct:.1f}%): Train Loss = {train_loss:.6f}, "
                       f"Val Loss = {val_loss:.6f}, "
-                      f"EMA Val = {self.ema_val_loss:.6f}, "
+                      f"Gnorm = {gnorm:.6f}, "
+                      f"Samples = {samples_processed}, "
                       f"LR = {current_lr:.2e}")
                 
                 # Log losses to file
                 with open(self.loss_log_path, 'a') as f:
-                    f.write(f"{step_num},{train_loss:.6f},{self.ema_train_loss:.6f},{val_loss:.6f},{self.ema_val_loss:.6f}\n")
+                    f.write(f"{step_num},{train_loss:.6f},{val_loss:.6f},{gnorm:.6f},{samples_processed}\n")
                 
                 # Save model weights
                 weight_path = os.path.join(self.weights_path, f"model_step_{step_num:06d}.pth")

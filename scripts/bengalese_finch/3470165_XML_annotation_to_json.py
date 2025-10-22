@@ -14,6 +14,7 @@ The resulting JSON mirrors the structure produced by wavnotmat_annotation_to_jso
 
 import argparse
 import json
+import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -68,7 +69,8 @@ def collect_recordings(src_dir: Path, label_map: Dict[str, int]) -> List[Dict[st
         if not xml_path.exists():
             continue
 
-        bird_id = folder_path.name
+        raw_bird_id = folder_path.name
+        bird_id = re.sub(r"bird", "bird", raw_bird_id, flags=re.IGNORECASE)
         tree = ET.parse(xml_path)
         root = tree.getroot()
 
@@ -83,6 +85,19 @@ def collect_recordings(src_dir: Path, label_map: Dict[str, int]) -> List[Dict[st
             wav_name = wav_elem.text.strip()
             if not wav_name:
                 continue
+
+            wav_path = Path(wav_name)
+            wav_stem = wav_path.stem
+            wav_suffix = wav_path.suffix or ".wav"
+            expected_suffix = f"_{bird_id}"
+            expected_suffix_lower = expected_suffix.lower()
+            stem_lower = wav_stem.lower()
+            if stem_lower.endswith(expected_suffix_lower):
+                base_stem = wav_stem[: -len(expected_suffix)]
+            else:
+                base_stem = wav_stem
+            # Source XML omits or uppercases the bird identifier in the filename; normalize to match WAVs.
+            wav_name = f"{base_stem}{expected_suffix}{wav_suffix}"
 
             seq_pos = int(pos_elem.text)
             seq_len = int(length_elem.text)

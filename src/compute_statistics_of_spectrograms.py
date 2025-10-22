@@ -46,8 +46,8 @@ def compute_statistics(spec_dir, sample_fraction=0.1, seed=0):
 
 def main():
     parser = argparse.ArgumentParser(description="Compute mean/std for spectrogram .pt files")
-    parser.add_argument("spec_dir", type=Path, help="Directory with .pt files")
-    parser.add_argument("--sample-fraction", type=float, default=0.1, help="Fraction of files to sample (default: 0.1)")
+    parser.add_argument("--spec_dir", type=Path, help="Directory with .pt files")
+    parser.add_argument("--sample_fraction", type=float, default=0.1, help="Fraction of files to sample (default: 0.1)")
     parser.add_argument("--seed", type=int, default=0, help="Random seed")
     
     args = parser.parse_args()

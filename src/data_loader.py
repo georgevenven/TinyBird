@@ -10,7 +10,7 @@ class SpectogramDataset(Dataset):
         """
         n_timebins = None means no cropping
         """
-        self.file_dirs = list(Path(dir).glob("*.npy"))
+        self.file_dirs = sorted(list(Path(dir).glob("*.npy")))
 
         # Load audio parameters using utility function
         self.audio_data_json = load_audio_params(dir)
