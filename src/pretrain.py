@@ -3,6 +3,7 @@ import os
 import shutil
 import json
 from datetime import datetime
+import time
 import torch
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -115,7 +116,7 @@ class Trainer():
         if not config.get('is_continuing', False):
             # Create new loss log for new training
             with open(self.loss_log_path, 'w') as f:
-                f.write("step,train_loss,val_loss,gnorm,samples_processed\n")
+                f.write("step,train_loss,val_loss,gnorm,samples_processed,steps_per_sec,samples_per_sec\n")
         else:
             # Verify loss log exists for continuing training
             if not os.path.exists(self.loss_log_path):
@@ -227,6 +228,10 @@ class Trainer():
         total_steps = self.config["steps"]
         end_step = self.starting_step + total_steps
         
+        # Initialize timing for batches per second calculation
+        last_eval_time = time.time()
+        last_eval_step = self.starting_step
+        
         print(f"Training from step {self.starting_step} to {end_step}")
         
         for step_num in range(self.starting_step, end_step):
@@ -264,17 +269,30 @@ class Trainer():
                 # Calculate percentage complete
                 progress_pct = ((step_num - self.starting_step + 1) / total_steps) * 100
                 
+                # Calculate steps per second and samples per second
+                current_time = time.time()
+                elapsed_time = current_time - last_eval_time
+                steps_since_last_eval = step_num - last_eval_step
+                steps_per_sec = steps_since_last_eval / elapsed_time if elapsed_time > 0 else 0
+                samples_per_sec = steps_per_sec * self.config["batch_size"]
+                
+                # Update timing trackers
+                last_eval_time = current_time
+                last_eval_step = step_num
+                
                 # Print progress
                 current_lr = self.scheduler.get_last_lr()[0]
                 print(f"Step {step_num} ({progress_pct:.1f}%): Train Loss = {train_loss:.6f}, "
                       f"Val Loss = {val_loss:.6f}, "
                       f"Gnorm = {gnorm:.6f}, "
                       f"Samples = {samples_processed}, "
-                      f"LR = {current_lr:.2e}")
+                      f"LR = {current_lr:.2e}, "
+                      f"Steps/sec = {steps_per_sec:.2f}, "
+                      f"Samples/sec = {samples_per_sec:.1f}")
                 
                 # Log losses to file
                 with open(self.loss_log_path, 'a') as f:
-                    f.write(f"{step_num},{train_loss:.6f},{val_loss:.6f},{gnorm:.6f},{samples_processed}\n")
+                    f.write(f"{step_num},{train_loss:.6f},{val_loss:.6f},{gnorm:.6f},{samples_processed},{steps_per_sec:.2f},{samples_per_sec:.1f}\n")
                 
                 # Save model weights
                 weight_path = os.path.join(self.weights_path, f"model_step_{step_num:06d}.pth")

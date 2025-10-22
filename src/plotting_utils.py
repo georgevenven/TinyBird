@@ -20,13 +20,10 @@ SPEC_DPI = 300
 SPEC_IMSHOW_KW = {"origin": "lower", "aspect": "auto", "interpolation": "none"}
 SPEC_TITLE_KW = {"fontsize": 18, "fontweight": "bold"}
 SPEC_TITLE_Y = 1.15
-DEFAULT_LOSS_FIGSIZE: Tuple[float, float] = (12.0, 10.0)
 LOSS_DPI = 300
 
 TRAIN_COLOR = "royalblue"
 VAL_COLOR = "tomato"
-EMA_TRAIN_COLOR = "navy"
-EMA_VAL_COLOR = "maroon"
 MASK_CMAP = "viridis"
 
 __all__ = ["save_reconstruction_plot", "plot_loss_curves"]
@@ -178,26 +175,6 @@ def save_reconstruction_plot(
     return recon_path
 
 
-def _read_ema_histories(loss_log_path: str) -> Tuple[Sequence[int], Sequence[float], Sequence[float]]:
-    eval_steps = []
-    ema_train = []
-    ema_val = []
-    if not os.path.exists(loss_log_path):
-        return eval_steps, ema_train, ema_val
-
-    with open(loss_log_path, "r") as f:
-        lines = f.readlines()[1:]  # skip header
-
-    for line in lines:
-        parts = line.strip().split(",")
-        if len(parts) >= 5:
-            eval_steps.append(int(parts[0]))
-            ema_train.append(float(parts[2]))
-            ema_val.append(float(parts[4]))
-
-    return eval_steps, ema_train, ema_val
-
-
 def plot_loss_curves(
     *,
     train_steps: Iterable[int],
@@ -206,11 +183,11 @@ def plot_loss_curves(
     val_losses: Iterable[float],
     loss_log_path: str,
     output_path: str,
-    figsize: Tuple[int, int] = DEFAULT_LOSS_FIGSIZE,
+    figsize: Tuple[int, int] = (12.0, 6.0),
     yscale: Optional[str] = "log",
 ) -> str:
     """
-    Plot and persist the training/validation loss curves and EMA histories.
+    Plot and persist the training/validation loss curves.
 
     Returns:
         The file path of the saved loss plot.
@@ -219,40 +196,19 @@ def plot_loss_curves(
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=figsize)
+    fig, ax = plt.subplots(1, 1, figsize=figsize)
 
-    ax1.plot(train_steps, train_losses, label="Training Loss", alpha=0.7, linewidth=1, color=TRAIN_COLOR)
-    ax1.plot(val_steps, val_losses, label="Validation Loss", marker="o", markersize=3, linewidth=2, color=VAL_COLOR)
-    ax1.set_xlabel("Training Steps")
-    ax1.set_ylabel("Loss")
-    ax1.set_title("Training and Validation Loss")
-    ax1.grid(True, alpha=0.3)
+    ax.plot(train_steps, train_losses, label="Training Loss", alpha=0.7, linewidth=1, color=TRAIN_COLOR)
+    ax.plot(val_steps, val_losses, label="Validation Loss", marker="o", markersize=3, linewidth=2, color=VAL_COLOR)
+    ax.set_xlabel("Training Steps")
+    ax.set_ylabel("Loss")
+    ax.set_title("Training and Validation Loss")
+    ax.grid(True, alpha=0.3)
     if yscale:
-        ax1.set_yscale(yscale)
+        ax.set_yscale(yscale)
 
-    eval_steps, ema_train, ema_val = [], [], []
-    try:
-        eval_steps, ema_train, ema_val = _read_ema_histories(loss_log_path)
-    except Exception as exc:  # pylint: disable=broad-except
-        ax2.text(0.5, 0.5, f"Error reading EMA data: {exc}", transform=ax2.transAxes, ha="center", va="center")
-    else:
-        if eval_steps and ema_train and ema_val:
-            ax2.plot(eval_steps, ema_train, label="EMA Training Loss", linewidth=2, color=EMA_TRAIN_COLOR)
-            ax2.plot(eval_steps, ema_val, label="EMA Validation Loss", marker="o", markersize=3, linewidth=2, color=EMA_VAL_COLOR)
-        else:
-            ax2.text(0.5, 0.5, "No EMA data available for plotting", transform=ax2.transAxes, ha="center", va="center")
-
-    ax2.set_xlabel("Training Steps")
-    ax2.set_ylabel("EMA Loss")
-    ax2.set_title("Exponential Moving Average Loss")
-    ax2.grid(True, alpha=0.3)
-    if yscale:
-        ax2.set_yscale(yscale)
-
-    if ax1.get_lines():
-        ax1.legend()
-    if ax2.get_lines():
-        ax2.legend()
+    if ax.get_lines():
+        ax.legend()
 
     plt.tight_layout()
     fig.savefig(output_path, dpi=LOSS_DPI, bbox_inches="tight")
