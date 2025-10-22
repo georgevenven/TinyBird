@@ -1,10 +1,10 @@
 #!/bin/bash
 #SBATCH -J tinybird
-#SBATCH -p gpu
+#SBATCH -p gpulong
 #SBATCH --nodes=1
 #SBATCH --gpus=1
 #SBATCH --constraint=gpu-80gb,no-mig
-#SBATCH --time=1-00:00:00
+#SBATCH --time=7-00:00:00
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=200G
 #SBATCH -o logs/tinybird-pretrain-%j.out
@@ -32,6 +32,6 @@ python -u src/pretrain.py \
   --train_dir "$SPEC_DIR" \
   --val_dir   "$SPEC_DIR" \
   --run_name  "$RUN_NAME" \
-  --steps 5000000 \
-  --num_workers 12 \
+  --steps 1_000_000 \
+  --num_workers 32 \
   --amp
