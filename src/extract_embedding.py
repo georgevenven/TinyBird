@@ -129,6 +129,7 @@ def main(args):
     i = 0
     
     latent_list = []
+    patch_list = []
     label_list = []
 
     while i < len(embedding_dataset) and total_timebins < args["num_timebins"]:
@@ -192,26 +193,41 @@ def main(args):
                 batched_spec_detected = spec_detected.reshape(channel, mel, batch_size, model_num_timebins)
                 batched_spec_detected = batched_spec_detected.permute(2, 0, 1, 3)  # (batch_size, channel, mel, model_num_timebins)
                 with torch.no_grad():
-                    z = model.forward_encoder_inference(batched_spec_detected)       # [B,S,D]
-                    B, NP, D = z.shape # batch, num patches, dim
+                    h, z_seq = model.forward_encoder_inference(batched_spec_detected)
+                    # h: encoded embeddings [B,S,D]
+                    # z_seq: patch embeddings [B,S,D]
+                    B, NP, D = h.shape # batch, num patches, dim
                 
-                # reshape z into something resembling a grid
-                z = z.permute(0, 2, 1) # now batch, d  s 
-                z = z.reshape(B, D, num_patches_height, num_patches_time)
+                # reshape encoded embeddings into grid
+                h_grid = h.permute(0, 2, 1) # now batch, d, s 
+                h_grid = h_grid.reshape(B, D, num_patches_height, num_patches_time)
+                
+                # reshape patch embeddings into grid
+                z_grid = z_seq.permute(0, 2, 1) # now batch, d, s 
+                z_grid = z_grid.reshape(B, D, num_patches_height, num_patches_time)
 
-                latent_list.append(z)
+                latent_list.append(h_grid)
+                patch_list.append(z_grid)
                 label_list.append(labels)
                 total_timebins+=batched_spec_detected.shape[0] * batched_spec_detected.shape[-1] # add the number of timebins 
         i += 1
 
-    z = torch.cat(latent_list, dim=0)  # shape is batch, d , h, w 
-    batches = z.shape[0]
-    z = z.permute(0,3,1,2) # now batch, w, h, d 
-    z = z.flatten(0,1) # samples x h, w
-
+    # Process encoded embeddings (h)
+    h = torch.cat(latent_list, dim=0)  # shape is batch, d , h, w 
+    batches = h.shape[0]
+    h = h.permute(0,3,1,2) # now batch, w, h, d 
+    h = h.flatten(0,1) # samples x h, w
     # stack height patches onto temporal patches 
-    # (3072, 384, 4) will be 3072, 384 * 4 
-    z = z.flatten(1,2)
+    h = h.flatten(1,2)
+    
+    # Process patch embeddings (z_seq)
+    z_seq = torch.cat(patch_list, dim=0)  # shape is batch, d , h, w 
+    z_seq = z_seq.permute(0,3,1,2) # now batch, w, h, d 
+    z_seq = z_seq.flatten(0,1) # samples x h, w
+    # stack height patches onto temporal patches 
+    z_seq = z_seq.flatten(1,2)
+    
+    # Process labels
     syllable_labels = torch.cat(label_list, dim=0)  # samples, labels
     labels_original = syllable_labels.cpu().numpy()
 
@@ -222,24 +238,33 @@ def main(args):
     
     # positional subtraction indexes 
     pos_ids = torch.arange(0, 1024).repeat(batches)
-    pos_ids = np.asarray(pos_ids, dtype=int)[:z.shape[0]]
+    pos_ids = np.asarray(pos_ids, dtype=int)[:h.shape[0]]
     
     # convert to NP FORMAT 
     syllable_labels_downsampled = syllable_labels.cpu().numpy()
-    z = z.numpy()
+    h_np = h.numpy()
+    z_seq_np = z_seq.numpy()
     
     # Save embeddings before position removal
-    embeddings_before_pos_removal = z.copy()
+    encoded_embeddings_before_pos_removal = h_np.copy()
+    patch_embeddings_before_pos_removal = z_seq_np.copy()
     
-    # removal of average vector per position 
+    # removal of average vector per position for encoded embeddings
     uniq = np.unique(pos_ids)
-    means = np.zeros((uniq.max()+1, z.shape[1]), dtype=np.float32)
+    means_h = np.zeros((uniq.max()+1, h_np.shape[1]), dtype=np.float32)
     for p in uniq:
-        means[p] = z[pos_ids == p].mean(axis=0)
-    z = z - means[pos_ids]
+        means_h[p] = h_np[pos_ids == p].mean(axis=0)
+    h_np = h_np - means_h[pos_ids]
+    
+    # removal of average vector per position for patch embeddings
+    means_z = np.zeros((uniq.max()+1, z_seq_np.shape[1]), dtype=np.float32)
+    for p in uniq:
+        means_z[p] = z_seq_np[pos_ids == p].mean(axis=0)
+    z_seq_np = z_seq_np - means_z[pos_ids]
 
     # Save embeddings after position removal
-    embeddings_after_pos_removal = z.copy()
+    encoded_embeddings_after_pos_removal = h_np.copy()
+    patch_embeddings_after_pos_removal = z_seq_np.copy()
 
     # we need audio params, patch stuff, checkpoint, spec, labels original, labels_downsampled, embedding before and after pos removal 
     np.savez(
@@ -247,9 +272,12 @@ def main(args):
         # Labels
         labels_original=labels_original,                        # shape: (total_timebins,) - original labels before downsampling
         labels_downsampled=syllable_labels_downsampled,         # shape: (N_patches,) - labels downsampled to patch resolution
-        # Embeddings
-        embeddings_before_pos_removal=embeddings_before_pos_removal,  # shape: (N_patches, H*D) - embeddings before position removal
-        embeddings_after_pos_removal=embeddings_after_pos_removal,    # shape: (N_patches, H*D) - embeddings after position removal
+        # Encoded Embeddings (after encoder)
+        encoded_embeddings_before_pos_removal=encoded_embeddings_before_pos_removal,  # shape: (N_patches, H*D) - encoded embeddings before position removal
+        encoded_embeddings_after_pos_removal=encoded_embeddings_after_pos_removal,    # shape: (N_patches, H*D) - encoded embeddings after position removal
+        # Patch Embeddings (before encoder)
+        patch_embeddings_before_pos_removal=patch_embeddings_before_pos_removal,      # shape: (N_patches, H*D) - patch embeddings before position removal
+        patch_embeddings_after_pos_removal=patch_embeddings_after_pos_removal,        # shape: (N_patches, H*D) - patch embeddings after position removal
         pos_ids=pos_ids,                                        # shape: (N_patches,) - positional indices
         # Audio parameters (sr, n_mels, hop_size, fft)
         audio_sr=np.array(audio_params[0]),
@@ -264,7 +292,7 @@ def main(args):
         # Model parameters
         checkpoint=np.array(args["checkpoint"] if args["checkpoint"] else ""),
         model_num_timebins=np.array(model_num_timebins),
-        mels=np.array(mels)
+        mels=np.array(mels),
     )
     print(f"NPZ saved to {args['npz_dir']}")
 

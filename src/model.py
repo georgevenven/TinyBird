@@ -138,7 +138,7 @@ class TinyBird(nn.Module):
         h = self.encoder(z_keep)                   # (B, keep, D_enc)
         return h, idx_restore, bool_mask, T
     
-    def forward_encoder_inference(self, x, return_attention=False):
+    def forward_encoder_inference(self, x):
         z = self.patch_projection(x)               # (B, D_enc, H', W')
         B, D, H, W = z.shape
 
@@ -146,25 +146,8 @@ class TinyBird(nn.Module):
         z = z + pos_enc
         z_seq = z.flatten(2).transpose(1, 2)        # (B, T, D_enc)
 
-        if return_attention:
-            # Process through all layers except the last one
-            h = z_seq
-            for layer in self.encoder.layers[:-1]:
-                h = layer(h)
-            
-            # Process the last layer and capture attention
-            last_layer = self.encoder.layers[-1]
-            # We need to manually call self_attn to get attention weights
-            # Note: This requires accessing the layer's self_attn module
-            h2, attn_weights = last_layer.self_attn(h, h, h, need_weights=True, average_attn_weights=False)
-            h = last_layer.norm1(h + last_layer.dropout1(h2))
-            h2 = last_layer.linear2(last_layer.dropout(last_layer.activation(last_layer.linear1(h))))
-            h = last_layer.norm2(h + last_layer.dropout2(h2))
-            
-            return h, attn_weights  # attn_weights shape: (B, num_heads, T, T)
-        else:
-            h = self.encoder(z_seq)
-            return h
+        h = self.encoder(z_seq)
+        return h, z_seq
 
     def forward_decoder(self, h, idx_restore, T):
         """

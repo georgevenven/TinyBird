@@ -6,7 +6,7 @@ import numpy as np
 from utils import load_audio_params
 
 class SpectogramDataset(Dataset):
-    def __init__(self, dir, n_timebins=1024): 
+    def __init__(self, dir, n_timebins=1024):
         """
         n_timebins = None means no cropping
         """
