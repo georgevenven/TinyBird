@@ -193,11 +193,70 @@ def _plot_spectrogram(event, out_dir, gt_palette, pred_palette):
     return out_path
 
 
-def _plot_cosine_similarity(event, embeddings, out_dir, patch_width, prominence=0.1):
+def _plot_metric_overlay(event, values, x_overlay, spec_arr, out_path, color, series_label, y_label, peaks=None):
+    values = np.asarray(values, dtype=np.float32)
+    x_overlay = np.asarray(x_overlay, dtype=np.float32)
+    if values.size == 0 or x_overlay.size == 0:
+        return None
+    if values.shape[0] != x_overlay.shape[0]:
+        return None
+
+    if peaks is None:
+        peaks_idx = np.array([], dtype=int)
+    else:
+        peaks_idx = np.asarray(peaks, dtype=int)
+
+    if spec_arr is not None:
+        fig, ax_spec = plt.subplots(figsize=(10, 6), dpi=300)
+        ax_spec.imshow(spec_arr, aspect="auto", origin="lower", interpolation="none")
+        ax_spec.set_xticks([])
+        ax_spec.set_yticks([])
+        ax_spec.set_xlabel("Timebins")
+        ax_spec.set_ylabel("Mel Bins")
+        ax_spec.set_title(f"{event['file']} | event {event['event_index']}")
+        metric_ax = ax_spec.twinx()
+    else:
+        fig, metric_ax = plt.subplots(figsize=(10, 4), dpi=300)
+        metric_ax.set_xlabel("Patch Index")
+        metric_ax.set_title(f"{event['file']} | event {event['event_index']}")
+
+    ymin = float(np.min(values))
+    ymax = float(np.max(values))
+    if np.isclose(ymin, ymax):
+        margin = 0.5 if np.isclose(ymax, 0.0) else abs(ymax) * 0.1
+        ymin -= margin
+        ymax += margin
+    metric_ax.set_ylim(ymin, ymax)
+    if x_overlay.size > 1:
+        metric_ax.set_xlim(float(x_overlay[0]), float(x_overlay[-1]))
+
+    metric_ax.plot(x_overlay, values, color=color, linewidth=2.5, label=series_label)
+    if peaks_idx.size:
+        metric_ax.scatter(
+            x_overlay[peaks_idx],
+            values[peaks_idx],
+            color=color,
+            s=30,
+            marker="o",
+            edgecolors="black",
+            linewidths=0.5,
+            label="Peaks",
+        )
+    metric_ax.set_ylabel(y_label)
+    if series_label or peaks_idx.size:
+        metric_ax.legend(loc="upper right")
+
+    fig.tight_layout()
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
+def _plot_adjacent_metrics(event, embeddings, similarity_dir, difference_dir, patch_width, prominence=0.1):
     embed_start, embed_end = event.get("embedding_slice", (None, None))
     if embed_start is None or embed_end is None or embed_end - embed_start < 2:
         return None
-    segment = embeddings[embed_start:embed_end]
+    segment = embeddings[int(embed_start) : int(embed_end)]
     if segment.shape[0] < 2:
         return None
 
@@ -206,80 +265,220 @@ def _plot_cosine_similarity(event, embeddings, out_dir, patch_width, prominence=
         crop_bins = MAX_PLOT_TIMEBINS
         max_embeddings = max(2, int(np.ceil(crop_bins / patch_width)) + 1)
         segment = segment[:max_embeddings]
+        if segment.shape[0] < 2:
+            return None
 
     norms = np.linalg.norm(segment, axis=1, keepdims=True)
     norms[norms == 0] = 1.0
     normalized = segment / norms
     cos_sim = np.sum(normalized[:-1] * normalized[1:], axis=1)
     similarities = -cos_sim
-    peak_kwargs = {}
-    if prominence is not None and prominence > 0:
-        peak_kwargs["prominence"] = prominence
-    peak_indices, _ = find_peaks(similarities, **peak_kwargs) if similarities.size else (np.array([], dtype=int), {})
+    differences = np.linalg.norm(segment[1:] - segment[:-1], axis=1)
 
-    peak_timebins = []
-    overlay_path = None
-    x_overlay = None
-    spec = event.get("spec")
-    if spec is not None:
-        spec_arr = np.asarray(spec)
+    spec_arr = event.get("spec")
+    prepared_spec = None
+    metric_x = np.array([], dtype=np.float32)
+    if spec_arr is not None:
+        spec_arr = np.asarray(spec_arr)
         if spec_arr.ndim == 3 and spec_arr.shape[0] == 1:
             spec_arr = spec_arr[0]
         timebins = int(spec_arr.shape[-1])
         if timebins > MAX_PLOT_TIMEBINS:
             timebins = MAX_PLOT_TIMEBINS
-        spec_arr = spec_arr[..., :timebins]
-        if similarities.shape[0] > 1:
-            x_overlay = np.linspace(0, timebins, num=similarities.shape[0], endpoint=False)
-        else:
-            x_overlay = np.zeros_like(similarities)
-
-        fig_overlay, ax_spec = plt.subplots(figsize=(10, 6), dpi=300)
-        ax_spec.imshow(spec_arr, aspect="auto", origin="lower", interpolation="none")
-        ax_spec.set_xticks([])
-        ax_spec.set_yticks([])
-        ax_spec.set_xlabel("Timebins")
-        ax_spec.set_ylabel("Mel Bins")
-        ax_spec.set_title(f"{event['file']} | event {event['event_index']}")
-
-        ax_cos = ax_spec.twinx()
+        prepared_spec = spec_arr[..., :timebins]
         if similarities.size:
-            ymin = float(np.min(similarities))
-            ymax = float(np.max(similarities))
-        else:
-            ymin, ymax = 0.0, 1.0
-        if np.isclose(ymin, ymax):
-            margin = 0.5 if ymax == 0 else abs(ymax) * 0.1
-            ymin -= margin
-            ymax += margin
-        ax_cos.set_ylim(ymin, ymax)
-        if x_overlay.size > 1:
-            ax_cos.set_xlim(x_overlay[0], x_overlay[-1])
-        ax_cos.plot(x_overlay, similarities, color="tab:red", linewidth=2.5, label="Neg Cosine")
-        if peak_indices.size:
-            peaks_x = x_overlay[peak_indices]
-            ax_cos.scatter(peaks_x, similarities[peak_indices], color="tab:red", s=30, marker="o", edgecolors="black", linewidths=0.5, label="Peaks")
-            peak_timebins = peaks_x.astype(int).tolist()
-        ax_cos.set_ylabel("Negative Cosine Similarity")
-        ax_cos.legend(loc="upper right")
+            if similarities.shape[0] > 1:
+                metric_x = np.linspace(0, timebins, num=similarities.shape[0], endpoint=False, dtype=np.float32)
+            else:
+                metric_x = np.zeros_like(similarities, dtype=np.float32)
 
-        overlay_path = out_dir / f"{event['file']}_event{event['event_index']:02d}_similarity_overlay.png"
-        fig_overlay.tight_layout()
-        fig_overlay.savefig(overlay_path, bbox_inches="tight")
-        plt.close(fig_overlay)
-
-    if x_overlay is None and similarities.size:
+    if not metric_x.size and similarities.size:
         if patch_width:
-            x_overlay = np.arange(similarities.shape[0], dtype=np.float32) * float(patch_width)
+            metric_x = np.arange(similarities.shape[0], dtype=np.float32) * float(patch_width)
         else:
-            x_overlay = np.arange(similarities.shape[0], dtype=np.float32)
-    if not peak_timebins and x_overlay is not None and peak_indices.size:
-        peak_timebins = np.asarray(x_overlay)[peak_indices].astype(int).tolist()
+            metric_x = np.arange(similarities.shape[0], dtype=np.float32)
+
+    peak_indices = np.array([], dtype=int)
+    peak_timebins = []
+    if similarities.size:
+        peak_kwargs = {}
+        if prominence is not None and prominence > 0:
+            peak_kwargs["prominence"] = prominence
+        peak_indices, _ = find_peaks(similarities, **peak_kwargs)
+        if peak_indices.size and metric_x.size == similarities.size:
+            peak_timebins = metric_x[peak_indices].astype(int).tolist()
+
+    diff_peak_indices = np.array([], dtype=int)
+    diff_peak_timebins = []
+    if differences.size:
+        diff_kwargs = {}
+        if prominence is not None and prominence > 0:
+            diff_kwargs["prominence"] = prominence
+        diff_peak_indices, _ = find_peaks(differences, **diff_kwargs)
+        if diff_peak_indices.size and metric_x.size == differences.size:
+            diff_peak_timebins = metric_x[diff_peak_indices].astype(int).tolist()
+
+    similarity_path = None
+    difference_path = None
+    if similarities.size and metric_x.size:
+        similarity_out = similarity_dir / f"{event['file']}_event{event['event_index']:02d}_neg_cosine.png"
+        similarity_path = _plot_metric_overlay(
+            event,
+            similarities,
+            metric_x,
+            prepared_spec,
+            similarity_out,
+            color="tab:red",
+            series_label="Neg Cosine",
+            y_label="Negative Cosine Similarity",
+            peaks=peak_indices,
+        )
+        difference_out = difference_dir / f"{event['file']}_event{event['event_index']:02d}_difference.png"
+        difference_path = _plot_metric_overlay(
+            event,
+            differences,
+            metric_x,
+            prepared_spec,
+            difference_out,
+            color="tab:red",
+            series_label="L2 Difference",
+            y_label="Adjacent Vector L2 Difference",
+            peaks=diff_peak_indices,
+        )
 
     return {
-        "overlay_path": overlay_path,
+        "similarity_overlay_path": similarity_path,
+        "difference_overlay_path": difference_path,
         "peak_timebins": peak_timebins,
+        "difference_peak_timebins": diff_peak_timebins,
     }
+
+
+def _extract_boundaries(labels):
+    arr = np.asarray(labels)
+    if arr.ndim != 1:
+        arr = arr.reshape(-1)
+    if arr.size < 2:
+        return np.array([], dtype=int)
+    changes = np.flatnonzero(arr[1:] != arr[:-1]) + 1
+    return changes.astype(int)
+
+
+def _match_boundaries(predicted, ground_truth, tolerance):
+    if tolerance < 0:
+        tolerance = 0
+    pred = np.sort(np.asarray(predicted, dtype=int))
+    gt = np.sort(np.asarray(ground_truth, dtype=int))
+    if pred.size == 0:
+        return 0, 0, int(gt.size)
+    if gt.size == 0:
+        return 0, int(pred.size), 0
+
+    matched = np.zeros(gt.shape[0], dtype=bool)
+    true_positives = 0
+    for value in pred:
+        left = np.searchsorted(gt, value - tolerance, side="left")
+        right = np.searchsorted(gt, value + tolerance, side="right")
+        if left >= right:
+            continue
+        best_idx = -1
+        best_dist = None
+        for idx in range(int(left), int(right)):
+            if matched[idx]:
+                continue
+            dist = abs(int(gt[idx]) - int(value))
+            if dist <= tolerance:
+                if best_dist is None or dist < best_dist:
+                    best_dist = dist
+                    best_idx = idx
+        if best_idx >= 0:
+            matched[best_idx] = True
+            true_positives += 1
+
+    false_positives = int(pred.size) - true_positives
+    false_negatives = int(gt.size - matched.sum())
+    return int(true_positives), int(false_positives), int(false_negatives)
+
+
+def _init_segmentation_stats():
+    return {
+        "tp": 0,
+        "fp": 0,
+        "fn": 0,
+        "total_predicted": 0,
+        "total_ground_truth": 0,
+    }
+
+
+def _accumulate_segmentation(stats, predicted, ground_truth, tolerance):
+    predicted = np.asarray(predicted, dtype=int)
+    ground_truth = np.asarray(ground_truth, dtype=int)
+    stats["total_predicted"] += int(predicted.size)
+    stats["total_ground_truth"] += int(ground_truth.size)
+    if predicted.size == 0 and ground_truth.size == 0:
+        return
+    tp, fp, fn = _match_boundaries(predicted, ground_truth, tolerance)
+    stats["tp"] += int(tp)
+    stats["fp"] += int(fp)
+    stats["fn"] += int(fn)
+
+
+def _finalize_segmentation(stats):
+    tp = float(stats["tp"])
+    fp = float(stats["fp"])
+    fn = float(stats["fn"])
+    total_pred = float(stats["total_predicted"])
+    total_gt = float(stats["total_ground_truth"])
+
+    precision = tp / total_pred if total_pred > 0 else 0.0
+    recall = tp / total_gt if total_gt > 0 else 0.0
+    if precision > 0.0:
+        over_segmentation = recall / precision - 1.0
+    elif recall == 0.0:
+        over_segmentation = 0.0
+    else:
+        over_segmentation = float("inf")
+
+    if precision > 0.0 or recall > 0.0:
+        if np.isfinite(over_segmentation):
+            r1 = float(np.sqrt((1.0 - recall) ** 2 + over_segmentation ** 2))
+            r2 = float((-over_segmentation + recall - 1.0) / np.sqrt(2.0))
+            r_value = 1.0 - (abs(r1) + abs(r2)) / 2.0
+        else:
+            r_value = 0.0
+    else:
+        r_value = 0.0
+
+    if precision + recall > 0.0:
+        f1 = 2.0 * precision * recall / (precision + recall)
+    else:
+        f1 = 0.0
+
+    return {
+        "precision": float(precision),
+        "recall": float(recall),
+        "f1": float(f1),
+        "r_value": float(r_value),
+        "over_segmentation": float(over_segmentation) if np.isfinite(over_segmentation) else None,
+        "tp": int(stats["tp"]),
+        "fp": int(stats["fp"]),
+        "fn": int(stats["fn"]),
+        "total_predicted": int(stats["total_predicted"]),
+        "total_ground_truth": int(stats["total_ground_truth"]),
+    }
+
+
+def _majority_label(labels):
+    arr = np.asarray(labels)
+    if arr.ndim != 1:
+        arr = arr.reshape(-1)
+    arr = arr[arr >= 0]
+    if arr.size == 0:
+        return -1
+    values, counts = np.unique(arr, return_counts=True)
+    if counts.size == 0:
+        return -1
+    return int(values[np.argmax(counts)])
 
 
 def _analyze_embedding(
@@ -298,6 +497,32 @@ def _analyze_embedding(
 ):
     tag_dir = out_dir / tag
     tag_dir.mkdir(parents=True, exist_ok=True)
+    umap_dir = tag_dir / "umap"
+    spectrogram_dir = tag_dir / "spectrograms"
+    similarity_dir = tag_dir / "similarity"
+    difference_dir = tag_dir / "difference"
+    segment_umap_dir = tag_dir / "umap_segments"
+    for path in (umap_dir, spectrogram_dir, similarity_dir, difference_dir, segment_umap_dir):
+        path.mkdir(parents=True, exist_ok=True)
+
+    audio_sr = None
+    audio_hop = None
+    if "audio_sr" in npz:
+        audio_sr = _to_item(npz["audio_sr"])
+    if "audio_hop_size" in npz:
+        audio_hop = _to_item(npz["audio_hop_size"])
+    tolerance_ms = 20.0
+    tolerance_bins = 1
+    if audio_sr and audio_hop:
+        hop_seconds = float(audio_hop) / float(audio_sr)
+        if hop_seconds > 0.0:
+            tolerance_bins = max(1, int(round((tolerance_ms / 1000.0) / hop_seconds)))
+
+    segmentation_stats = {
+        "similarity": _init_segmentation_stats(),
+        "difference": _init_segmentation_stats(),
+    }
+    segment_records = []
 
     if args.deterministic:
         reducer = umap.UMAP(
@@ -316,7 +541,7 @@ def _analyze_embedding(
         )
 
     umap_xy = reducer.fit_transform(embeddings)
-    umap_path = tag_dir / "umap.png"
+    umap_path = umap_dir / "ground_truth.png"
     gt_palette = _scatter(umap_xy, labels_down, umap_path, title="Ground Truth", palette=base_palette)
 
     matched_labels = np.full(embeddings.shape[0], -1, dtype=int)
@@ -359,7 +584,7 @@ def _analyze_embedding(
             mismatches = np.sum(labeled_preds != labels_down[labeled_mask])
             kmeans_info["downsample_error_rate"] = float(mismatches / labeled_mask.sum())
 
-    cluster_path = tag_dir / "umap_kmeans.png"
+    cluster_path = umap_dir / "kmeans_matched.png"
     cluster_palette = _scatter(
         umap_xy,
         matched_labels,
@@ -385,29 +610,105 @@ def _analyze_embedding(
     events = _gather_event_summaries(npz, args, cluster_time, patch_width, embeddings.shape[0])
     rendered = []
     similarity_plots = []
+    difference_plots = []
     boundary_predictions = []
     for event in events:
-        rendered.append(str(_plot_spectrogram(event, tag_dir, gt_palette, cluster_palette)))
-        similarity_info = _plot_cosine_similarity(
+        rendered_path = _plot_spectrogram(event, spectrogram_dir, gt_palette, cluster_palette)
+        rendered.append(str(rendered_path))
+        similarity_info = _plot_adjacent_metrics(
             event,
             embeddings,
-            tag_dir,
+            similarity_dir,
+            difference_dir,
             patch_width,
             prominence=args.peak_prominence,
-        )
-        if similarity_info:
-            overlay_path = similarity_info.get("overlay_path")
-            if overlay_path:
-                similarity_plots.append(str(overlay_path))
-            peaks = similarity_info.get("peak_timebins") or []
-            if peaks:
-                boundary_predictions.append(
-                    {
-                        "file": event["file"],
-                        "event_index": event["event_index"],
-                        "timebins": peaks,
-                    }
-                )
+        ) or {}
+
+        overlay_path = similarity_info.get("similarity_overlay_path")
+        if overlay_path:
+            similarity_plots.append(str(overlay_path))
+        difference_path = similarity_info.get("difference_overlay_path")
+        if difference_path:
+            difference_plots.append(str(difference_path))
+
+        similarity_peaks = [int(p) for p in (similarity_info.get("peak_timebins") or [])]
+        difference_peaks = [int(p) for p in (similarity_info.get("difference_peak_timebins") or [])]
+        gt_boundaries = _extract_boundaries(event.get("gt", []))
+        _accumulate_segmentation(segmentation_stats["similarity"], similarity_peaks, gt_boundaries, tolerance_bins)
+        _accumulate_segmentation(segmentation_stats["difference"], difference_peaks, gt_boundaries, tolerance_bins)
+
+        if similarity_peaks or difference_peaks:
+            boundary_predictions.append(
+                {
+                    "file": event["file"],
+                    "event_index": event["event_index"],
+                    "timebins": similarity_peaks,
+                    "similarity_timebins": similarity_peaks,
+                    "difference_timebins": difference_peaks,
+                }
+            )
+
+        embed_start, embed_end = event.get("embedding_slice", (None, None))
+        if embed_start is None or embed_end is None:
+            continue
+        embed_start = int(embed_start)
+        embed_end = int(embed_end)
+        if embed_end - embed_start < 1:
+            continue
+        segment_array = embeddings[embed_start:embed_end]
+        if segment_array.size == 0:
+            continue
+
+        seg_len = segment_array.shape[0]
+        if patch_width and patch_width > 0:
+            peak_bins = np.asarray(difference_peaks or similarity_peaks, dtype=np.float32)
+            peak_patches = np.rint(peak_bins / float(patch_width)).astype(int) if peak_bins.size else np.array([], dtype=int)
+        else:
+            peak_patches = np.asarray(difference_peaks or similarity_peaks, dtype=int)
+        if peak_patches.size:
+            peak_patches = np.clip(peak_patches, 0, seg_len)
+        boundaries = [0]
+        if peak_patches.size:
+            boundaries.extend(sorted(np.unique(peak_patches.tolist())))
+        if boundaries[-1] != seg_len:
+            boundaries.append(seg_len)
+
+        gt = np.asarray(event.get("gt", []))
+        segment_counter = 0
+        for idx in range(len(boundaries) - 1):
+            seg_start = int(boundaries[idx])
+            seg_end = int(boundaries[idx + 1])
+            if seg_end <= seg_start:
+                continue
+            seg_vectors = segment_array[seg_start:seg_end]
+            if seg_vectors.size == 0:
+                continue
+            if patch_width and patch_width > 0:
+                time_start = seg_start * patch_width
+                time_end = seg_end * patch_width
+            else:
+                time_start = seg_start
+                time_end = seg_end
+            time_start = max(0, min(time_start, gt.shape[0]))
+            time_end = max(0, min(time_end, gt.shape[0]))
+            if time_end > time_start:
+                seg_label = _majority_label(gt[time_start:time_end])
+            else:
+                seg_label = -1
+            segment_records.append(
+                {
+                    "vectors": seg_vectors.copy(),
+                    "label": seg_label,
+                    "file": event["file"],
+                    "event_index": int(event["event_index"]),
+                    "segment_index": segment_counter,
+                    "start_patch": seg_start,
+                    "end_patch": seg_end,
+                    "start_timebin": time_start,
+                    "end_timebin": time_end,
+                }
+            )
+            segment_counter += 1
 
     analysis = {
         "umap_path": str(umap_path),
@@ -415,9 +716,67 @@ def _analyze_embedding(
         "kmeans": kmeans_info,
         "spectrograms": rendered,
         "cosine_similarity_plots": similarity_plots,
+        "difference_plots": difference_plots,
         "predicted_boundaries": boundary_predictions,
         "events_processed": int(len(events)),
     }
+    analysis["segmentation_metrics"] = {
+        "tolerance_ms": float(tolerance_ms),
+        "tolerance_timebins": int(tolerance_bins),
+        "sample_rate": int(audio_sr) if audio_sr is not None else None,
+        "hop_size": int(audio_hop) if audio_hop is not None else None,
+        "results": {name: _finalize_segmentation(stat) for name, stat in segmentation_stats.items()},
+    }
+
+    if segment_records:
+        embed_dim = embeddings.shape[1]
+        max_segments = max(rec["vectors"].shape[0] for rec in segment_records)
+        segment_count = len(segment_records)
+        segment_tensor = np.zeros((segment_count, max_segments, embed_dim), dtype=np.float32)
+        segment_lengths = []
+        segment_labels = np.full(segment_count, -1, dtype=int)
+        segment_meta = []
+        for idx, rec in enumerate(segment_records):
+            data = rec["vectors"]
+            length = data.shape[0]
+            segment_tensor[idx, :length, :] = data
+            segment_lengths.append(int(length))
+            segment_labels[idx] = int(rec["label"])
+            metadata = {k: v for k, v in rec.items() if k != "vectors"}
+            metadata["length_patches"] = int(length)
+            segment_meta.append(metadata)
+        segment_flat = segment_tensor.reshape(segment_count, max_segments * embed_dim)
+        segment_umap_path = None
+        if segment_count >= 2:
+            if args.deterministic:
+                segment_reducer = umap.UMAP(
+                    n_components=2,
+                    n_neighbors=args.umap_neighbors,
+                    metric="cosine",
+                    random_state=42,
+                )
+            else:
+                segment_reducer = umap.UMAP(
+                    n_components=2,
+                    n_neighbors=args.umap_neighbors,
+                    metric="cosine",
+                    low_memory=True,
+                    n_jobs=-1,
+                )
+            try:
+                segment_xy = segment_reducer.fit_transform(segment_flat)
+                segment_umap_path = segment_umap_dir / "segments.png"
+                _scatter(segment_xy, segment_labels, segment_umap_path, title="Segments (between peaks)", palette=base_palette)
+            except Exception as exc:  # noqa: F841
+                segment_umap_path = None
+        analysis["segment_umap"] = {
+            "umap_path": str(segment_umap_path) if segment_umap_path else None,
+            "segment_count": int(segment_count),
+            "max_segment_patches": int(max_segments),
+            "segment_lengths": segment_lengths,
+            "labels": segment_labels.tolist(),
+            "metadata": segment_meta,
+        }
     return analysis
 
 
@@ -465,8 +824,14 @@ def main():
     patch_width = _to_item(npz["patch_width"])
 
     embedding_sets = {
-        "encoded": npz["encoded_embeddings_after_pos_removal"],
-        "patch": npz["patch_embeddings_after_pos_removal"],
+        "encoded": {
+            "after_pos_removal": npz["encoded_embeddings_after_pos_removal"],
+            "before_pos_removal": npz["encoded_embeddings_before_pos_removal"],
+        },
+        "patch": {
+            "after_pos_removal": npz["patch_embeddings_after_pos_removal"],
+            "before_pos_removal": npz["patch_embeddings_before_pos_removal"],
+        },
     }
 
     labeled_mask = labels_down >= 0
@@ -479,25 +844,29 @@ def main():
         "ground_truth_syllables": int(k),
         "peak_prominence": float(args.peak_prominence),
         "analyses": {},
-        "embedding_counts": {name: int(arr.shape[0]) for name, arr in embedding_sets.items()},
+        "embedding_counts": {},
     }
 
-    for tag, embedding_array in embedding_sets.items():
-        analysis = _analyze_embedding(
-            tag,
-            embedding_array,
-            out_dir,
-            labels_down,
-            labels_original,
-            patch_width,
-            base_palette,
-            unique_gt,
-            labeled_mask,
-            k,
-            npz,
-            args,
-        )
-        metrics["analyses"][tag] = analysis
+    for embedding_type, variants in embedding_sets.items():
+        metrics["analyses"][embedding_type] = {}
+        metrics["embedding_counts"][embedding_type] = {}
+        for variant_name, embedding_array in variants.items():
+            metrics["embedding_counts"][embedding_type][variant_name] = int(embedding_array.shape[0])
+            analysis = _analyze_embedding(
+                f"{embedding_type}/{variant_name}",
+                embedding_array,
+                out_dir,
+                labels_down,
+                labels_original,
+                patch_width,
+                base_palette,
+                unique_gt,
+                labeled_mask,
+                k,
+                npz,
+                args,
+            )
+            metrics["analyses"][embedding_type][variant_name] = analysis
 
     metrics_path = out_dir / "metrics.json"
     with metrics_path.open("w") as f:
