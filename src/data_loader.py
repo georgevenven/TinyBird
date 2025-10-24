@@ -63,6 +63,31 @@ class SpectogramDataset(Dataset):
         
         return spec
 
+    def crop_or_pad_pair(self, spec, labels_1d, pad_value_labels=-1):
+        """
+        Crop/pad spectrogram and its 1-D per-time labels together to n_timebins.
+        spec: (F, T), labels_1d: (T,)
+        Returns: (spec_out: (F, n_timebins), labels_out: (n_timebins,))
+        """
+        frq, time = spec.shape
+        assert labels_1d.ndim == 1, f"labels must be 1-D, got {labels_1d.shape}"
+        assert labels_1d.shape[0] == time, \
+            f"labels length {labels_1d.shape[0]} must match spec time {time}"
+
+        if time < self.n_timebins:
+            padding_amnt = self.n_timebins - time
+            spec_out = F.pad(spec, (0, padding_amnt, 0, 0))
+            labels_out = F.pad(labels_1d, (0, padding_amnt), value=pad_value_labels)
+            return spec_out, labels_out
+
+        elif time > self.n_timebins:
+            start = random.randint(0, time - self.n_timebins)
+            end = start + self.n_timebins
+            return spec[:, start:end], labels_1d[start:end]
+
+        else:
+            return spec, labels_1d     
+
     def pad_chirp_intervals(self, chirp_intervals, max_N, pad_value=-1):
         """
         Pad chirp_intervals (N, 2) to shape (max_N, 2) with pad_value.
@@ -136,7 +161,7 @@ class SpectogramDataset(Dataset):
         if not isinstance(spec, torch.Tensor):
             spec = torch.as_tensor(spec)
 
-        # Intervals (Nx2)
+        # # Intervals (Nx2)
         chirp_int_np = f['chirp_intervals']
         if isinstance(chirp_int_np, torch.Tensor):
             chirp_int = chirp_int_np
@@ -144,54 +169,51 @@ class SpectogramDataset(Dataset):
             chirp_int = torch.as_tensor(chirp_int_np)
         chirp_intervals, N = self.pad_chirp_intervals(chirp_int, self.n_timebins)
 
-        # Chirp labels (N,)
+        # --- Chirp labels (per-time, length T) ---
         if 'chirp_labels' in f:
             cl_np = f['chirp_labels']
-            chirp_labels = cl_np if isinstance(cl_np, torch.Tensor) else torch.as_tensor(cl_np)
-            chirp_labels = chirp_labels.to(dtype=torch.int32)
+            chirp_labels_time = cl_np if isinstance(cl_np, torch.Tensor) else torch.as_tensor(cl_np)
+            chirp_labels_time = chirp_labels_time.to(dtype=torch.int32)
         else:
-            # Backward compatibility: default to zeros of original N
-            orig_N = chirp_int.shape[0]
-            chirp_labels = torch.zeros((orig_N,), dtype=torch.int32)
-        chirp_labels_pad, N_labels = self.pad_vector(chirp_labels, self.n_timebins, pad_value=-1)
+            # Backward-compat: if missing, default to zeros of current spec width
+            chirp_labels_time = torch.zeros((spec.shape[1],), dtype=torch.int32)
 
-        # Consistency guard
-        if N_labels != N:
-            N = min(N, N_labels)
-            # ensure shapes are correct regardless
-            chirp_intervals = chirp_intervals[:self.n_timebins]
-            chirp_labels_pad = chirp_labels_pad[:self.n_timebins]
 
-        # Chirp features (N, 2, 6)
+        # Chirp features remain per-interval; pad as before
         if 'chirp_feats' in f:
             cf_np = f['chirp_feats']
             chirp_feats = cf_np if isinstance(cf_np, torch.Tensor) else torch.as_tensor(cf_np)
-            # Ensure 3D shape (N, 2, 6)
-            assert chirp_feats.ndim == 3, f"chirp_feats must be 3D (N,2,6), got {chirp_feats.shape}"
+            assert chirp_feats.ndim == 3 and chirp_feats.shape[1] == 2 and chirp_feats.shape[2] == 6, \
+                f"chirp_feats must be 3D (N,2,6), got {chirp_feats.shape}"
         else:
-            # Default to zeros for existing intervals when missing, will pad with -1 later
             orig_N = chirp_int.shape[0]
             chirp_feats = torch.zeros((orig_N, 2, 6), dtype=torch.float32)
-
         chirp_feats_pad, N_feats = self.pad_chirp_feats(chirp_feats, self.n_timebins, pad_value=-1.0)
 
-        # Final consistency guard: ensure N matches across intervals, labels, feats
-        N = min(N, N_labels, N_feats)
+        # Apply z-score normalization to spectrogram
+        spec = (spec - self.mean) / self.std
+
+        # Pairwise crop/pad spec and labels together (time-aligned)
+        if self.pad_crop:
+            spec, chirp_labels_pad = self.crop_or_pad_pair(spec, chirp_labels_time, pad_value_labels=-1)
+            assert spec.shape[0] == self.n_mels and spec.shape[1] == self.n_timebins
+            assert chirp_labels_pad.shape[0] == self.n_timebins
+        else:
+            # If not cropping/padding, still ensure equal time length for safety
+            T = spec.shape[1]
+            if chirp_labels_time.shape[0] != T:
+                # Hard align by simple right-pad/truncate to spec T (shouldn't normally happen)
+                chirp_labels_pad, _ = self.pad_vector(chirp_labels_time, T, pad_value=-1)
+            else:
+                chirp_labels_pad = chirp_labels_time
+
+        # Final consistency for interval-derived tensors (labels are per-time now)
+        N = min(N, N_feats)
         chirp_intervals = chirp_intervals[:self.n_timebins]
-        chirp_labels_pad = chirp_labels_pad[:self.n_timebins]
         chirp_feats_pad = chirp_feats_pad[:self.n_timebins]
 
         filename = path.stem
-
-        # Apply z-score normalization
-        spec = (spec - self.mean) / self.std
-
-        if self.pad_crop:
-            spec = self.crop_or_pad(spec)
-            assert spec.shape[0] == self.n_mels and spec.shape[1] == self.n_timebins
-
         spec = spec.unsqueeze(0)
-
         return spec, chirp_intervals, chirp_labels_pad, chirp_feats_pad, N, filename
 
     def __len__(self):

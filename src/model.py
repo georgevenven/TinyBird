@@ -144,11 +144,11 @@ class TinyBird(nn.Module):
                 sn, en = int(xi_new[b, i, 0].item()), int(xi_new[b, i, 1].item())
 
                 if en > sn and e0 > s0:
-                    x_new[b, 0, :, sn:en] = x[b, 0, :, s0:e0]
+                    x_new[b, :, :, sn:en] = x[b, :, :, s0:e0]
                     if xl_new is not None:
-                        xl_new[b, sn:en] = xl[b, i]
+                        xl_new[b, sn:en] = x[b, s0:e0]
                 if i < n_valid - 1 and en < W:
-                    x_new[b, 0, :, en] = sep_col_vec
+                    x_new[b, :, :, en] = sep_col_vec
                     if xl_new is not None:
                         xl_new[b, en] = self.sep_class_id
         x_new = x_new[:, :, :, : int(w_max.max().item())]

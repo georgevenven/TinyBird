@@ -493,19 +493,20 @@ def _process_core(
             return S_db, chirps, ref, actual_sr, channel_count
 
         S, chirp_intervals, s_ref, actual_sr, channel_count = spectrogram(fp, sr, n_fft, step, use_mel, n_mels)
-        if channel_count > 1 and (chirp_intervals is not None and len(chirp_intervals) > 0):
+
+        # ── NEW: per-column chirp_labels based on instantaneous dB power, not intervals ─────────
+        # chirp_labels length == S.shape[1] (T). For stereo, label 1 if right energy > left, else 0.
+        if channel_count > 1:
             S0, _, _, _, _ = spectrogram(fp, sr, n_fft, step, use_mel, n_mels, channel=0, s_ref=s_ref)
             S1, _, _, _, _ = spectrogram(fp, sr, n_fft, step, use_mel, n_mels, channel=1, s_ref=s_ref)
-            P0 = librosa.db_to_power(S0, ref=1.0)
-            P1 = librosa.db_to_power(S1, ref=1.0)
-            chrip_labels = np.zeros((chirp_intervals.shape[0],), dtype=np.int32)
-            for i, (cs, ce) in enumerate(chirp_intervals):
-                e_l = float(np.sum(P0[:, cs:ce], dtype=np.float64))
-                e_r = float(np.sum(P1[:, cs:ce], dtype=np.float64))
-                chrip_labels[i] = 1 if e_r > e_l else 0
-                # print(f"cs: {cs}, ce: {ce}, e_l: {e_l}, e_r: {e_r}, chrip_labels: {chrip_labels[i]}")
+            P0 = librosa.db_to_power(S0, ref=1.0)   # (F, T)
+            P1 = librosa.db_to_power(S1, ref=1.0)   # (F, T)
+            e0 = np.sum(P0, axis=0, dtype=np.float64)  # (T,)
+            e1 = np.sum(P1, axis=0, dtype=np.float64)  # (T,)
+            chrip_labels = (e1 > e0).astype(np.int32)  # (T,) in {0,1}
         else:
-            chrip_labels = np.zeros((chirp_intervals.shape[0],), dtype=np.int32)
+            # Mono: default all zeros, length T
+            chrip_labels = np.zeros((S.shape[1],), dtype=np.int32)
 
         if S.shape[1] < min_timebins:
             return {"file": str(fp), "skipped": True}
