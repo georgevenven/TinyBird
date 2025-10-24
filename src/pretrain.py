@@ -6,6 +6,7 @@ import warnings
 from datetime import datetime
 import torch
 import torch.nn as nn
+from torch.nn.modules.loss import L1Loss
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
@@ -301,6 +302,144 @@ class Trainer:
         else:
             print("No loss log found, starting from step 0")
 
+    # --- Metrics & logging helpers -------------------------------------------------
+
+    def _compute_label_metrics(self, logits_label, x_l, bool_mask, H, W):
+        """
+        Compute masked-column accuracy and 2x2 confusion matrix on classes {0,1}.
+        Ignores separator columns in ground-truth (id == sep_class_id).
+        """
+        with torch.no_grad():
+            B, T, C = logits_label.shape
+            assert C == 2, f"Expected 2 logits for chirp classes, got {C}"
+            assert T == H * W, f"T={T} must equal H*W={H*W}"
+
+            # Per-column logits by averaging across rows (H)
+            logits_col = logits_label.view(B, H, W, C).mean(dim=1)  # (B, W, 2)
+            preds_col = logits_col.argmax(dim=-1)                   # (B, W) in {0,1}
+
+            # Valid = masked columns & non-separator ground-truth
+            masked_cols = bool_mask.view(B, H, W).any(dim=1)        # (B, W)
+            is_sep = (x_l == self.tinybird.sep_class_id)            # (B, W)
+            valid = masked_cols & (~is_sep)                         # (B, W)
+
+            metrics = {
+                "has_valid": False,
+                "acc": float("nan"),
+                "tp": 0, "tn": 0, "fp": 0, "fn": 0,
+                # keep optional lists for W&B plot
+                "y_true": None, "y_pred": None,
+            }
+
+            if valid.any():
+                y_true = x_l[valid]          # (N_valid,) in {0,1}
+                y_pred = preds_col[valid]    # (N_valid,) in {0,1}
+
+                acc = (y_pred == y_true).float().mean().item()
+                tp = ((y_pred == 1) & (y_true == 1)).sum().item()
+                tn = ((y_pred == 0) & (y_true == 0)).sum().item()
+                fp = ((y_pred == 1) & (y_true == 0)).sum().item()
+                fn = ((y_pred == 0) & (y_true == 1)).sum().item()
+
+                metrics.update({
+                    "has_valid": True,
+                    "acc": acc,
+                    "tp": tp, "tn": tn, "fp": fp, "fn": fn,
+                    "y_true": y_true.detach().cpu(),
+                    "y_pred": y_pred.detach().cpu(),
+                })
+
+            return metrics
+
+    def _log_losses_and_metrics(self, tag, step_num, loss_total, loss_recon, loss_label, metrics):
+        """
+        Log per-step scalar losses + metrics via your log_batch_shapes helper,
+        and (optionally) a W&B confusion-matrix plot when there are valid points.
+        """
+        # Scalars
+        log_batch_shapes(
+            f"{tag}",
+            step_num,
+            loss_total=float(loss_total),
+            loss_recon=float(loss_recon),
+            loss_label=float(loss_label),
+            label_acc=float(metrics["acc"]) if metrics["acc"] == metrics["acc"] else 0.0,
+            cm_tn=int(metrics["tn"]),
+            cm_fp=int(metrics["fp"]),
+            cm_fn=int(metrics["fn"]),
+            cm_tp=int(metrics["tp"]),
+        )
+
+        # Optional: pretty confusion-matrix plot (safe-guarded)
+        try:
+            if metrics["has_valid"] and metrics["y_true"] is not None:
+                wandb.log(
+                    {
+                        f"{tag}/label_confmat": wandb.plot.confusion_matrix(
+                            probs=None,
+                            y_true=metrics["y_true"].tolist(),
+                            preds=metrics["y_pred"].tolist(),
+                            class_names=["class0", "class1"],
+                        )
+                    },
+                    step=int(step_num),
+                    commit=False,
+                )
+        except Exception:
+            # plotting is best-effort; never fail the step on this
+            pass
+
+    def _forward_encode_decode(self, x, x_i, N, x_l, step_num, is_training: bool):
+        """
+        Runs the full forward path (data shaping → encoder/decoder → losses → metrics),
+        logs batch shapes + losses/metrics, and returns losses for the caller.
+
+        Returns:
+            loss_total, loss_recon, loss_lbl, H, W
+        """
+        # --- data shaping pipeline ---
+        x, x_i, x_l = self.tinybird.compactify_data(x, x_i, N, xl=x_l)
+        x, x_i, x_l = self.tinybird.remap_boundaries(x, x_i, N, xl=x_l)  # randomized remap
+        x, x_i, x_l = self.tinybird.sample_data_seq_length(x, x_i, N, seq_len=8000, xl=x_l)
+
+        B, H, W, N_blocks = x.shape[0], x.shape[-2], x.shape[-1], x_i.shape[1]
+
+        # choose masking strategy
+        if random.random() < 0.5:
+            mblock = [N_blocks - 1]; masked_blocks = 0
+        else:
+            mblock = []; masked_blocks = max(1, int(0.5 * N_blocks))
+
+        # shapes + masking fraction
+        tag = "train_batch" if is_training else "val_batch"
+        log_batch_shapes(tag, step_num, B=B, W=W, N=N_blocks)
+
+        h, idx_restore, bool_mask, T, x_l_tok_cond = self.tinybird.forward_encoder(
+            x, x_i, mblock=mblock, masked_blocks=masked_blocks, xl=x_l
+        )
+
+        masked_fraction = bool_mask.float().mean().item()
+        log_batch_shapes(tag, step_num, masked_fraction=masked_fraction)
+
+        # decoder + heads
+        pred, logits_label = self.tinybird.forward_decoder(
+            h, idx_restore, T, xl_tok_cond=x_l_tok_cond
+        )
+
+        # losses
+        lambda_label = 0.3  # hard-coded for now
+        loss_recon = self.tinybird.loss_mse(x, pred, bool_mask)
+        loss_lbl   = self.tinybird.loss_label(logits_label, x_l, bool_mask, hw=(H, W))
+        loss_total = loss_recon + lambda_label * loss_lbl
+
+        # metrics + logs
+        metrics = self._compute_label_metrics(logits_label, x_l, bool_mask, H, W)
+        run_tag = "train" if is_training else "val"
+        self._log_losses_and_metrics(run_tag, step_num, loss_total.item(), loss_recon.item(), loss_lbl.item(), metrics)
+
+        return loss_total, loss_recon, loss_lbl, H, W
+
+
     def step(self, step_num, batch, is_training=True):
         """
         Perform one forward pass and optionally backward pass.
@@ -318,72 +457,33 @@ class Trainer:
             torch.cuda.reset_peak_memory_stats(self.device)
 
         # spec, chirp_intervals, chirp_labels_pad, chirp_feats_pad, N, filename
-        spectrograms, chirp_intervals, _, _, N, _ = batch
+        spectrograms, chirp_intervals, chirp_labels, _, N, _ = batch
 
         x = spectrograms.to(self.device, non_blocking=True).float()  # (B, 1, H, W)
         x_i = chirp_intervals.to(self.device, non_blocking=True)  # (B, N, 2)
         N = N.to(self.device, non_blocking=True)  # (B, 1) # number of chirp intervals
+        x_l = chirp_labels.to(self.device, non_blocking=True).long()  # (B, N) # channel labels
+
+        x_l = model.randomize_label(x_l)
 
         if is_training:
             self.tinybird.train()
             self.optimizer.zero_grad(set_to_none=True)
         else:
-            self.tinybird.eval()
+            self.tinybird.eval() 
 
         # Forward pass through encoder-decoder
         with cuda_mem_scope(self.device, step=step_num):
             with torch.set_grad_enabled(is_training):
                 if self.use_amp:
                     with torch.amp.autocast('cuda'):
-                        x, x_i = self.tinybird.compactify_data(x, x_i, N)
-
-                        #randomly remap the boundaries
-                        x, x_i = self.tinybird.remap_boundaries(x, x_i, N)
-
-                        x, x_i = self.tinybird.sample_data_seq_length(x, x_i, N, seq_len=8000)
-                        B, W, N = x.shape[0], x.shape[-1], x_i.shape[1]
-
-
-                        if random.random() < 0.5:
-                            mblock = [N - 1]
-                            masked_blocks = 0
-                        else:
-                            mblock = []
-                            masked_blocks = max(1, int(0.5 * N))
-
-                        log_batch_shapes("train_batch", step_num, B=B, W=W, N=N)
-                        h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(
-                            x, x_i, mblock=mblock, masked_blocks=masked_blocks
+                        loss, loss_recon, loss_lbl, H, W = self._forward_encode_decode(
+                            x, x_i, N, x_l, step_num, is_training=is_training
                         )
-
-                        masked_fraction = bool_mask.float().view(-1).mean().item()
-                        log_batch_shapes("train_batch", step_num, masked_fraction=masked_fraction)
-
-                        pred = self.tinybird.forward_decoder(h, idx_restore, T)
-                        loss = self.tinybird.loss_mse(x, pred, bool_mask)
                 else:
-                    x, x_i = self.tinybird.compactify_data(x, x_i, N)
-                    x, x_i = self.tinybird.sample_data_seq_length(x, x_i, N, seq_len=8000)
-                    B, W, N = x.shape[0], x.shape[-1], x_i.shape[1]
-
-                    if random.random() < 0.5:
-                        mblock = [N - 1]
-                        masked_blocks = 0
-                    else:
-                        mblock = []
-                        masked_blocks = max(1, int(0.5 * N))
-
-                    log_batch_shapes("train_batch", step_num, B=B, W=W, N=N)
-                    h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(
-                        x, x_i, mblock=mblock, masked_blocks=masked_blocks
+                    loss, loss_recon, loss_lbl, H, W = self._forward_encode_decode(
+                        x, x_i, N, x_l, step_num, is_training=is_training
                     )
-
-                    masked_fraction = bool_mask.float().view(-1).mean().item()
-                    log_batch_shapes("train_batch", step_num, masked_fraction=masked_fraction)
-
-                    pred = self.tinybird.forward_decoder(h, idx_restore, T)
-                    loss = self.tinybird.loss_mse(x, pred, bool_mask)
-
         # Backward pass only for training
         if is_training:
             if self.use_amp:

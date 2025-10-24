@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+import torch.nn.functional as F
 
 
 class TinyBird(nn.Module):
@@ -36,19 +37,26 @@ class TinyBird(nn.Module):
         self.decoder = nn.TransformerEncoder(self.decoder_transformer_block, num_layers=config["dec_n_layer"])
 
         self.encoder_to_decoder = nn.Linear(config["enc_hidden_d"], config["dec_hidden_d"])
-        self.decoder_to_pixel = nn.Linear(config["dec_hidden_d"], self.patch_size[0] * self.patch_size[1])
+        self.decoder_to_pixel   = nn.Linear(config["dec_hidden_d"], self.patch_size[0] * self.patch_size[1])
+        self.decoder_to_label   = nn.Linear(config["dec_hidden_d"], 2)
+
+        # classifier head for label prediction
+        # 0 = Left channel
+        # 1 = Right channel
+
+        self.label_embed = nn.Embedding(4, config["dec_hidden_d"])
+        # 0 = Left channel
+        # 1 = Right channel
+        # 2 = separator
+        # 3 = [LABEL_MASK]  # for masked columns
+        self.sep_class_id = 2
+        self.mask_class_id = 3
+
 
         self.sep_param = nn.Parameter(torch.zeros(1, 1, 1))
-        # NOTE: expansion needs to occur at run time to be on the correct device
-        # self.sep_token  = self.sep_param.expand(1, config["mels"],1)
-
-        self.pad_token = nn.Parameter(torch.zeros(1, 1, config["dec_hidden_d"]))
         self.mask_token = nn.Parameter(torch.zeros(1, 1, config["dec_hidden_d"]))
 
         self.pos_enc = nn.Parameter(torch.zeros(1, config["max_seq"], config["enc_hidden_d"]))
-
-        # blockwise mask width in **tokens** along W' (time)
-        self.mask_block_w = config.get("mask_block_w", 32)
 
         self.init_weights()
 
@@ -73,7 +81,17 @@ class TinyBird(nn.Module):
 
         return z + self.pos_enc[:, :T, :]  # (B, T, D_enc)
 
-    def compactify_data(self, x: torch.Tensor, xi: torch.Tensor, N: torch.Tensor):
+    def randomize_label(x_l: torch.Tensor, p: float = 0.5) -> torch.Tensor:
+        if torch.rand(()) >= p:
+            return x_l  # no change
+
+        out = x_l.clone()
+        mask01 = (out == 0) | (out == 1)
+        out[mask01] = 1 - out[mask01]  # flips 0<->1
+        return out
+
+
+    def compactify_data(self, x: torch.Tensor, xi: torch.Tensor, N: torch.Tensor, xl: torch.Tensor = None):
         """
         Remove silence from spectrograms keeping chirp blocks.
 
@@ -81,7 +99,7 @@ class TinyBird(nn.Module):
             x: Spectrograms (B, C, H, W)
             xi: Chirp boundaries (B, N_max, 2) [start, end)
             N: Valid chirp counts per item (B,)
-
+            xl: Left channel labels (B, N_max)
         Returns:
             x_new: Compacted spectrograms (B, C, H, w_max)
             xi_new: Updated boundaries in compressed coordinates (B, N_max, 2)
@@ -89,6 +107,7 @@ class TinyBird(nn.Module):
         # x:  (B, C, H, W) #spectrogram
         # xi: (B, W, 2)    #[start, end) of slices,  N slicesper item
         # N:  (B, )        #number of valid slices per item
+        # xl: (B, W)       #channel labels
 
         B, C, H, W = x.shape
 
@@ -112,6 +131,8 @@ class TinyBird(nn.Module):
         # w_max: (B, )           #width of each item
 
         x_new = torch.zeros_like(x)  # ensures columns beyond valid region are zero
+        if xl is not None:
+            xl_new = torch.zeros(B, w_max.max().item(), device=x.device, dtype=xl.dtype)
 
         # Expand the learnable separator scalar to a column on the **current** device/dtype
         sep_col_vec = self.sep_param.expand(1, x.size(2), 1)[0, :, 0]
@@ -125,17 +146,22 @@ class TinyBird(nn.Module):
 
                 if en > sn and e0 > s0:
                     x_new[b, 0, :, sn:en] = x[b, 0, :, s0:e0]
-
+                    if xl_new is not None:
+                        xl_new[b, sn:en] = xl[b, i]
                 if i < n_valid - 1 and en < W:
                     x_new[b, 0, :, en] = sep_col_vec
-
+                    if xl_new is not None:
+                        xl_new[b, en] = self.sep_class_id
         x_new = x_new[:, :, :, : int(w_max.max().item())]
-        # x_new:  (B, C, H, w_max) #spectrogram, with silence removed
 
-        return x_new, xi_new
+        # x_new:  (B, C, H, w_max) #spectrogram, with silence removed
+        if xl_new is not None:
+            return x_new, xi_new, xl_new
+        else:
+            return x_new, xi_new
 
     def sample_data_seq_length(
-        self, x: torch.Tensor, xi: torch.Tensor, N: torch.Tensor, seq_len: int, mblock: int = -1
+        self, x: torch.Tensor, xi: torch.Tensor, N: torch.Tensor, seq_len: int, mblock: int = -1, xl: torch.Tensor = None
     ):
         """
         Sample random or fixed contiguous window of data, with the last block masked.
@@ -195,6 +221,9 @@ class TinyBird(nn.Module):
 
         # --- window the spectrogram x_out to the desired seq_len. Ensure that the window ends on the last column of the masked block. ---
         x_out = torch.zeros(B, C, H, seq_len, device=device, dtype=x.dtype)
+        if xl is not None:
+            xl_out = torch.zeros(B, seq_len, device=device, dtype=xl.dtype)
+
         mb_start_idx = torch.zeros(B, dtype=torch.long, device=device)
         for b in range(B):
             end_col = int(xi[b, mb_idx[b], 1].item())
@@ -202,6 +231,9 @@ class TinyBird(nn.Module):
             start_col = end_col - seq_len
 
             x_out[b, :, :, :] = x[b, :, :, start_col:end_col]
+            if xl_out is not None:
+                xl_out[b] = xl[b, start_col:end_col]
+
             blocks = torch.nonzero(xi[b, :, 0] >= start_col, as_tuple=False).squeeze(1)
             mb_start_idx[b] = blocks[0] if len(blocks) > 0 else 0
 
@@ -222,9 +254,12 @@ class TinyBird(nn.Module):
             f"xi_out[b,:,1] should always be seq_len for all items in the batch. got {xi_out[:, :, 1]}"
         )
 
-        return x_out, xi_out
+        if xl_out is not None:
+            return x_out, xi_out, xl_out
+        else:
+            return x_out, xi_out
 
-    def sample_data(self, x: torch.Tensor, xi: torch.Tensor, N: torch.Tensor, n_blocks: int, start: int = -1):
+    def sample_data(self, x: torch.Tensor, xi: torch.Tensor, N: torch.Tensor, n_blocks: int, start: int = -1, xl: torch.Tensor = None):
         """
         Sample random contiguous windows of chirp blocks.
 
@@ -265,6 +300,8 @@ class TinyBird(nn.Module):
 
         x_out = torch.zeros(B, C, H, max_width, device=device, dtype=x.dtype)
         xi_out = torch.zeros(B, n_blocks, 2, device=device, dtype=xi.dtype)
+        if xl is not None:
+            xl_out = torch.zeros(B, max_width, device=device, dtype=xl.dtype)
 
         for b in range(B):
             en = int(en_raw[b].item())
@@ -272,14 +309,19 @@ class TinyBird(nn.Module):
             en = st + max_width  # right-align to end
 
             x_out[b, :, :, :] = x[b, :, :, st:en]  # crop the spectrogram to the new window
+            if xl_out is not None:
+                xl_out[b] = xl[b, st:en]
 
             xi_out[b] = xi[b, start[b] : end[b], :].clone()  # remap the boundaries to the new window
             xi_out[b, :, 0] = xi_out[b, :, 0] - st
             xi_out[b, :, 1] = xi_out[b, :, 1] - st
 
-        return x_out, xi_out
+        if xl_out is not None:
+            return x_out, xi_out, xl_out
+        else:
+            return x_out, xi_out
 
-    def sample_data_indices(self, x: torch.Tensor, xi: torch.Tensor, N: torch.Tensor, indices):
+    def sample_data_indices(self, x: torch.Tensor, xi: torch.Tensor, N: torch.Tensor, indices, xl: torch.Tensor = None):
         """
         Sample a window of chirp blocks using explicit block indices (not necessarily contiguous).
 
@@ -288,10 +330,12 @@ class TinyBird(nn.Module):
             xi: Chirp boundaries (B, N_max, 2)
             N: Valid chirp counts per item (B,)
             indices: Iterable of integer block indices to extract, in the order to be concatenated
+            xl: channel labels (B, N_max)
 
         Returns:
             x_out:  Concatenated spectrograms of the selected blocks with 1-col separators (B, C, H, max_width)
             xi_out: Remapped boundaries in the new window coordinates, one row per selected index (B, K, 2)
+            is xl is passed in, returns xl_out: channel labels (B, max_width)
         """
         B, C, H, W = x.shape
         device = x.device
@@ -324,6 +368,8 @@ class TinyBird(nn.Module):
 
         x_out = torch.zeros(B, C, H, max_width, device=device, dtype=x.dtype)
         xi_out = torch.zeros(B, K, 2, device=device, dtype=xi.dtype)
+        if xl is not None:
+            xl_out = torch.zeros(B, max_width, device=device, dtype=xl.dtype)
 
         for b in range(B):
             pos = 0
@@ -335,6 +381,10 @@ class TinyBird(nn.Module):
 
                 # Copy all channels, not just channel 0
                 x_out[b, :, :, pos : pos + w] = x[b, :, :, s0:e0]
+                if xl_out is not None:
+                    xl_out[b, pos:pos+w] = xl[b, s0:e0]
+
+
                 xi_out[b, k, 0] = pos
                 xi_out[b, k, 1] = pos + w
                 pos += w
@@ -343,11 +393,16 @@ class TinyBird(nn.Module):
                 if k < K - 1 and divider_pos > 0:
                     # Use a separator column; e0 is end-exclusive so clamp to W-1
                     x_out[b, :, :, pos] = x[b, :, :, divider_pos]
+                    if xl_out is not None:
+                        xl_out[b, pos] = self.sep_class_id
                     pos += 1
 
-        return x_out, xi_out
+        if xl_out is not None:
+            return x_out, xi_out, xl_out
+        else:
+            return x_out, xi_out
 
-    def remap_boundaries(self, x: torch.Tensor, xi: torch.Tensor, N: torch.Tensor, move_block: int = -1):
+    def remap_boundaries(self, x: torch.Tensor, xi: torch.Tensor, N: torch.Tensor, move_block: int = -1, xl: torch.Tensor = None):
         B, _, H, W = x.shape
         device = x.device
         N = N.view(B, 1)
@@ -359,6 +414,8 @@ class TinyBird(nn.Module):
 
         x_out = x.clone()
         xi_out = xi.clone()
+        if xl is not None:
+            xl_out = xl.clone()
 
         for b in range(B):
             # pick a random block between 0 and N[b]-1
@@ -390,7 +447,15 @@ class TinyBird(nn.Module):
             x_out[b, :, :, lbe - nbb] = x[b, :, :, be]
             x_out[b, :, :, lbe - nbb + 1 : lbe] = x[b, :, :, 0:be]
 
-        return x_out, xi_out
+            if xl_out is not None:
+                xl_out[b, 0 : lbe - nbb] = xl[b, nbb:lbe]
+                xl_out[b, lbe - nbb] = xl[b, be]
+                xl_out[b, lbe - nbb + 1 : lbe] = xl[b, 0:be]
+
+        if xl_out is not None:
+            return x_out, xi_out, xl_out
+        else:
+            return x_out, xi_out
 
     def build_column_mask(
         self,
@@ -437,30 +502,15 @@ class TinyBird(nn.Module):
 
         starts = xi[:, :, 0].to(torch.long).clamp(min=0, max=W)  # (B, N)
         ends = xi[:, :, 1].to(torch.long).clamp(min=0, max=W)  # (B, N)
-        # widths = (ends - starts).clamp(min=0)  # (B, N)
 
         if len(mblock) > 0:
             mask_blocks = mblock
         elif masked_blocks > 0:
             mask_blocks = torch.randperm(N, device=device)[:masked_blocks].tolist()  # randomly select n_blocks blocks
 
-        # only look at the first item in the batch
-        # m_ws = [None] * len(mask_blocks)
-        # for index, block in enumerate(mask_blocks):
-        #     m_w = min([int(widths[b, block].sum().item()) for b in range(B)])
-        #     m_w = int(widths[0, block].sum().item())
-        #     if half_mask:
-        #         m_w = m_w // 2
-        #     m_ws[index] = m_w
-
         mask2d = torch.zeros(B, W, dtype=torch.bool, device=device)  # mask2d is a boolean mask of the spectrogram
 
-        # for b in range(B):
-        #     end_i = [int(v) for v in ends[b].tolist()]
-        #     for index, block in enumerate(mask_blocks):
-        #         s = max(0, end_i[block] - m_ws[index])
-        #         mask2d[b, s : end_i[block]] = True
-
+        #use the start and end of the 0th item in the batch to define the mask for all items in the batch
         for block in mask_blocks:
             if half_mask:
                 start = starts[0, block] + max(0, (ends[0, block] - starts[0, block]) // 2)
@@ -469,6 +519,7 @@ class TinyBird(nn.Module):
             mask2d[:, start : ends[0, block]] = True
 
         mask = mask2d.unsqueeze(1).expand(B, H, W).reshape(B, H * W)
+        
         return mask
 
     def mask(self, z: torch.Tensor, bool_mask: torch.Tensor):
@@ -502,7 +553,7 @@ class TinyBird(nn.Module):
 
         return z_keep, idx_restore
 
-    def forward_encoder(self, x: torch.Tensor, xi: torch.Tensor, **column_mask_args):
+    def forward_encoder(self, x: torch.Tensor, xi: torch.Tensor, xl: torch.Tensor = None, **column_mask_args):
         """
         Patchify → add positional encodings → build a **column-wise** mask from chirp boundaries →
         keep only unmasked tokens → encode with the Transformer encoder.
@@ -533,7 +584,7 @@ class TinyBird(nn.Module):
         """
         # x:  (B, C=1, H, W)
         # xi: (B, N, 2)
-
+        B = x.shape[0]
         z, H, W = self.tokenize_spectrogram(x)  # (B, T, D_enc), H, W
         z = self.apply_position_encoding(z)  # (B, T, D_enc)
 
@@ -545,7 +596,15 @@ class TinyBird(nn.Module):
         # idx_restore: Permutation indices to restore original order (B, T)
 
         h = self.encoder(z_keep)  # (B, keep, D_enc)
-        return h, idx_restore, bool_mask, H * W  # (B, keep, D_enc), (B, T), (B, T), (B,T), T
+
+        if xl is not None:
+            xl_tok = xl.unsqueeze(1).expand(B, H, W).reshape(B, H * W)
+            xl_tok_cond = xl_tok.clone()
+            xl_tok_cond[bool_mask] = self.mask_class_id  
+            return h, idx_restore, bool_mask, H * W, xl_tok_cond
+        else:
+            return h, idx_restore, bool_mask, H * W # (B, keep, D_enc), (B, T), (B, T), (B,T), T
+
 
     def forward_encoder_inference(self, x: torch.Tensor):
         """
@@ -559,7 +618,7 @@ class TinyBird(nn.Module):
         z = self.apply_position_encoding(z)  # (B, T, D_enc)
         return self.encoder(z)  # (B, T, D_enc)
 
-    def forward_decoder(self, h: torch.Tensor, idx_restore: torch.Tensor, T: int):
+    def forward_decoder(self, h: torch.Tensor, idx_restore: torch.Tensor, T: int, xl_tok_cond: torch.Tensor = None):
         """
         Project encoder outputs to decoder width → insert learned mask tokens → unshuffle back to the
         original token order → add decoder positional encodings → run the Transformer decoder → predict
@@ -609,9 +668,16 @@ class TinyBird(nn.Module):
 
         y_full = y_full + pos_dec
 
+        if xl_tok_cond is not None :
+            y_full = y_full + self.label_embed(xl_tok_cond)
+
         d = self.decoder(y_full)  # (B, T, D_dec)
         pred = self.decoder_to_pixel(d)  # Final per-token patch prediction: (B, T, P). P is pixels per patch
-        return pred
+        if xl_tok_cond is not None:
+            logits_label = self.decoder_to_label(d)
+            return pred, logits_label
+        else:
+            return pred
 
     def loss_mse(self, x: torch.Tensor, pred: torch.Tensor, bool_mask: torch.Tensor):
         """
@@ -669,97 +735,33 @@ class TinyBird(nn.Module):
         return loss
 
 
-if __name__ == "__main__":
-    import argparse
-    from pathlib import Path
-    import torch
-    from torch.utils.data import DataLoader
+    def loss_label(self, logits_label: torch.Tensor, xl: torch.Tensor, bool_mask: torch.Tensor, hw: (None, None)):
+        """
+        logits_label: (B, T, 2)
+        xl:           (B, W) in {0,1,2}  (2 = separator)
+        bool_mask:    (B, T)
+        hw:           (H, W)
+        """
+        H, W = hw
+        B, T, C = logits_label.shape
+        assert T == H * W, f"T={T} must equal H*W={H*W}"
 
-    # pull dataset class from your existing file
-    from data_loader import SpectogramDataset
+        # Per-column logits by averaging across rows (H)
+        logits_hw  = logits_label.view(B, H, W, C)    # (B,H,W,2)
+        logits_col = logits_hw.mean(dim=1)           # (B,W,2)
 
-    parser = argparse.ArgumentParser(description="TinyBird test")
-    parser.add_argument("--input_dir", required=True, type=Path, help="input directory")
-    args = parser.parse_args()
+        # Masked columns: any row masked in that column
+        masked_cols = bool_mask.view(B, H, W).any(dim=1)      #  (B,H,W) -> (B,W)     
 
-    # create config with default values from the main method in pretrain.py
-    config = {
-        # training meta (not used here but included for parity/completeness)
-        "steps": 500_000,
-        "lr": 2e-4,
-        "batch_size": 256,
-        "dropout": 0.1,
-        "mask_p": 0.75,
-        "eval_every": 500,
-        "amp": False,
-        "weight_decay": 0.0,
-        # data geometry
-        "mels": 128,
-        "num_timebins": 30001,
-        "patch_height": 32,
-        "patch_width": 1,
-        "max_seq": 30001,
-        "patch_size": (32, 1),
-        # encoder
-        "enc_hidden_d": 12,
-        "enc_n_head": 1,
-        "enc_n_layer": 1,
-        "enc_dim_ff": 12,
-        # decoder
-        "dec_hidden_d": 12,
-        "dec_n_head": 1,
-        "dec_n_layer": 1,
-        "dec_dim_ff": 12,
-        # extra used by TinyBird
-        "mask_block_w": 32,  # present in model, default from your code
-    }
+        # Valid = masked & non-separator
+        is_sep = (xl == self.sep_class_id)              # (B,W)
+        valid = masked_cols & (~is_sep)              # (B,W)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(
-        f"[TinyBird test] device={device}, mels={config['mels']}, timebins={config['num_timebins']}, "
-        f"patch={config['patch_size']}, max_seq={config['max_seq']}"
-    )
+        if not valid.any():
+            return logits_label.new_tensor(0.0)
 
-    dataset = SpectogramDataset(dir=str(args.input_dir), n_mels=config["mels"], n_timebins=config["num_timebins"])
+        logits = logits_col[valid]                   # (N_valid, 2)
+        targets = xl[valid].long()                   # (N_valid,) in {0,1}
+        return F.cross_entropy(logits, targets)
 
-    loader = DataLoader(dataset, batch_size=2, shuffle=False, num_workers=0, pin_memory=False)
-    model = TinyBird(config).to(device)
-    model.eval()
-    batch = next(iter(loader))  # (spec, chirp_intervals, N, filename)
-    spectrograms, chirp_intervals, N, filenames = batch
 
-    x = spectrograms.to(device, non_blocking=False)  # (B=2, 1, H=mels, W=time)
-    xi = chirp_intervals.to(device, non_blocking=False)  # (B=2, N_max, 2)
-    N = N.to(device, non_blocking=False)  # (B=2, 1)
-
-    print(f"[TinyBird test] batch shapes: x={tuple(x.shape)}, xi={tuple(xi.shape)}, N={tuple(N.shape)}")
-    print(f"[TinyBird test] files: {filenames[0]} | {filenames[1]}")
-
-    # --- 3) encoder ---
-    with torch.no_grad():
-        print(f"[TinyBird test] before prepare_data: x={tuple(x.shape)}, xi={tuple(xi.shape)}, N={tuple(N.shape)}")
-        x, xi = model.compactify_data(x, xi, N)
-        print(f"[TinyBird test] after prepare_data: x={tuple(x.shape)}, xi={tuple(xi.shape)}")
-        x, xi = model.sample_data(x, xi, N, n_blocks=3)
-        print(f"[TinyBird test] after window_data: x={tuple(x.shape)}, xi={tuple(xi.shape)}")
-
-        h, idx_restore, bool_mask, T = model.forward_encoder(x, xi)
-
-    print(
-        f"[TinyBird test] encoder outputs:"
-        f" h={tuple(h.shape)}, idx_restore={tuple(idx_restore.shape)},"
-        f" bool_mask={tuple(bool_mask.shape)}, T={T}"
-    )
-
-    # --- 4) decoder on same batch ---
-    with torch.no_grad():
-        pred = model.forward_decoder(h, idx_restore, T)  # (B, T, P)
-
-    print(f"[TinyBird test] decoder output: pred={tuple(pred.shape)}")
-
-    # (optional) compute MSE on masked patches, like training loop
-    with torch.no_grad():
-        loss = model.loss_mse(x, pred, bool_mask).item()
-    print(f"[TinyBird test] masked-patch MSE loss: {loss:.6f}")
-
-    print("[TinyBird test] ✅ success")
