@@ -304,15 +304,15 @@ class Trainer:
 
     # --- Metrics & logging helpers -------------------------------------------------
 
-    def _compute_label_metrics(self, logits_label, x_l, bool_mask, H, W):
+    def _compute_label_metrics(self, logits_label, x_l, bool_mask, W):
         """
         Compute masked-column accuracy and 2x2 confusion matrix on classes {0,1}.
         Ignores separator columns in ground-truth (id == sep_class_id).
         """
         with torch.no_grad():
             B, T, C = logits_label.shape
+            H = T // W
             assert C == 2, f"Expected 2 logits for chirp classes, got {C}"
-            assert T == H * W, f"T={T} must equal H*W={H * W}"
 
             # Per-column logits by averaging across rows (H)
             logits_col = logits_label.view(B, H, W, C).mean(dim=1)  # (B, W, 2)
@@ -442,7 +442,7 @@ class Trainer:
         loss_total = loss_recon + lambda_label * loss_lbl  
 
         # metrics + logs
-        metrics = self._compute_label_metrics(logits_label, x_l, bool_mask, H, W)
+        metrics = self._compute_label_metrics(logits_label, x_l, bool_mask, W)
         run_tag = "train" if is_training else "val"
         self._log_losses_and_metrics(run_tag, step_num, loss_total.item(), loss_recon.item(), loss_lbl.item(), metrics)
 
