@@ -747,7 +747,7 @@ class TinyBird(nn.Module):
 
         return loss
 
-    def loss_label(self, logits_label: torch.Tensor, xl: torch.Tensor, bool_mask: torch.Tensor, H: int):
+    def loss_label(self, logits_label: torch.Tensor, xl: torch.Tensor, bool_mask: torch.Tensor, W: int):
         """
         logits_label: (B, T, 2)
         xl:           (B, T) in {0,1,2}  (2 = separator)
@@ -756,7 +756,7 @@ class TinyBird(nn.Module):
         """
 
         B, T, C = logits_label.shape
-        W = T // H
+        H = T // W
 
         # Per-column logits by averaging across rows (H)
         logits_hw = logits_label.view(B, H, W, C)  # (B,H,W,2)
