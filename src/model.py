@@ -146,7 +146,7 @@ class TinyBird(nn.Module):
                 if en > sn and e0 > s0:
                     x_new[b, :, :, sn:en] = x[b, :, :, s0:e0]
                     if xl_new is not None:
-                        xl_new[b, sn:en] = x[b, s0:e0]
+                        xl_new[b, sn:en] = xl[b, s0:e0]
                 if i < n_valid - 1 and en < W:
                     x_new[b, :, :, en] = sep_col_vec
                     if xl_new is not None:
