@@ -763,7 +763,7 @@ class Trainer:
                 torch.save(self.tinybird.state_dict(), weight_path)
 
                 # Save reconstruction visualization
-                self.save_reconstruction(val_batch, step_num)
+                #self.save_reconstruction(val_batch, step_num)
                 wandb.log(
                     {
                         "lr": float(current_lr),
