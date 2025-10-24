@@ -81,7 +81,7 @@ class TinyBird(nn.Module):
 
         return z + self.pos_enc[:, :T, :]  # (B, T, D_enc)
 
-    def randomize_label(x_l: torch.Tensor) -> torch.Tensor:
+    def randomize_label(self, x_l: torch.Tensor) -> torch.Tensor:
         if random.random() < .5:
             return x_l  # no change
 
