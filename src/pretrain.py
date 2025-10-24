@@ -438,8 +438,8 @@ class Trainer:
         # losses
         lambda_label = 0.3  # hard-coded for now
         loss_recon = self.tinybird.loss_mse(x, pred, bool_mask)
-        loss_lbl = self.tinybird.loss_label(logits_label, x_l, bool_mask, hw=(H, W))
-        loss_total = loss_recon + lambda_label * loss_lbl
+        loss_lbl = self.tinybird.loss_label(logits_label, x_l, bool_mask, H)
+        loss_total = loss_recon + lambda_label * loss_lbl  
 
         # metrics + logs
         metrics = self._compute_label_metrics(logits_label, x_l, bool_mask, H, W)

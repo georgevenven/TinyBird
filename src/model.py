@@ -82,7 +82,7 @@ class TinyBird(nn.Module):
         return z + self.pos_enc[:, :T, :]  # (B, T, D_enc)
 
     def randomize_label(self, x_l: torch.Tensor) -> torch.Tensor:
-        if random.random() < .5:
+        if random.random() < 0.5:
             return x_l  # no change
 
         out = x_l.clone()
@@ -747,16 +747,16 @@ class TinyBird(nn.Module):
 
         return loss
 
-    def loss_label(self, logits_label: torch.Tensor, xl: torch.Tensor, bool_mask: torch.Tensor, hw: (None, None)):
+    def loss_label(self, logits_label: torch.Tensor, xl: torch.Tensor, bool_mask: torch.Tensor, H: int):
         """
         logits_label: (B, T, 2)
-        xl:           (B, W) in {0,1,2}  (2 = separator)
+        xl:           (B, T) in {0,1,2}  (2 = separator)
         bool_mask:    (B, T)
         hw:           (H, W)
         """
-        H, W = hw
+
         B, T, C = logits_label.shape
-        assert T == H * W, f"T={T} must equal H*W={H * W}"
+        W = T // H
 
         # Per-column logits by averaging across rows (H)
         logits_hw = logits_label.view(B, H, W, C)  # (B,H,W,2)
