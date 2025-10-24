@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
+import random
 
 
 class TinyBird(nn.Module):
@@ -37,8 +38,8 @@ class TinyBird(nn.Module):
         self.decoder = nn.TransformerEncoder(self.decoder_transformer_block, num_layers=config["dec_n_layer"])
 
         self.encoder_to_decoder = nn.Linear(config["enc_hidden_d"], config["dec_hidden_d"])
-        self.decoder_to_pixel   = nn.Linear(config["dec_hidden_d"], self.patch_size[0] * self.patch_size[1])
-        self.decoder_to_label   = nn.Linear(config["dec_hidden_d"], 2)
+        self.decoder_to_pixel = nn.Linear(config["dec_hidden_d"], self.patch_size[0] * self.patch_size[1])
+        self.decoder_to_label = nn.Linear(config["dec_hidden_d"], 2)
 
         # classifier head for label prediction
         # 0 = Left channel
@@ -51,7 +52,6 @@ class TinyBird(nn.Module):
         # 3 = [LABEL_MASK]  # for masked columns
         self.sep_class_id = 2
         self.mask_class_id = 3
-
 
         self.sep_param = nn.Parameter(torch.zeros(1, 1, 1))
         self.mask_token = nn.Parameter(torch.zeros(1, 1, config["dec_hidden_d"]))
@@ -82,14 +82,13 @@ class TinyBird(nn.Module):
         return z + self.pos_enc[:, :T, :]  # (B, T, D_enc)
 
     def randomize_label(x_l: torch.Tensor, p: float = 0.5) -> torch.Tensor:
-        if torch.rand(()) >= p:
+        if random.random() >= p:
             return x_l  # no change
 
         out = x_l.clone()
         mask01 = (out == 0) | (out == 1)
         out[mask01] = 1 - out[mask01]  # flips 0<->1
         return out
-
 
     def compactify_data(self, x: torch.Tensor, xi: torch.Tensor, N: torch.Tensor, xl: torch.Tensor = None):
         """
@@ -161,7 +160,13 @@ class TinyBird(nn.Module):
             return x_new, xi_new
 
     def sample_data_seq_length(
-        self, x: torch.Tensor, xi: torch.Tensor, N: torch.Tensor, seq_len: int, mblock: int = -1, xl: torch.Tensor = None
+        self,
+        x: torch.Tensor,
+        xi: torch.Tensor,
+        N: torch.Tensor,
+        seq_len: int,
+        mblock: int = -1,
+        xl: torch.Tensor = None,
     ):
         """
         Sample random or fixed contiguous window of data, with the last block masked.
@@ -259,7 +264,15 @@ class TinyBird(nn.Module):
         else:
             return x_out, xi_out
 
-    def sample_data(self, x: torch.Tensor, xi: torch.Tensor, N: torch.Tensor, n_blocks: int, start: int = -1, xl: torch.Tensor = None):
+    def sample_data(
+        self,
+        x: torch.Tensor,
+        xi: torch.Tensor,
+        N: torch.Tensor,
+        n_blocks: int,
+        start: int = -1,
+        xl: torch.Tensor = None,
+    ):
         """
         Sample random contiguous windows of chirp blocks.
 
@@ -382,8 +395,7 @@ class TinyBird(nn.Module):
                 # Copy all channels, not just channel 0
                 x_out[b, :, :, pos : pos + w] = x[b, :, :, s0:e0]
                 if xl_out is not None:
-                    xl_out[b, pos:pos+w] = xl[b, s0:e0]
-
+                    xl_out[b, pos : pos + w] = xl[b, s0:e0]
 
                 xi_out[b, k, 0] = pos
                 xi_out[b, k, 1] = pos + w
@@ -402,7 +414,9 @@ class TinyBird(nn.Module):
         else:
             return x_out, xi_out
 
-    def remap_boundaries(self, x: torch.Tensor, xi: torch.Tensor, N: torch.Tensor, move_block: int = -1, xl: torch.Tensor = None):
+    def remap_boundaries(
+        self, x: torch.Tensor, xi: torch.Tensor, N: torch.Tensor, move_block: int = -1, xl: torch.Tensor = None
+    ):
         B, _, H, W = x.shape
         device = x.device
         N = N.view(B, 1)
@@ -510,7 +524,7 @@ class TinyBird(nn.Module):
 
         mask2d = torch.zeros(B, W, dtype=torch.bool, device=device)  # mask2d is a boolean mask of the spectrogram
 
-        #use the start and end of the 0th item in the batch to define the mask for all items in the batch
+        # use the start and end of the 0th item in the batch to define the mask for all items in the batch
         for block in mask_blocks:
             if half_mask:
                 start = starts[0, block] + max(0, (ends[0, block] - starts[0, block]) // 2)
@@ -519,7 +533,7 @@ class TinyBird(nn.Module):
             mask2d[:, start : ends[0, block]] = True
 
         mask = mask2d.unsqueeze(1).expand(B, H, W).reshape(B, H * W)
-        
+
         return mask
 
     def mask(self, z: torch.Tensor, bool_mask: torch.Tensor):
@@ -600,11 +614,10 @@ class TinyBird(nn.Module):
         if xl is not None:
             xl_tok = xl.unsqueeze(1).expand(B, H, W).reshape(B, H * W)
             xl_tok_cond = xl_tok.clone()
-            xl_tok_cond[bool_mask] = self.mask_class_id  
+            xl_tok_cond[bool_mask] = self.mask_class_id
             return h, idx_restore, bool_mask, H * W, xl_tok_cond
         else:
-            return h, idx_restore, bool_mask, H * W # (B, keep, D_enc), (B, T), (B, T), (B,T), T
-
+            return h, idx_restore, bool_mask, H * W  # (B, keep, D_enc), (B, T), (B, T), (B,T), T
 
     def forward_encoder_inference(self, x: torch.Tensor):
         """
@@ -668,7 +681,7 @@ class TinyBird(nn.Module):
 
         y_full = y_full + pos_dec
 
-        if xl_tok_cond is not None :
+        if xl_tok_cond is not None:
             y_full = y_full + self.label_embed(xl_tok_cond)
 
         d = self.decoder(y_full)  # (B, T, D_dec)
@@ -734,7 +747,6 @@ class TinyBird(nn.Module):
 
         return loss
 
-
     def loss_label(self, logits_label: torch.Tensor, xl: torch.Tensor, bool_mask: torch.Tensor, hw: (None, None)):
         """
         logits_label: (B, T, 2)
@@ -744,24 +756,22 @@ class TinyBird(nn.Module):
         """
         H, W = hw
         B, T, C = logits_label.shape
-        assert T == H * W, f"T={T} must equal H*W={H*W}"
+        assert T == H * W, f"T={T} must equal H*W={H * W}"
 
         # Per-column logits by averaging across rows (H)
-        logits_hw  = logits_label.view(B, H, W, C)    # (B,H,W,2)
-        logits_col = logits_hw.mean(dim=1)           # (B,W,2)
+        logits_hw = logits_label.view(B, H, W, C)  # (B,H,W,2)
+        logits_col = logits_hw.mean(dim=1)  # (B,W,2)
 
         # Masked columns: any row masked in that column
-        masked_cols = bool_mask.view(B, H, W).any(dim=1)      #  (B,H,W) -> (B,W)     
+        masked_cols = bool_mask.view(B, H, W).any(dim=1)  #  (B,H,W) -> (B,W)
 
         # Valid = masked & non-separator
-        is_sep = (xl == self.sep_class_id)              # (B,W)
-        valid = masked_cols & (~is_sep)              # (B,W)
+        is_sep = xl == self.sep_class_id  # (B,W)
+        valid = masked_cols & (~is_sep)  # (B,W)
 
         if not valid.any():
             return logits_label.new_tensor(0.0)
 
-        logits = logits_col[valid]                   # (N_valid, 2)
-        targets = xl[valid].long()                   # (N_valid,) in {0,1}
+        logits = logits_col[valid]  # (N_valid, 2)
+        targets = xl[valid].long()  # (N_valid,) in {0,1}
         return F.cross_entropy(logits, targets)
-
-
