@@ -114,47 +114,43 @@ def test_file(model, dataset, index, device):
     print("x_i_r[0,0,:,1]:", x_i_r[0, :, 1].tolist())
 
 
-
-def proces_xl(x_i, x_l, N, device):
-
+def process_xl(x_i, x_l, N, device):
     x_i = x_i.to(device, non_blocking=True).long()
     x_l = x_l.to(device, non_blocking=True).float()
 
     B = x_i.shape[0]
     max_N = int(N.max().item())
-    x_l_out = torch.zeros((B,max_N), dtype=torch.float32, device=device)
+    x_l_out = torch.zeros((B, max_N), dtype=torch.float32, device=device)
 
     for b in range(B):
         n_valid = int(N[b].item())
         for block in range(n_valid):
-            start, end = x_i[b,block,0].item(), x_i[b,block,1].item()
-            x_l_out[b,block] = x_l[b,start:end].mean()
+            start, end = x_i[b, block, 0].item(), x_i[b, block, 1].item()
+            x_l_out[b, block] = x_l[b, start:end].mean()
 
     return x_l_out
 
 
-
-
 def prepare_sample(model, dataset, index, device):
-    x, x_i, x_l, _ , N, filename = dataset[index]
+    x, x_i, x_l, _, N, filename = dataset[index]
     x = x.unsqueeze(0).float().to(device)
     x_i = x_i.unsqueeze(0).to(device)
     x_l = x_l.unsqueeze(0).to(device)
     N = torch.tensor([N], dtype=torch.long, device=device)
 
-    x, x_i, x_l = model.compactify_data(x.clone(), x_i.clone(), N.clone() ,xl=x_l)
-    x_l = proces_xl(x_i, x_l, N, device)
-
     # Compute chirp start/end/dt/lt
     starts = x_i[0, : N.item(), 0]
-    ends   = x_i[0, : N.item(), 1]
-    x_dt   = torch.cat([torch.tensor([0.0], device=device), starts[1:] - ends[:-1]])
-    x_lt   = ends - starts
+    ends = x_i[0, : N.item(), 1]
+    x_dt = torch.cat([torch.tensor([0.0], device=device), starts[1:] - ends[:-1]])
+    x_lt = ends - starts
 
-    return x, x_i, x_l, x_dt, x_lt, N, filename
+    x, x_i, x_l = model.compactify_data(x.clone(), x_i.clone(), N.clone(), xl=x_l)
+    x_l_mean = proces_xl(x_i, x_l, N, device)
+
+    return x, x_i, x_l, x_l_mean, x_dt, x_lt, N, filename
 
 
-def compute_loss(model, x, x_i, N, start_block, last_block, x_dt, x_lt):
+def compute_loss(model, x, x_i, x_l, N, start_block, last_block, x_dt, x_lt):
     """
     Compute masked MSE loss for a given block configuration.
     Returns: (loss, xs, x_is, bool_mask, pred, mblock, indices)
@@ -170,14 +166,28 @@ def compute_loss(model, x, x_i, N, start_block, last_block, x_dt, x_lt):
     lt = x_lt[indices].sum().item()
 
     if start_block == last_block:
-        return torch.tensor(float('nan'), device=x.device), dt, lt, None, None, None, None, None, None
+        nan = torch.tensor(float('nan'), device=x.device)
+        return nan, nan, nan, dt, lt, None, None, None, None, None, None
 
     try:
-        xs, x_is = model.sample_data_indices(x.clone(), x_i.clone(), N.clone(), indices)
-        h, idx_restore, bool_mask, T = model.forward_encoder(xs, x_is, mblock=mblock)
-        pred = model.forward_decoder(h, idx_restore, T)
-        loss = model.loss_mse(xs, pred, bool_mask)
-        return loss, dt, lt, xs, x_is, bool_mask, pred, mblock, indices
+        xs, x_is, x_ls = model.sample_data_indices(x.clone(), x_i.clone(), N.clone(), indices, xl=x_l)
+        W = xs.shape[-1]
+        h, idx_restore, bool_mask, T, x_l_tok_cond = model.forward_encoder(xs, x_is, xl=x_ls, mblock=mblock)
+        pred, logits_label = model.forward_decoder(h, idx_restore, T, xl_tok_cond=x_l_tok_cond)
+        reconstruction_loss = model.loss_mse(xs, pred, bool_mask)
+        label_loss = model.loss_label(logits_label, x_ls, bool_mask, W)
+
+        B, Ttok, C = logits_label.shape
+        assert B == 1 and C == 2, f"Unexpected logits shape {logits_label.shape}"
+        Htok = Ttok // W
+        logits_col = logits_label.view(B, Htok, W, C).mean(dim=1)[0]   # (W, 2)
+        prob1_time = torch.softmax(logits_col, dim=-1)[:, 1]           # (W,)
+        s = int(x_is[0, -1, 0].item())
+        e = int(x_is[0, -1, 1].item())
+        pred_masked_block = prob1_time[s:e].mean()
+
+        return reconstruction_loss, label_loss, pred_masked_block, dt, lt, xs, x_is, bool_mask, pred, mblock, indices        
+     
     except RuntimeError as e:
         msg = str(e).lower()
         if ("out of memory" in msg or "cuda" in msg) and torch.cuda.is_available():
@@ -190,7 +200,7 @@ def compute_loss(model, x, x_i, N, start_block, last_block, x_dt, x_lt):
             raise
 
 
-def save_reconstruction(model, x, x_i, N, last_block, x_dt, x_lt, *, filename, index, images_dir='images'):
+def save_reconstruction(model, x, x_i, x_l, N, last_block, x_dt, x_lt, *, filename, index, images_dir='images'):
     """
     Save a side-by-side reconstruction visualization for a given block configuration.
     Returns: (output_path, loss)
@@ -214,9 +224,10 @@ def save_reconstruction(model, x, x_i, N, last_block, x_dt, x_lt, *, filename, i
         # If anything goes wrong with cache logic, silently fall back
         best_start = default_start
 
-    loss, dt, lt, xs, x_is, bool_mask, pred, mblock, indices = compute_loss(
-        model, x, x_i, N, start_block=best_start, last_block=last_block, x_dt=x_dt, x_lt=x_lt
+    loss, loss_label, labels_pred_chirp, dt, lt, xs, x_is, bool_mask, pred, mblock, indices = compute_loss(
+        model, x, x_i, x_l, N, start_block=best_start, last_block=last_block, x_dt=x_dt, x_lt=x_lt
     )
+
     if xs is None or pred is None or bool_mask is None:
         return None, loss
 
@@ -406,7 +417,7 @@ def save_reconstruction(model, x, x_i, N, last_block, x_dt, x_lt, *, filename, i
 
 
 def process_file(model, dataset, index, device):
-    x, x_i, x_l, x_dt, x_lt, N, filename = prepare_sample(model, dataset, index, device)
+    x, x_i, x_l, x_l_mean, x_dt, x_lt, N, filename = prepare_sample(model, dataset, index, device)
 
     print(f"  Filename: {filename}")
     print(f"  Spectrogram shape: {x.shape}")
@@ -414,32 +425,41 @@ def process_file(model, dataset, index, device):
     print(f"  Chirp labels shape: {x_l.shape}")
     print(f"  Number of valid chirps: {N.item()}")
 
-    def compute_losses(x, x_i, N, x_dt, x_lt):
+    def compute_losses(x, x_i, x_l, N, x_dt, x_lt):
         n_valid_chirps = N.max().item()
-        losses = torch.full((n_valid_chirps, n_valid_chirps), float('nan'), device=device)
-        dt_mat = torch.full((n_valid_chirps, n_valid_chirps), float('nan'), device=device)
-        lt_mat = torch.full((n_valid_chirps, n_valid_chirps), float('nan'), device=device)
-        print(f"\nComputing losses/dt/lt for {losses.numel()} (rows × starts)...")
+        losses_reconstruction = torch.full((n_valid_chirps, n_valid_chirps), float('nan'), device=device)
+        losses_label          = torch.full((n_valid_chirps, n_valid_chirps), float('nan'), device=device)
+        labels_preds          = torch.full((n_valid_chirps, n_valid_chirps), float('nan'), device=device)    
+        dt_mat                = torch.full((n_valid_chirps, n_valid_chirps), float('nan'), device=device)
+        lt_mat                = torch.full((n_valid_chirps, n_valid_chirps), float('nan'), device=device)
+        print(f"\nComputing losses/dt/lt for {losses_reconstruction.numel()} (rows × starts)...")
         with tqdm(total=((n_valid_chirps - 1) * (n_valid_chirps - 1)), desc="Computing losses/dt/lt") as pbar:
             for last_block in range(1, n_valid_chirps):
                 for start_block in range(0, n_valid_chirps - 1):
                     with torch.no_grad():
-                        loss, dt_val, lt_val, *_ = compute_loss(model, x, x_i, N, start_block, last_block, x_dt, x_lt)
-                    losses[start_block, last_block] = float('nan') if torch.isnan(loss) else loss
+                        loss_reconstruction, loss_label, labels_pred_chirp, dt_val, lt_val, *_ = compute_loss(
+                            model, x, x_i, x_l, N, start_block, last_block, x_dt, x_lt
+                        )
+                    losses_reconstruction[start_block, last_block] = (
+                        float('nan') if torch.isnan(loss_reconstruction) else loss_reconstruction
+                    )
+                    losses_label[start_block, last_block] = float('nan')  if torch.isnan(loss_label) else loss_label
+                    labels_preds[start_block, last_block] = float('nan')  if torch.isnan(labels_pred_chirp) else labels_pred_chirp
                     dt_mat[start_block, last_block] = dt_val
                     lt_mat[start_block, last_block] = lt_val
                     pbar.update(1)
-        return losses, dt_mat, lt_mat
+        return losses_reconstruction, losses_label, labels_preds, dt_mat, lt_mat
+
 
     cached = load_from_cache(filename)
     if cached is not None:
         print(f"Loaded cached matrices for {filename}")
-        all_losses, all_dt, all_lt = cached
+        all_losses_reconstruction, all_losses_label, all_preds_label, all_dt, all_lt = cached
     else:
-        all_losses, all_dt, all_lt = compute_losses(x, x_i, N, x_dt, x_lt)
-        save_to_cache(filename, (all_losses, all_dt, all_lt))
+        all_losses_reconstruction, all_losses_label, all_preds_label, all_dt, all_lt = compute_losses(x, x_i, x_l, N, x_dt, x_lt)
+        save_to_cache(filename, (all_losses_reconstruction, all_losses_label, all_preds_label, all_dt, all_lt))
 
-    return all_losses, all_dt, all_lt, filename, x_l, x_dt, x_lt
+    return all_losses_reconstruction, all_losses_label, all_preds_label, all_dt, all_lt, filename, x_l, x_l_mean, x_dt, x_lt
 
 
 def main():
@@ -510,7 +530,7 @@ def main():
 
         def run_reconstruction(i: int):
             print(f"\nLoading sample at index {i}")
-            x, x_i, x_l, x_dt, x_lt, N, filename = prepare_sample(model, dataset, i, device)
+            x, x_i, x_l, x_l_mean, x_dt, x_lt, N, filename = prepare_sample(model, dataset, i, device)
 
             for last_block in range(args.start_block, args.last_block + 1):
                 print(f"Generating reconstruction for last_block={last_block}")
@@ -518,6 +538,7 @@ def main():
                     model,
                     x,
                     x_i,
+                    x_l,
                     N,
                     last_block=last_block,
                     x_dt=x_dt,
@@ -547,22 +568,24 @@ def main():
     # === Default: loss/plotting mode ===
     def process_and_plot(i: int):
         print(f"\nLoading sample at index {i}")
-        all_losses, all_dt, all_lt, filename, x_l, x_dt, x_lt = process_file(model, dataset, i, device)
+        all_losses_reconstruction, all_losses_label, all_preds_label,all_dt, all_lt, filename, x_l, x_l_mean, x_dt, x_lt = process_file(model, dataset, i, device)
 
-        all_np = all_losses.detach().cpu().numpy()
-        dt_np = all_dt.detach().cpu().numpy()
-        lt_np = all_lt.detach().cpu().numpy()
-        labels_np = x_l.detach().cpu().numpy().astype(float).reshape(-1)
+        recon_np = all_losses_reconstruction.detach().cpu().numpy()
+        label_np = all_losses_label.detach().cpu().numpy()
+        pred_np  = all_preds_label.detach().cpu().numpy()
+        dt_np    = all_dt.detach().cpu().numpy()
+        lt_np    = all_lt.detach().cpu().numpy()
+
+        labels_true_np = x_l_mean.detach().cpu().numpy().astype(float).reshape(-1)
         x_dt_np = x_dt.detach().cpu().numpy()
         x_lt_np = x_lt.detach().cpu().numpy()
-
 
         def plot_heatmap(
             mat_np,
             title: str,
             cbar_label: str,
             tag: str,
-            labels_np,
+            labels_true_np,
             *,
             note: str | None = None,
             cmap_name: str | None = None,
@@ -570,13 +593,11 @@ def main():
             fig_hm, ax_hm = plt.subplots(figsize=(12, 8))
             data_ma = np.ma.masked_invalid(mat_np)
 
-            # Choose colormap (default depends on tag)
             if cmap_name is None:
-                cmap_name = 'RdYlGn_r' if tag.startswith('loss') else 'viridis'
+                cmap_name = 'RdYlGn_r' if tag.startswith('loss') or tag == 'label_pred' else 'viridis'
             cmap = plt.get_cmap(cmap_name).copy()
             cmap.set_bad(color='black')
 
-            # Scale to finite data range
             vmin = float(np.nanmin(data_ma)) if np.isfinite(np.nanmin(data_ma)) else 0.0
             vmax = float(np.nanmax(data_ma)) if np.isfinite(np.nanmax(data_ma)) else 1.0
             if vmax <= vmin:
@@ -586,7 +607,6 @@ def main():
             cbar_hm = plt.colorbar(im_hm, ax=ax_hm)
             cbar_hm.set_label(cbar_label, rotation=270, labelpad=20, fontsize=12)
 
-            # Axes labels reflect matrix semantics: rows=start_block, cols=last_block
             ax_hm.set_xlabel('last_block (end index)')
             ax_hm.set_ylabel('start_block (start index)')
             ax_hm.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
@@ -595,7 +615,7 @@ def main():
             if note:
                 ax_hm.annotate(note, xy=(0.99, 0.01), xycoords='axes fraction', fontsize=8, ha='right', va='bottom')
 
-            # === Overlay: for each x (column), mark the y with the smallest finite value ===
+            # mark argmin row per column (optional visual cue)
             arr = np.array(mat_np, dtype=float)
             finite_mask = np.isfinite(arr)
             cols = np.where(finite_mask.any(axis=0))[0]
@@ -612,46 +632,26 @@ def main():
                 s = diam_pt**2
                 ax_hm.scatter(cols, ys, s=s, c="#ff1493", marker='o', edgecolors='white', linewidths=0.4, zorder=7)
 
-            # === Chirp label strips (continuous 0→1 mapped to green→red) ===
+            # === Actual-label strips (0→1 mapped to green→red) ===
             Hh, Wh = mat_np.shape
-            lbl = np.asarray(labels_np, dtype=float)
-            lbl = np.clip(lbl, 0.0, 1.0)  # guard
-
-            # Ensure we have at least Wh and Hh elements (slice if longer)
+            lbl = np.asarray(labels_true_np, dtype=float)
+            lbl = np.clip(lbl, 0.0, 1.0)
             lbl_x = lbl[:Wh]
             lbl_y = lbl[:Hh]
 
             from mpl_toolkits.axes_grid1 import make_axes_locatable
             divider = make_axes_locatable(ax_hm)
-
-            # 0=green, 1=red → use RdYlGn_r (reversed)
             cmap_lbl = plt.get_cmap('RdYlGn_r').copy()
 
             ax_strip_x = divider.append_axes("bottom", size="3%", pad=0.3, sharex=ax_hm)
-            ax_strip_x.imshow(
-                lbl_x[np.newaxis, :],
-                aspect='auto',
-                cmap=cmap_lbl,
-                interpolation='nearest',
-                origin='lower',
-                vmin=0.0,
-                vmax=1.0,
-            )
-            ax_strip_x.set_xlim(ax_hm.get_xlim())
-            ax_strip_x.axis('off')
+            ax_strip_x.imshow(lbl_x[np.newaxis, :], aspect='auto', cmap=cmap_lbl,
+                            interpolation='nearest', origin='lower', vmin=0.0, vmax=1.0)
+            ax_strip_x.set_xlim(ax_hm.get_xlim()); ax_strip_x.axis('off')
 
             ax_strip_y = divider.append_axes("left", size="3%", pad=0.45, sharey=ax_hm)
-            ax_strip_y.imshow(
-                lbl_y[:, np.newaxis],
-                aspect='auto',
-                cmap=cmap_lbl,
-                interpolation='nearest',
-                origin='lower',
-                vmin=0.0,
-                vmax=1.0,
-            )
-            ax_strip_y.set_ylim(ax_hm.get_ylim())
-            ax_strip_y.axis('off')
+            ax_strip_y.imshow(lbl_y[:, np.newaxis], aspect='auto', cmap=cmap_lbl,
+                            interpolation='nearest', origin='lower', vmin=0.0, vmax=1.0)
+            ax_strip_y.set_ylim(ax_hm.get_ylim()); ax_strip_y.axis('off')
 
             plt.tight_layout()
             plt.subplots_adjust(bottom=0.12, left=0.10)
@@ -660,45 +660,58 @@ def main():
             plt.close(fig_hm)
             print(f"Saved: {out_path}")
 
+
         plot_heatmap(
-            all_np,
-            title='Loss (MSE) Heatmap – All Blocks Mode',
+            recon_np,
+            title='Loss (MSE) Heatmap – Reconstruction',
             cbar_label='Loss (MSE)',
-            tag='loss_allblocks',
-            labels_np=labels_np,
+            tag='loss_recon',
+            labels_true_np=labels_true_np,
             note='NaN = black; low = green; high = red. Sparse near diagonal due to windowing.',
             cmap_name='RdYlGn_r',
         )
         plot_heatmap(
+            label_np,
+            title='Label Loss Heatmap',
+            cbar_label='Label Loss',
+            tag='loss_label',
+            labels_true_np=labels_true_np,
+            note='Per-block label loss for masked columns.',
+            cmap_name='RdYlGn_r',
+        )
+        plot_heatmap(
+            pred_np,
+            title='Label Prediction Heatmap',
+            cbar_label='P(label=1)',
+            tag='label_pred',
+            labels_true_np=labels_true_np,
+            note='Prediction for masked block (last block in window). 0=green, 1=red.',
+            cmap_name='RdYlGn_r',
+        )
+        plot_heatmap(
             dt_np,
-            title='Δt Heatmap – gap between blocks (time between masked start and last block)',
+            title='Δt Heatmap – gap between blocks',
             cbar_label='Time between blocks',
             tag='dt',
-            labels_np=labels_np,
-            note='Δt: amount of time between blocks (gaps). Rows = start_block, Cols = last_block.',
+            labels_true_np=labels_true_np,
+            note='Rows=start_block, Cols=last_block.',
             cmap_name='viridis',
         )
         plot_heatmap(
             lt_np,
-            title='ℓt Heatmap – time within blocks (duration of included blocks)',
+            title='ℓt Heatmap – time within blocks',
             cbar_label='Time within blocks',
             tag='lt',
-            labels_np=labels_np,
-            note='ℓt: amount of time in blocks (durations). Rows = start_block, Cols = last_block.',
+            labels_true_np=labels_true_np,
+            note='Rows=start_block, Cols=last_block.',
             cmap_name='viridis',
         )
 
-        def plot_line_summaries(all_np, x_dt_vec, x_lt_vec, filename: str, index: int, images_dir: str = "images"):
-            """
-            Create a single figure with two stacked panels:
-              (Top) 3 line plots vs last_block (x-axis):
-                1) lowest achieved loss across start_block for each last_block
-                2) loss for the largest amount of context: start_block = last_block + 1
-                3) loss for fixed context length 10: start_block = last_block - 10
-              (Bottom) Δt and ℓt vs last_block on twin y-axes, plotting raw x_dt and x_lt by index.
 
-            Any out-of-bounds or invalid entries are left as NaN so no point is shown.
-            """
+
+        def plot_line_summaries(all_np, x_dt_vec, x_lt_vec, filename: str, index: int,
+                        images_dir: str = "images", title_prefix: str = ""):
+
             from matplotlib.gridspec import GridSpec
 
             rows, cols = all_np.shape
@@ -743,6 +756,7 @@ def main():
 
             # Top panel: three loss curves
             ax_top = fig.add_subplot(gs[0, 0])
+            ax_top.set_title(f"{title_prefix}Loss vs last_block – Index {index}, File: {filename}")
             ax_top.plot(x, min_loss, label="Min loss vs last_block")
             ax_top.plot(x, maxctx_loss, label="Loss @ start=last_block+1 (max context)")
             ax_top.plot(x, len10_loss, label="Loss @ start=last_block-10 (context len 10)")
@@ -769,13 +783,13 @@ def main():
             ax_bot.legend(lines_left + lines_right, labels_left + labels_right, loc="best")
 
             # Save
-            out_path = os.path.join(images_dir, f"summary_lines_{index}_{filename}.png")
+            out_path = os.path.join(images_dir, f"lines_{title_prefix.lower().strip()}_{index}_{filename}.png")
             fig.savefig(out_path, dpi=300, bbox_inches='tight')
             plt.close(fig)
             print(f"Saved: {out_path}")
 
-        # === New: summary line figure (top: 3 loss curves; bottom: Δt & ℓt) ===
-        plot_line_summaries(all_np, x_dt_np, x_lt_np, filename, i, images_dir)
+        plot_line_summaries(recon_np, x_dt_np, x_lt_np, filename, i, images_dir, title_prefix="Recon ")
+        plot_line_summaries(label_np, x_dt_np, x_lt_np, filename, i, images_dir, title_prefix="Label ")
 
     # If a single index is specified, only process that file; otherwise process all
     if args.index >= 0:
