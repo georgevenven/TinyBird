@@ -145,7 +145,7 @@ def prepare_sample(model, dataset, index, device):
     x_lt = ends - starts
 
     x, x_i, x_l = model.compactify_data(x.clone(), x_i.clone(), N.clone(), xl=x_l)
-    x_l_mean = proces_xl(x_i, x_l, N, device)
+    x_l_mean = process_xl(x_i, x_l, N, device)
 
     return x, x_i, x_l, x_l_mean, x_dt, x_lt, N, filename
 
@@ -180,14 +180,14 @@ def compute_loss(model, x, x_i, x_l, N, start_block, last_block, x_dt, x_lt):
         B, Ttok, C = logits_label.shape
         assert B == 1 and C == 2, f"Unexpected logits shape {logits_label.shape}"
         Htok = Ttok // W
-        logits_col = logits_label.view(B, Htok, W, C).mean(dim=1)[0]   # (W, 2)
-        prob1_time = torch.softmax(logits_col, dim=-1)[:, 1]           # (W,)
+        logits_col = logits_label.view(B, Htok, W, C).mean(dim=1)[0]  # (W, 2)
+        prob1_time = torch.softmax(logits_col, dim=-1)[:, 1]  # (W,)
         s = int(x_is[0, -1, 0].item())
         e = int(x_is[0, -1, 1].item())
         pred_masked_block = prob1_time[s:e].mean()
 
-        return reconstruction_loss, label_loss, pred_masked_block, dt, lt, xs, x_is, bool_mask, pred, mblock, indices        
-     
+        return reconstruction_loss, label_loss, pred_masked_block, dt, lt, xs, x_is, bool_mask, pred, mblock, indices
+
     except RuntimeError as e:
         msg = str(e).lower()
         if ("out of memory" in msg or "cuda" in msg) and torch.cuda.is_available():
@@ -428,10 +428,10 @@ def process_file(model, dataset, index, device):
     def compute_losses(x, x_i, x_l, N, x_dt, x_lt):
         n_valid_chirps = N.max().item()
         losses_reconstruction = torch.full((n_valid_chirps, n_valid_chirps), float('nan'), device=device)
-        losses_label          = torch.full((n_valid_chirps, n_valid_chirps), float('nan'), device=device)
-        labels_preds          = torch.full((n_valid_chirps, n_valid_chirps), float('nan'), device=device)    
-        dt_mat                = torch.full((n_valid_chirps, n_valid_chirps), float('nan'), device=device)
-        lt_mat                = torch.full((n_valid_chirps, n_valid_chirps), float('nan'), device=device)
+        losses_label = torch.full((n_valid_chirps, n_valid_chirps), float('nan'), device=device)
+        labels_preds = torch.full((n_valid_chirps, n_valid_chirps), float('nan'), device=device)
+        dt_mat = torch.full((n_valid_chirps, n_valid_chirps), float('nan'), device=device)
+        lt_mat = torch.full((n_valid_chirps, n_valid_chirps), float('nan'), device=device)
         print(f"\nComputing losses/dt/lt for {losses_reconstruction.numel()} (rows × starts)...")
         with tqdm(total=((n_valid_chirps - 1) * (n_valid_chirps - 1)), desc="Computing losses/dt/lt") as pbar:
             for last_block in range(1, n_valid_chirps):
@@ -443,23 +443,37 @@ def process_file(model, dataset, index, device):
                     losses_reconstruction[start_block, last_block] = (
                         float('nan') if torch.isnan(loss_reconstruction) else loss_reconstruction
                     )
-                    losses_label[start_block, last_block] = float('nan')  if torch.isnan(loss_label) else loss_label
-                    labels_preds[start_block, last_block] = float('nan')  if torch.isnan(labels_pred_chirp) else labels_pred_chirp
+                    losses_label[start_block, last_block] = float('nan') if torch.isnan(loss_label) else loss_label
+                    labels_preds[start_block, last_block] = (
+                        float('nan') if torch.isnan(labels_pred_chirp) else labels_pred_chirp
+                    )
                     dt_mat[start_block, last_block] = dt_val
                     lt_mat[start_block, last_block] = lt_val
                     pbar.update(1)
         return losses_reconstruction, losses_label, labels_preds, dt_mat, lt_mat
-
 
     cached = load_from_cache(filename)
     if cached is not None:
         print(f"Loaded cached matrices for {filename}")
         all_losses_reconstruction, all_losses_label, all_preds_label, all_dt, all_lt = cached
     else:
-        all_losses_reconstruction, all_losses_label, all_preds_label, all_dt, all_lt = compute_losses(x, x_i, x_l, N, x_dt, x_lt)
+        all_losses_reconstruction, all_losses_label, all_preds_label, all_dt, all_lt = compute_losses(
+            x, x_i, x_l, N, x_dt, x_lt
+        )
         save_to_cache(filename, (all_losses_reconstruction, all_losses_label, all_preds_label, all_dt, all_lt))
 
-    return all_losses_reconstruction, all_losses_label, all_preds_label, all_dt, all_lt, filename, x_l, x_l_mean, x_dt, x_lt
+    return (
+        all_losses_reconstruction,
+        all_losses_label,
+        all_preds_label,
+        all_dt,
+        all_lt,
+        filename,
+        x_l,
+        x_l_mean,
+        x_dt,
+        x_lt,
+    )
 
 
 def main():
@@ -568,13 +582,24 @@ def main():
     # === Default: loss/plotting mode ===
     def process_and_plot(i: int):
         print(f"\nLoading sample at index {i}")
-        all_losses_reconstruction, all_losses_label, all_preds_label,all_dt, all_lt, filename, x_l, x_l_mean, x_dt, x_lt = process_file(model, dataset, i, device)
+        (
+            all_losses_reconstruction,
+            all_losses_label,
+            all_preds_label,
+            all_dt,
+            all_lt,
+            filename,
+            x_l,
+            x_l_mean,
+            x_dt,
+            x_lt,
+        ) = process_file(model, dataset, i, device)
 
         recon_np = all_losses_reconstruction.detach().cpu().numpy()
         label_np = all_losses_label.detach().cpu().numpy()
-        pred_np  = all_preds_label.detach().cpu().numpy()
-        dt_np    = all_dt.detach().cpu().numpy()
-        lt_np    = all_lt.detach().cpu().numpy()
+        pred_np = all_preds_label.detach().cpu().numpy()
+        dt_np = all_dt.detach().cpu().numpy()
+        lt_np = all_lt.detach().cpu().numpy()
 
         labels_true_np = x_l_mean.detach().cpu().numpy().astype(float).reshape(-1)
         x_dt_np = x_dt.detach().cpu().numpy()
@@ -640,18 +665,35 @@ def main():
             lbl_y = lbl[:Hh]
 
             from mpl_toolkits.axes_grid1 import make_axes_locatable
+
             divider = make_axes_locatable(ax_hm)
             cmap_lbl = plt.get_cmap('RdYlGn_r').copy()
 
             ax_strip_x = divider.append_axes("bottom", size="3%", pad=0.3, sharex=ax_hm)
-            ax_strip_x.imshow(lbl_x[np.newaxis, :], aspect='auto', cmap=cmap_lbl,
-                            interpolation='nearest', origin='lower', vmin=0.0, vmax=1.0)
-            ax_strip_x.set_xlim(ax_hm.get_xlim()); ax_strip_x.axis('off')
+            ax_strip_x.imshow(
+                lbl_x[np.newaxis, :],
+                aspect='auto',
+                cmap=cmap_lbl,
+                interpolation='nearest',
+                origin='lower',
+                vmin=0.0,
+                vmax=1.0,
+            )
+            ax_strip_x.set_xlim(ax_hm.get_xlim())
+            ax_strip_x.axis('off')
 
             ax_strip_y = divider.append_axes("left", size="3%", pad=0.45, sharey=ax_hm)
-            ax_strip_y.imshow(lbl_y[:, np.newaxis], aspect='auto', cmap=cmap_lbl,
-                            interpolation='nearest', origin='lower', vmin=0.0, vmax=1.0)
-            ax_strip_y.set_ylim(ax_hm.get_ylim()); ax_strip_y.axis('off')
+            ax_strip_y.imshow(
+                lbl_y[:, np.newaxis],
+                aspect='auto',
+                cmap=cmap_lbl,
+                interpolation='nearest',
+                origin='lower',
+                vmin=0.0,
+                vmax=1.0,
+            )
+            ax_strip_y.set_ylim(ax_hm.get_ylim())
+            ax_strip_y.axis('off')
 
             plt.tight_layout()
             plt.subplots_adjust(bottom=0.12, left=0.10)
@@ -659,7 +701,6 @@ def main():
             fig_hm.savefig(out_path, dpi=300, bbox_inches='tight')
             plt.close(fig_hm)
             print(f"Saved: {out_path}")
-
 
         plot_heatmap(
             recon_np,
@@ -707,11 +748,9 @@ def main():
             cmap_name='viridis',
         )
 
-
-
-        def plot_line_summaries(all_np, x_dt_vec, x_lt_vec, filename: str, index: int,
-                        images_dir: str = "images", title_prefix: str = ""):
-
+        def plot_line_summaries(
+            all_np, x_dt_vec, x_lt_vec, filename: str, index: int, images_dir: str = "images", title_prefix: str = ""
+        ):
             from matplotlib.gridspec import GridSpec
 
             rows, cols = all_np.shape
