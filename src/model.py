@@ -236,7 +236,7 @@ class TinyBird(nn.Module):
             start_col = end_col - seq_len
 
             x_out[b, :, :, :] = x[b, :, :, start_col:end_col]
-            if xl_out is not None:
+            if xl is not None:
                 xl_out[b] = xl[b, start_col:end_col]
 
             blocks = torch.nonzero(xi[b, :, 0] >= start_col, as_tuple=False).squeeze(1)
@@ -259,7 +259,7 @@ class TinyBird(nn.Module):
             f"xi_out[b,:,1] should always be seq_len for all items in the batch. got {xi_out[:, :, 1]}"
         )
 
-        if xl_out is not None:
+        if xl is not None:
             return x_out, xi_out, xl_out
         else:
             return x_out, xi_out
@@ -322,14 +322,14 @@ class TinyBird(nn.Module):
             en = st + max_width  # right-align to end
 
             x_out[b, :, :, :] = x[b, :, :, st:en]  # crop the spectrogram to the new window
-            if xl_out is not None:
+            if xl is not None:
                 xl_out[b] = xl[b, st:en]
 
             xi_out[b] = xi[b, start[b] : end[b], :].clone()  # remap the boundaries to the new window
             xi_out[b, :, 0] = xi_out[b, :, 0] - st
             xi_out[b, :, 1] = xi_out[b, :, 1] - st
 
-        if xl_out is not None:
+        if xl is not None:
             return x_out, xi_out, xl_out
         else:
             return x_out, xi_out
@@ -394,7 +394,7 @@ class TinyBird(nn.Module):
 
                 # Copy all channels, not just channel 0
                 x_out[b, :, :, pos : pos + w] = x[b, :, :, s0:e0]
-                if xl_out is not None:
+                if xl is not None:
                     xl_out[b, pos : pos + w] = xl[b, s0:e0]
 
                 xi_out[b, k, 0] = pos
@@ -405,11 +405,11 @@ class TinyBird(nn.Module):
                 if k < K - 1 and divider_pos > 0:
                     # Use a separator column; e0 is end-exclusive so clamp to W-1
                     x_out[b, :, :, pos] = x[b, :, :, divider_pos]
-                    if xl_out is not None:
+                    if xl is not None:
                         xl_out[b, pos] = self.sep_class_id
                     pos += 1
 
-        if xl_out is not None:
+        if xl is not None:
             return x_out, xi_out, xl_out
         else:
             return x_out, xi_out
@@ -461,12 +461,12 @@ class TinyBird(nn.Module):
             x_out[b, :, :, lbe - nbb] = x[b, :, :, be]
             x_out[b, :, :, lbe - nbb + 1 : lbe] = x[b, :, :, 0:be]
 
-            if xl_out is not None:
+            if xl is not None:
                 xl_out[b, 0 : lbe - nbb] = xl[b, nbb:lbe]
                 xl_out[b, lbe - nbb] = xl[b, be]
                 xl_out[b, lbe - nbb + 1 : lbe] = xl[b, 0:be]
 
-        if xl_out is not None:
+        if xl is not None:
             return x_out, xi_out, xl_out
         else:
             return x_out, xi_out
