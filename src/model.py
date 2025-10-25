@@ -3,6 +3,27 @@ from torch import nn
 import torch.nn.functional as F
 import random
 
+class MLPHead(nn.Module):
+    """
+    Flexible MLP head:
+      in_dim  -> [ (Linear, GELU, Dropout) x (num_layers-1) ] -> Linear -> out_dim
+
+    If num_layers == 1, it's just a single Linear(in_dim, out_dim).
+    """
+    def __init__(self, in_dim: int, out_dim: int, hidden_dim: int, dropout: float = 0.0, num_layers: int = 2):
+        super().__init__()
+        assert num_layers >= 1
+        if num_layers == 1:
+            self.net = nn.Linear(in_dim, out_dim)
+        else:
+            layers = [nn.Linear(in_dim, hidden_dim), nn.GELU(), nn.Dropout(dropout)]
+            for _ in range(num_layers - 2):
+                layers += [nn.Linear(hidden_dim, hidden_dim), nn.GELU(), nn.Dropout(dropout)]
+            layers += [nn.Linear(hidden_dim, out_dim)]
+            self.net = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.net(x)
 
 class TinyBird(nn.Module):
     def __init__(self, config):
@@ -13,7 +34,7 @@ class TinyBird(nn.Module):
         self.mask_p = config["mask_p"]
 
         self.patch_projection = nn.Conv2d(
-            in_channels=1, out_channels=config["enc_hidden_d"], kernel_size=self.patch_size, stride=self.patch_size
+            in_channels=1, out_channels=config["enc_hidden_Fd"], kernel_size=self.patch_size, stride=self.patch_size
         )
 
         self.encoder_transformer_block = nn.TransformerEncoderLayer(
@@ -38,10 +59,25 @@ class TinyBird(nn.Module):
         self.decoder = nn.TransformerEncoder(self.decoder_transformer_block, num_layers=config["dec_n_layer"])
 
         self.encoder_to_decoder = nn.Linear(config["enc_hidden_d"], config["dec_hidden_d"])
-        self.decoder_to_pixel = nn.Linear(config["dec_hidden_d"], self.patch_size[0] * self.patch_size[1])
-        self.decoder_to_label = nn.Linear(config["dec_hidden_d"], 2)
+        
+        # --- Pixel head ---
+        self.decoder_to_pixel = MLPHead(
+            in_dim=config["dec_hidden_d"],
+            out_dim=self.patch_size[0] * self.patch_size[1],
+            hidden_dim=config.get("pixel_mlp_d", 2 * config["dec_hidden_d"]),
+            dropout=config["dropout"],
+            num_layers=config.get("pixel_mlp_layers", 2),
+        )
 
-        # classifier head for label prediction
+        # --- Label head ---
+        self.decoder_to_label = MLPHead(
+            in_dim=config["dec_hidden_d"],
+            out_dim=2,
+            hidden_dim=config.get("label_mlp_d", 2 * config["dec_hidden_d"]),
+            dropout=config["dropout"],
+            num_layers=config.get("label_mlp_layers", 2),
+        )
+        # classifier head for label prediction (2 classes: left channel, right channel)
         # 0 = Left channel
         # 1 = Right channel
 
@@ -657,7 +693,7 @@ class TinyBird(nn.Module):
         z = self.apply_position_encoding(z)  # (B, T, D_enc)
         return self.encoder(z)  # (B, T, D_enc)
 
-    def forward_decoder(self, h: torch.Tensor, idx_restore: torch.Tensor, T: int, xl_tok_cond: torch.Tensor = None):
+    def forward_decoder(self, h: torch.Tensor, idx_restore: torch.Tensor, T: int, xl_tok_cond: torch.Tensor = None, W=None):
         """
         Project encoder outputs to decoder width → insert learned mask tokens → unshuffle back to the
         original token order → add decoder positional encodings → run the Transformer decoder → predict
@@ -710,7 +746,15 @@ class TinyBird(nn.Module):
         d = self.decoder(y_full)  # (B, T, D_dec)
         pred = self.decoder_to_pixel(d)  # Final per-token patch prediction: (B, T, P). P is pixels per patch
         if xl_tok_cond is not None:
-            logits_label = self.decoder_to_label(d)
+            #logits_label = self.decoder_to_label(d)
+            assert W is not None, "Need H,W for row pooling"
+            H = T // W
+            x = d.view(B, H, W, D_dec)                            # (B,H,W,D)
+            scores = self.label_row_pool(x).squeeze(-1)           # (B,H,W)
+            alpha = torch.softmax(scores, dim=1)                  # (B,H,W), softmax over rows
+            col = (alpha.unsqueeze(-1) * x).sum(dim=1)            # (B,W,D)
+            logits_label = self.decoder_to_label(col)             # (B,W,2)
+
             return pred, logits_label
         else:
             return pred
@@ -772,29 +816,32 @@ class TinyBird(nn.Module):
 
     def loss_label(self, logits_label: torch.Tensor, xl: torch.Tensor, bool_mask: torch.Tensor, W: int):
         """
-        logits_label: (B, T, 2)
-        xl:           (B, T) in {0,1,2}  (2 = separator)
-        bool_mask:    (B, T)
-        hw:           (H, W)
+        logits_label: (B, W, 2)  ← pooled to columns already
+        xl:           (B, W) with ids {0,1,2} (2=separator)
+        bool_mask:    (B, H_true*W) token mask from the encoder (True = masked)
+        W:            width (#columns) in the current window
         """
+        B, W2, C = logits_label.shape
+        assert W2 == W and C == 2, f"Expected (B,{W},2), got {tuple(logits_label.shape)}"
 
-        B, T, C = logits_label.shape
-        H = T // W
+        # Recover true H from the mask
+        Bm, Tmask = bool_mask.shape
+        assert Bm == B and Tmask % W == 0, f"bool_mask shape {tuple(bool_mask.shape)} not compatible with W={W}"
+        H_true = Tmask // W
 
-        # Per-column logits by averaging across rows (H)
-        logits_hw = logits_label.view(B, H, W, C)  # (B,H,W,2)
-        logits_col = logits_hw.mean(dim=1)  # (B,W,2)
+        # Columns masked anywhere along rows
+        masked_cols = bool_mask.view(B, H_true, W).any(dim=1)  # (B, W)
 
-        # Masked columns: any row masked in that column
-        masked_cols = bool_mask.view(B, H, W).any(dim=1)  #  (B,H,W) -> (B,W)
-
-        # Valid = masked & non-separator
-        is_sep = xl == self.sep_class_id  # (B,W)
-        valid = masked_cols & (~is_sep)  # (B,W)
+        # Exclude separators
+        is_sep = (xl == self.sep_class_id)
+        valid = masked_cols & (~is_sep)  # (B, W)
 
         if not valid.any():
+            # no supervised label targets in this window
             return logits_label.new_tensor(0.0)
 
-        logits = logits_col[valid]  # (N_valid, 2)
-        targets = xl[valid].long()  # (N_valid,) in {0,1}
-        return F.cross_entropy(logits, targets)
+        logits  = logits_label[valid]     # (N_valid, 2)
+        targets = xl[valid].long()        # (N_valid,) in {0,1}
+
+        return F.cross_entropy(logits, targets, label_smoothing=0.05)    
+

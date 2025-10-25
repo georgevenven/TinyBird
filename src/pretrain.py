@@ -451,18 +451,31 @@ class Trainer:
         pct_true1_pred1 = (n_corr1 / n_true1) if n_true1 > 0 else float('nan')
         pct_true0_pred0 = (n_corr0 / n_true0) if n_true0 > 0 else float('nan')
 
-        # For the W&B confusion matrix, just concatenate a small sample (to avoid huge payloads).
-        # Here we take from the last batch; you could also subsample if you prefer.
-        last = items[-1]["metrics"]
+
+        # For the W&B confusion matrix, aggregate across batches with a cap to keep payload small
+        y_true_list, y_pred_list = [], []
+        cap = 10_000  # max points to include in the plot
+        for it in items:
+            yt = it["metrics"]["y_true"]
+            yp = it["metrics"]["y_pred"]
+            if yt is None or yp is None:
+                continue
+            take = min(cap - len(y_true_list), len(yt))
+            if take <= 0:
+                break
+            y_true_list.extend(yt[:take].tolist())
+            y_pred_list.extend(yp[:take].tolist())
+
         agg_metrics = {
             "has_valid": n_valid > 0,
             "acc": acc,
             "pct_true1_pred1": pct_true1_pred1,
             "pct_true0_pred0": pct_true0_pred0,
-            "y_true": last["y_true"],  # keep plot representative without exploding memory
-            "y_pred": last["y_pred"],
+            "y_true": torch.tensor(y_true_list) if y_true_list else None,
+            "y_pred": torch.tensor(y_pred_list) if y_pred_list else None,
         }
         return loss_total_avg, loss_recon_avg, loss_lbl_avg, agg_metrics
+
 
     def _forward_encode_decode(self, x, x_i, N, x_l, step_num, is_training: bool, log_metrics: bool = True):
         """
@@ -503,7 +516,7 @@ class Trainer:
         log_batch_shapes(tag, step_num, masked_fraction=masked_fraction)
 
         # decoder + heads
-        pred, logits_label = self.tinybird.forward_decoder(h, idx_restore, T, xl_tok_cond=x_l_tok_cond)
+        pred, logits_label = self.tinybird.forward_decoder(h, idx_restore, T, xl_tok_cond=x_l_tok_cond, W=W)
 
         lambda_label = 0.3
         loss_recon = self.tinybird.loss_mse(x, pred, bool_mask)

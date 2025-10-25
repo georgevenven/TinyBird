@@ -12,6 +12,7 @@ import torch
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 from tqdm import tqdm
+from test import H
 from utils import load_model_from_checkpoint
 from data_loader import SpectogramDataset
 
@@ -173,7 +174,7 @@ def compute_loss(model, x, x_i, x_l, N, start_block, last_block, x_dt, x_lt):
         xs, x_is, x_ls = model.sample_data_indices(x.clone(), x_i.clone(), N.clone(), indices, xl=x_l)
         W = xs.shape[-1]
         h, idx_restore, bool_mask, T, x_l_tok_cond = model.forward_encoder(xs, x_is, xl=x_ls, mblock=mblock)
-        pred, logits_label = model.forward_decoder(h, idx_restore, T, xl_tok_cond=x_l_tok_cond)
+        pred, logits_label = model.forward_decoder(h, idx_restore, T, xl_tok_cond=x_l_tok_cond, W=W)
         reconstruction_loss = model.loss_mse(xs, pred, bool_mask)
         label_loss = model.loss_label(logits_label, x_ls, bool_mask, W)
 
@@ -195,7 +196,8 @@ def compute_loss(model, x, x_i, x_l, N, start_block, last_block, x_dt, x_lt):
                 torch.cuda.empty_cache()
             except Exception:
                 pass
-            return torch.tensor(float('nan'), device=x.device), dt, lt, None, None, None, None, None, None
+            nan = torch.tensor(float('nan'), device=x.device)
+            return nan, nan, nan, dt, lt, None, None, None, None, None, None
         else:
             raise
 
