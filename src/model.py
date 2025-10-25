@@ -37,6 +37,7 @@ class TinyBird(nn.Module):
         self.mask_p = config["mask_p"]
         self.enc_hidden_d = config["enc_hidden_d"]
         self.dec_hidden_d = config["dec_hidden_d"]
+        self.H  = config["mels"]
 
         self.patch_projection = nn.Conv2d(
             in_channels=1, out_channels=config["enc_hidden_d"], kernel_size=self.patch_size, stride=self.patch_size
@@ -88,7 +89,7 @@ class TinyBird(nn.Module):
         # --- Row-attention pooling for labels (learned weights over H) ---
         self.label_row_pool = nn.Linear(self.dec_hidden_d, 1)
 
-        self.label_enc = nn.Embedding(4, self.enc_hidden_d)
+        self.label_enc = nn.Embedding(4, self.H)
         # 0 = Left channel
         # 1 = Right channel
         # 2 = separator
@@ -139,10 +140,15 @@ class TinyBird(nn.Module):
     def apply_label_encoding(self, z: torch.Tensor, xl: torch.Tensor):
         # z: (B, T, D_enc)
         # xl: (B, T)
-        B, T, D_enc = z.shape
-        Txl = xl.shape[1]
 
-        assert T == Txl, f"Size of z and xl must be the same, got x size is {T} and xl size is {Txl}"
+        # IF APPLYING AFTER PATCH ENCODING
+        # B, T, D_enc = z.shape
+        # Txl = xl.shape[1]
+        # assert T == Txl, f"Size of z and xl must be the same, got x size is {T} and xl size is {Txl}"
+
+        #TRYING BEFORE PATCH ENCODING
+        B, T, D_enc = z.shape
+
 
         return z + self.label_enc(xl)  # (B, T, D_enc)
 
@@ -663,18 +669,37 @@ class TinyBird(nn.Module):
         """
         # x:  (B, C=1, H, W)
         # xi: (B, N, 2)
-        B = x.shape[0]
+        B, _, H, W = x.shape
+        bool_mask = self.build_column_mask(xi, hw=(H, W), **column_mask_args)
+
+        if xl is not None:
+            # Columns masked anywhere along rows
+            masked_cols = bool_mask.view(B, H, W).any(dim=1)  # (B, W)
+
+            # Prepare label ids and apply [LABEL_MASK] to masked columns
+            xl_cols = xl.clone().long()                       # (B, W)
+            xl_cols[masked_cols] = self.mask_class_id
+
+            # Embedding: each id → H-dim vector (mel axis)
+            # Result: (B, W, H) → permute to (B, H, W) → add channel dim → (B, 1, H, W)
+            lbl_plane = self.label_enc(xl_cols)               # (B, W, H)
+            lbl_plane = lbl_plane.permute(0, 2, 1).unsqueeze(1)  # (B,1,H,W)
+
+            x = x + lbl_plane
+
+
         z, H, W = self.tokenize_spectrogram(x)  # (B, T, D_enc), H, W
         z = self.apply_position_encoding(z)  # (B, T, D_enc)
 
         bool_mask = self.build_column_mask(xi, hw=(H, W), **column_mask_args)
         # bool_mask : (B, H*W), True = masked (column-wise across H) bool_mask are exclusive
 
-        if xl is not None:
-            xl_tok = xl.unsqueeze(1).expand(B, H, W).reshape(B, H * W)
-            xl_tok_cond = xl_tok.clone().long()
-            xl_tok_cond[bool_mask] = self.mask_class_id
-            z = self.apply_label_encoding(z, xl_tok_cond)
+        # IF AFTER APPLYING AFTER PATCH ENCODING
+        # if xl is not None:
+        #     xl_tok = xl.unsqueeze(1).expand(B, H, W).reshape(B, H * W)
+        #     xl_tok_cond = xl_tok.clone().long()
+        #     xl_tok_cond[bool_mask] = self.mask_class_id
+        #     z = self.apply_label_encoding(z, xl_tok_cond)
 
         z_keep, idx_restore = self.mask(z, bool_mask)  # ensure the encoder never sees masked tokens
         # z_keep: Kept tokens (B, keep_count, D)
@@ -683,6 +708,7 @@ class TinyBird(nn.Module):
         h = self.encoder(z_keep)  # (B, keep, D_enc)
 
         if xl is not None:
+            xl_tok_cond = xl_cols.unsqueeze(1).expand(B, H, W).reshape(B, H * W)  # (B, T)
             return h, idx_restore, bool_mask, H * W, xl_tok_cond
         else:
             return h, idx_restore, bool_mask, H * W  # (B, keep, D_enc), (B, T), (B, T), (B,T), T
