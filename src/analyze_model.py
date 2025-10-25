@@ -12,7 +12,6 @@ import torch
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 from tqdm import tqdm
-from test import H
 from utils import load_model_from_checkpoint
 from data_loader import SpectogramDataset
 
