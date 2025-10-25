@@ -10,15 +10,9 @@ import os
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
-from matplotlib.colors import ListedColormap
 from tqdm import tqdm
 from utils import load_model_from_checkpoint
 from data_loader import SpectogramDataset
-
-# For pixel-perfect axis-aligned strips
-from mpl_toolkits.axes_grid1 import make_axes_locatable
-
-
 import pickle
 
 CACHE_DIR = "cache"
@@ -177,14 +171,23 @@ def compute_loss(model, x, x_i, x_l, N, start_block, last_block, x_dt, x_lt):
         reconstruction_loss = model.loss_mse(xs, pred, bool_mask)
         label_loss = model.loss_label(logits_label, x_ls, bool_mask, W)
 
+
         B, Ttok, C = logits_label.shape
         assert B == 1 and C == 2, f"Unexpected logits shape {logits_label.shape}"
         Htok = Ttok // W
         logits_col = logits_label.view(B, Htok, W, C).mean(dim=1)[0]  # (W, 2)
-        prob1_time = torch.softmax(logits_col, dim=-1)[:, 1]  # (W,)
+
+        # Masked block span
         s = int(x_is[0, -1, 0].item())
         e = int(x_is[0, -1, 1].item())
-        pred_masked_block = prob1_time[s:e].mean()
+
+        # === PREDICTED CLASS (0/1) FOR THE MASKED BLOCK ===
+        # Aggregate logits over the masked span and argmax → 0/1
+        logits_block = logits_col[s:e, :]                   # (L, 2)
+        logits_sum   = logits_block.sum(dim=0)              # (2,)
+        pred_class   = int(torch.argmax(logits_sum).item()) # 0 or 1
+
+        pred_masked_block = torch.tensor(float(pred_class), device=x.device)
 
         return reconstruction_loss, label_loss, pred_masked_block, dt, lt, xs, x_is, bool_mask, pred, mblock, indices
 
@@ -620,18 +623,35 @@ def main():
             data_ma = np.ma.masked_invalid(mat_np)
 
             if cmap_name is None:
-                cmap_name = 'RdYlGn_r' if tag.startswith('loss') or tag == 'label_pred' else 'viridis'
-            cmap = plt.get_cmap(cmap_name).copy()
+                if tag == 'label_pred':
+                    # 0 → green, 1 → red
+                    from matplotlib.colors import ListedColormap
+                    cmap = ListedColormap(['#2ca02c', '#d62728']).copy()
+                    is_binary = True
+                else:
+                    cmap_name = 'RdYlGn_r' if tag.startswith('loss') else 'viridis'
+                    cmap = plt.get_cmap(cmap_name).copy()
+                    is_binary = False
+            else:
+                cmap = plt.get_cmap(cmap_name).copy()
+                is_binary = (tag == 'label_pred')
+
             cmap.set_bad(color='black')
 
-            vmin = float(np.nanmin(data_ma)) if np.isfinite(np.nanmin(data_ma)) else 0.0
-            vmax = float(np.nanmax(data_ma)) if np.isfinite(np.nanmax(data_ma)) else 1.0
-            if vmax <= vmin:
-                vmax = vmin + 1.0
+            if is_binary:
+                vmin, vmax = -0.5, 1.5   # crisp separation between 0 and 1
+            else:
+                vmin = float(np.nanmin(data_ma)) if np.isfinite(np.nanmin(data_ma)) else 0.0
+                vmax = float(np.nanmax(data_ma)) if np.isfinite(np.nanmax(data_ma)) else 1.0
+                if vmax <= vmin:
+                    vmax = vmin + 1.0
 
             im_hm = ax_hm.imshow(data_ma, aspect='auto', cmap=cmap, origin='lower', vmin=vmin, vmax=vmax)
             cbar_hm = plt.colorbar(im_hm, ax=ax_hm)
             cbar_hm.set_label(cbar_label, rotation=270, labelpad=20, fontsize=12)
+            if is_binary:
+                cbar_hm.set_ticks([0, 1])
+                cbar_hm.set_ticklabels(['0', '1'])
 
             ax_hm.set_xlabel('last_block (end index)')
             ax_hm.set_ylabel('start_block (start index)')
@@ -724,11 +744,11 @@ def main():
         plot_heatmap(
             pred_np,
             title='Label Prediction Heatmap',
-            cbar_label='P(label=1)',
+            cbar_label='Predicted class (0/1)',
             tag='label_pred',
             labels_true_np=labels_true_np,
-            note='Prediction for masked block (last block in window). 0=green, 1=red.',
-            cmap_name='RdYlGn_r',
+            note='Predicted class for masked block (last block in window).',
+            cmap_name=None,
         )
         plot_heatmap(
             dt_np,
