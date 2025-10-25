@@ -32,13 +32,15 @@ class TinyBird(nn.Module):
         self.patch_size = config["patch_size"]
         self.max_seq = config["max_seq"]
         self.mask_p = config["mask_p"]
+        self.enc_hidden_d = config["enc_hidden_d"]
+        self.dec_hidden_d = config["dec_hidden_d"]
 
         self.patch_projection = nn.Conv2d(
             in_channels=1, out_channels=config["enc_hidden_d"], kernel_size=self.patch_size, stride=self.patch_size
         )
 
         self.encoder_transformer_block = nn.TransformerEncoderLayer(
-            d_model=config["enc_hidden_d"],
+            d_model=self.enc_hidden_d,
             nhead=config["enc_n_head"],
             dim_feedforward=config["enc_dim_ff"],
             dropout=config["dropout"],
@@ -47,7 +49,7 @@ class TinyBird(nn.Module):
         )
 
         self.decoder_transformer_block = nn.TransformerEncoderLayer(
-            d_model=config["dec_hidden_d"],
+            d_model=self.dec_hidden_d,
             nhead=config["dec_n_head"],
             dim_feedforward=config["dec_dim_ff"],
             dropout=config["dropout"],
@@ -58,30 +60,32 @@ class TinyBird(nn.Module):
         self.encoder = nn.TransformerEncoder(self.encoder_transformer_block, num_layers=config["enc_n_layer"])
         self.decoder = nn.TransformerEncoder(self.decoder_transformer_block, num_layers=config["dec_n_layer"])
 
-        self.encoder_to_decoder = nn.Linear(config["enc_hidden_d"], config["dec_hidden_d"])
+        self.encoder_to_decoder = nn.Linear(self.enc_hidden_d, self.dec_hidden_d)
         
         # --- Pixel head ---
         self.decoder_to_pixel = MLPHead(
-            in_dim=config["dec_hidden_d"],
+            in_dim=self.dec_hidden_d,
             out_dim=self.patch_size[0] * self.patch_size[1],
-            hidden_dim=config.get("pixel_mlp_d", 2 * config["dec_hidden_d"]),
+            hidden_dim=config.get("pixel_mlp_d", 2 * self.dec_hidden_d),
             dropout=config["dropout"],
             num_layers=config.get("pixel_mlp_layers", 2),
         )
 
         # --- Label head ---
         self.decoder_to_label = MLPHead(
-            in_dim=config["dec_hidden_d"],
+            in_dim=self.dec_hidden_d,
             out_dim=2,
-            hidden_dim=config.get("label_mlp_d", 2 * config["dec_hidden_d"]),
+            hidden_dim=config.get("label_mlp_d", 2 * self.dec_hidden_d),
             dropout=config["dropout"],
             num_layers=config.get("label_mlp_layers", 2),
         )
         # classifier head for label prediction (2 classes: left channel, right channel)
         # 0 = Left channel
         # 1 = Right channel
+        # --- Row-attention pooling for labels (learned weights over H) ---
+        self.label_row_pool = nn.Linear(self.dec_hidden_d, 1)
 
-        self.label_enc = nn.Embedding(4, config["enc_hidden_d"])
+        self.label_enc = nn.Embedding(4, self.dec_hidden_d)
         # 0 = Left channel
         # 1 = Right channel
         # 2 = separator
@@ -90,9 +94,9 @@ class TinyBird(nn.Module):
         self.mask_class_id = 3
 
         self.sep_param = nn.Parameter(torch.zeros(1, 1, 1))
-        self.mask_token = nn.Parameter(torch.zeros(1, 1, config["dec_hidden_d"]))
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, self.dec_hidden_d))
 
-        self.pos_enc = nn.Parameter(torch.zeros(1, config["max_seq"], config["enc_hidden_d"]))
+        self.pos_enc = nn.Parameter(torch.zeros(1, config["max_seq"], self.enc_hidden_d))
 
         self.init_weights()
 
@@ -729,7 +733,7 @@ class TinyBird(nn.Module):
 
         # 1) Match channel sizes: project encoder tokens (D_enc) to decoder width (D_dec).
         y = self.encoder_to_decoder(h)  # (B, T_enc, D_dec)
-        D_dec = self.decoder_to_pixel.in_features
+        D_dec = self.dec_hidden_d
 
         # 2) Insert learned mask tokens for the missing (masked) positions, then unshuffle back to original order.
         #    Learned mask token (defined in __init__) provides a consistent placeholder embedding for masked slots.
