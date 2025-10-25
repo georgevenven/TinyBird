@@ -45,12 +45,12 @@ class TinyBird(nn.Module):
         # 0 = Left channel
         # 1 = Right channel
 
-        self.label_embed = nn.Embedding(4, config["dec_hidden_d"])
+        self.label_enc = nn.Embedding(4, config["enc_hidden_d"])
         # 0 = Left channel
         # 1 = Right channel
         # 2 = separator
         # 3 = [LABEL_MASK]  # for masked columns
-        self.sep_class_id = 2
+        self.sep_class_id  = 2
         self.mask_class_id = 3
 
         self.sep_param = nn.Parameter(torch.zeros(1, 1, 1))
@@ -67,6 +67,16 @@ class TinyBird(nn.Module):
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
 
+        # Freeze and zero out unwanted rows
+        with torch.no_grad():
+            self.label_enc.weight[ self.sep_class_id ].zero_()  # separator
+            self.label_enc.weight[ self.mask_class_id].zero_()  # [LABEL_MASK]
+
+        # Make sure gradients never change these rows
+        self.label_enc.weight.register_hook(
+            lambda grad: grad.clone().index_fill_(0, torch.tensor([self.sep_class_id, self.mask_class_id], device=grad.device), 0.0)
+        )
+
     def tokenize_spectrogram(self, x):
         # x  (B, C=1, H , W)
         z = self.patch_projection(x)  # (B, D_enc, H', W')
@@ -80,6 +90,17 @@ class TinyBird(nn.Module):
         assert T <= self.max_seq, f"T={z.size(1)} exceeds max_seq={self.max_seq}"
 
         return z + self.pos_enc[:, :T, :]  # (B, T, D_enc)
+
+    def apply_label_encoding(self, z: torch.Tensor, xl: torch.Tensor):
+        # z: (B, T, D_enc)
+        # xl: (B, T)
+        B, T, D_enc = z.shape
+        Txl         = xl.shape[1]
+
+        assert T == Txl, f"Size of z and xl must be the same, got x size is {T} and xl size is {Txl}"
+
+        return z + self.label_enc( xl )  # (B, T, D_enc)
+
 
     def randomize_label(self, x_l: torch.Tensor) -> torch.Tensor:
         if random.random() < 0.5:
@@ -515,7 +536,7 @@ class TinyBird(nn.Module):
             assert len(mblock) > 0, f"mblock len={len(mblock)}. mblock must be set if iblock is set"
 
         starts = xi[:, :, 0].to(torch.long).clamp(min=0, max=W)  # (B, N)
-        ends = xi[:, :, 1].to(torch.long).clamp(min=0, max=W)  # (B, N)
+        ends   = xi[:, :, 1].to(torch.long).clamp(min=0, max=W)  # (B, N)
 
         if len(mblock) > 0:
             mask_blocks = mblock
@@ -605,16 +626,21 @@ class TinyBird(nn.Module):
         bool_mask = self.build_column_mask(xi, hw=(H, W), **column_mask_args)
         # bool_mask : (B, H*W), True = masked (column-wise across H) bool_mask are exclusive
 
+        if xl is not None:
+            xl_tok = xl.unsqueeze(1).expand(B, H, W).reshape(B, H * W)
+            xl_tok_cond = xl_tok.clone().long()
+            xl_tok_cond[bool_mask] = self.mask_class_id
+            z = self.apply_label_encoding(z,xl_tok_cond)
+
         z_keep, idx_restore = self.mask(z, bool_mask)  # ensure the encoder never sees masked tokens
         # z_keep: Kept tokens (B, keep_count, D)
         # idx_restore: Permutation indices to restore original order (B, T)
 
+
         h = self.encoder(z_keep)  # (B, keep, D_enc)
 
+
         if xl is not None:
-            xl_tok = xl.unsqueeze(1).expand(B, H, W).reshape(B, H * W)
-            xl_tok_cond = xl_tok.clone()
-            xl_tok_cond[bool_mask] = self.mask_class_id
             return h, idx_restore, bool_mask, H * W, xl_tok_cond
         else:
             return h, idx_restore, bool_mask, H * W  # (B, keep, D_enc), (B, T), (B, T), (B,T), T
@@ -680,9 +706,6 @@ class TinyBird(nn.Module):
         )  # (1, T, D_dec) decoder pos-encs derived by projecting encoder pos-encs
 
         y_full = y_full + pos_dec
-
-        if xl_tok_cond is not None:
-            y_full = y_full + self.label_embed(xl_tok_cond)
 
         d = self.decoder(y_full)  # (B, T, D_dec)
         pred = self.decoder_to_pixel(d)  # Final per-token patch prediction: (B, T, P). P is pixels per patch
