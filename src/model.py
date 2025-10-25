@@ -34,7 +34,7 @@ class TinyBird(nn.Module):
         self.mask_p = config["mask_p"]
 
         self.patch_projection = nn.Conv2d(
-            in_channels=1, out_channels=config["enc_hidden_Fd"], kernel_size=self.patch_size, stride=self.patch_size
+            in_channels=1, out_channels=config["enc_hidden_d"], kernel_size=self.patch_size, stride=self.patch_size
         )
 
         self.encoder_transformer_block = nn.TransformerEncoderLayer(
