@@ -303,21 +303,35 @@ class Trainer:
     # --- Metrics & logging helpers -------------------------------------------------
     # ---------- Metrics & logging helpers (modular & concise) ----------
 
+# --- in Trainer ---------------------------------------------------------------
+
     def _valid_label_eval_tensors(self, logits_label, x_l, bool_mask, W):
         """
         Returns y_true, y_pred restricted to masked, non-separator columns.
         Also returns 'acc' over those columns and a 'has_valid' flag.
+
+        logits_label: (B, W, 2)  # already pooled over rows
+        x_l:          (B, W)
+        bool_mask:    (B, H_true*W)  # token mask, True = masked
+        W:            int
         """
         with torch.no_grad():
-            B, T, C = logits_label.shape
-            H = T // W  # assumes patch_width == 1
-            # Per-column logits → predictions
-            preds_col = logits_label.view(B, H, W, C).mean(dim=1).argmax(dim=-1)  # (B, W)
+            B, W2, C = logits_label.shape
+            assert W2 == W and C == 2, f"Expected (B,{W},2), got {tuple(logits_label.shape)}"
 
-            # Valid columns: masked anywhere & not a separator in ground truth
-            masked_cols = bool_mask.view(B, H, W).any(dim=1)  # (B, W)
-            is_sep = x_l == self.tinybird.sep_class_id  # (B, W)
+            # Recover true H from the mask (not from logits_label)
+            Bm, Tmask = bool_mask.shape
+            assert Bm == B and (Tmask % W) == 0, f"bool_mask shape {tuple(bool_mask.shape)} not compatible with W={W}"
+            H_true = Tmask // W
+
+            # Per-column predictions
+            preds_col = logits_label.argmax(dim=-1)  # (B, W)
+
+            # Valid columns: masked anywhere across rows & not a separator in ground truth
+            masked_cols = bool_mask.view(B, H_true, W).any(dim=1)  # (B, W)
+            is_sep = (x_l == self.tinybird.sep_class_id)          # (B, W)
             valid = masked_cols & (~is_sep)
+
             if not valid.any():
                 return None, None, float("nan"), False
 
@@ -326,15 +340,10 @@ class Trainer:
             acc = (y_pred == y_true).float().mean().item()
             return y_true, y_pred, acc, True
 
+
     def _compute_label_metrics(self, logits_label, x_l, bool_mask, W):
         """
-        Only the metrics we care about:
-        - acc: overall accuracy on valid columns
-        - pct_true1_pred1: P(pred=1 | true=1)
-        - pct_true0_pred0: P(pred=0 | true=0)
-
-        Also returns y_true/y_pred for W&B's confusion-matrix plot, plus internal counts
-        used to do weighted averaging across many batches. These counts are NOT logged.
+        Metrics on masked, non-separator columns with logits_label shaped (B, W, 2).
         """
         y_true, y_pred, acc, has_valid = self._valid_label_eval_tensors(logits_label, x_l, bool_mask, W)
         metrics = {
@@ -344,7 +353,7 @@ class Trainer:
             "pct_true0_pred0": float("nan"),
             "y_true": None,
             "y_pred": None,
-            # internal counts for aggregation (not logged)
+            # internal counts for weighted val averaging
             "_n_valid": 0,
             "_n_true1": 0,
             "_n_true0": 0,
@@ -355,33 +364,31 @@ class Trainer:
         if not has_valid:
             return metrics
 
-        mask_true1 = y_true == 1
-        mask_true0 = y_true == 0
+        mask_true1 = (y_true == 1)
+        mask_true0 = (y_true == 0)
 
         n_true1 = int(mask_true1.sum().item())
         n_true0 = int(mask_true0.sum().item())
         n_valid = int(y_true.numel())
-        n_correct = int((y_pred == y_true).sum().item())
+        n_correct  = int((y_pred == y_true).sum().item())
         n_correct1 = int((y_pred[mask_true1] == 1).sum().item()) if n_true1 > 0 else 0
         n_correct0 = int((y_pred[mask_true0] == 0).sum().item()) if n_true0 > 0 else 0
 
         pct_true1_pred1 = n_correct1 / n_true1 if n_true1 > 0 else float("nan")
         pct_true0_pred0 = n_correct0 / n_true0 if n_true0 > 0 else float("nan")
 
-        metrics.update(
-            {
-                "pct_true1_pred1": pct_true1_pred1,
-                "pct_true0_pred0": pct_true0_pred0,
-                "y_true": y_true.detach().cpu(),
-                "y_pred": y_pred.detach().cpu(),
-                "_n_valid": n_valid,
-                "_n_true1": n_true1,
-                "_n_true0": n_true0,
-                "_n_correct": n_correct,
-                "_n_correct1": n_correct1,
-                "_n_correct0": n_correct0,
-            }
-        )
+        metrics.update({
+            "pct_true1_pred1": pct_true1_pred1,
+            "pct_true0_pred0": pct_true0_pred0,
+            "y_true": y_true.detach().cpu(),
+            "y_pred": y_pred.detach().cpu(),
+            "_n_valid": n_valid,
+            "_n_true1": n_true1,
+            "_n_true0": n_true0,
+            "_n_correct": n_correct,
+            "_n_correct1": n_correct1,
+            "_n_correct0": n_correct0,
+        })
         return metrics
 
     def _log_losses_and_metrics(self, tag, step_num, loss_total, loss_recon, loss_label, metrics):
