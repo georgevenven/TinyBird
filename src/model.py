@@ -3,6 +3,7 @@ from torch import nn
 import torch.nn.functional as F
 import random
 
+
 class MLPHead(nn.Module):
     """
     Flexible MLP head:
@@ -10,6 +11,7 @@ class MLPHead(nn.Module):
 
     If num_layers == 1, it's just a single Linear(in_dim, out_dim).
     """
+
     def __init__(self, in_dim: int, out_dim: int, hidden_dim: int, dropout: float = 0.0, num_layers: int = 2):
         super().__init__()
         assert num_layers >= 1
@@ -24,6 +26,7 @@ class MLPHead(nn.Module):
 
     def forward(self, x):
         return self.net(x)
+
 
 class TinyBird(nn.Module):
     def __init__(self, config):
@@ -61,7 +64,7 @@ class TinyBird(nn.Module):
         self.decoder = nn.TransformerEncoder(self.decoder_transformer_block, num_layers=config["dec_n_layer"])
 
         self.encoder_to_decoder = nn.Linear(self.enc_hidden_d, self.dec_hidden_d)
-        
+
         # --- Pixel head ---
         self.decoder_to_pixel = MLPHead(
             in_dim=self.dec_hidden_d,
@@ -85,12 +88,12 @@ class TinyBird(nn.Module):
         # --- Row-attention pooling for labels (learned weights over H) ---
         self.label_row_pool = nn.Linear(self.dec_hidden_d, 1)
 
-        self.label_enc = nn.Embedding(4, self.dec_hidden_d)
+        self.label_enc = nn.Embedding(4, self.enc_hidden_d)
         # 0 = Left channel
         # 1 = Right channel
         # 2 = separator
         # 3 = [LABEL_MASK]  # for masked columns
-        self.sep_class_id  = 2
+        self.sep_class_id = 2
         self.mask_class_id = 3
 
         self.sep_param = nn.Parameter(torch.zeros(1, 1, 1))
@@ -109,12 +112,14 @@ class TinyBird(nn.Module):
 
         # Freeze and zero out unwanted rows
         with torch.no_grad():
-            self.label_enc.weight[ self.sep_class_id ].zero_()  # separator
-            self.label_enc.weight[ self.mask_class_id].zero_()  # [LABEL_MASK]
+            self.label_enc.weight[self.sep_class_id].zero_()  # separator
+            self.label_enc.weight[self.mask_class_id].zero_()  # [LABEL_MASK]
 
         # Make sure gradients never change these rows
         self.label_enc.weight.register_hook(
-            lambda grad: grad.clone().index_fill_(0, torch.tensor([self.sep_class_id, self.mask_class_id], device=grad.device), 0.0)
+            lambda grad: grad.clone().index_fill_(
+                0, torch.tensor([self.sep_class_id, self.mask_class_id], device=grad.device), 0.0
+            )
         )
 
     def tokenize_spectrogram(self, x):
@@ -135,12 +140,11 @@ class TinyBird(nn.Module):
         # z: (B, T, D_enc)
         # xl: (B, T)
         B, T, D_enc = z.shape
-        Txl         = xl.shape[1]
+        Txl = xl.shape[1]
 
         assert T == Txl, f"Size of z and xl must be the same, got x size is {T} and xl size is {Txl}"
 
-        return z + self.label_enc( xl )  # (B, T, D_enc)
-
+        return z + self.label_enc(xl)  # (B, T, D_enc)
 
     def randomize_label(self, x_l: torch.Tensor) -> torch.Tensor:
         if random.random() < 0.5:
@@ -576,7 +580,7 @@ class TinyBird(nn.Module):
             assert len(mblock) > 0, f"mblock len={len(mblock)}. mblock must be set if iblock is set"
 
         starts = xi[:, :, 0].to(torch.long).clamp(min=0, max=W)  # (B, N)
-        ends   = xi[:, :, 1].to(torch.long).clamp(min=0, max=W)  # (B, N)
+        ends = xi[:, :, 1].to(torch.long).clamp(min=0, max=W)  # (B, N)
 
         if len(mblock) > 0:
             mask_blocks = mblock
@@ -670,15 +674,13 @@ class TinyBird(nn.Module):
             xl_tok = xl.unsqueeze(1).expand(B, H, W).reshape(B, H * W)
             xl_tok_cond = xl_tok.clone().long()
             xl_tok_cond[bool_mask] = self.mask_class_id
-            z = self.apply_label_encoding(z,xl_tok_cond)
+            z = self.apply_label_encoding(z, xl_tok_cond)
 
         z_keep, idx_restore = self.mask(z, bool_mask)  # ensure the encoder never sees masked tokens
         # z_keep: Kept tokens (B, keep_count, D)
         # idx_restore: Permutation indices to restore original order (B, T)
 
-
         h = self.encoder(z_keep)  # (B, keep, D_enc)
-
 
         if xl is not None:
             return h, idx_restore, bool_mask, H * W, xl_tok_cond
@@ -697,7 +699,9 @@ class TinyBird(nn.Module):
         z = self.apply_position_encoding(z)  # (B, T, D_enc)
         return self.encoder(z)  # (B, T, D_enc)
 
-    def forward_decoder(self, h: torch.Tensor, idx_restore: torch.Tensor, T: int, xl_tok_cond: torch.Tensor = None, W=None):
+    def forward_decoder(
+        self, h: torch.Tensor, idx_restore: torch.Tensor, T: int, xl_tok_cond: torch.Tensor = None, W=None
+    ):
         """
         Project encoder outputs to decoder width → insert learned mask tokens → unshuffle back to the
         original token order → add decoder positional encodings → run the Transformer decoder → predict
@@ -750,14 +754,14 @@ class TinyBird(nn.Module):
         d = self.decoder(y_full)  # (B, T, D_dec)
         pred = self.decoder_to_pixel(d)  # Final per-token patch prediction: (B, T, P). P is pixels per patch
         if xl_tok_cond is not None:
-            #logits_label = self.decoder_to_label(d)
+            # logits_label = self.decoder_to_label(d)
             assert W is not None, "Need H,W for row pooling"
             H = T // W
-            x = d.view(B, H, W, D_dec)                            # (B,H,W,D)
-            scores = self.label_row_pool(x).squeeze(-1)           # (B,H,W)
-            alpha = torch.softmax(scores, dim=1)                  # (B,H,W), softmax over rows
-            col = (alpha.unsqueeze(-1) * x).sum(dim=1)            # (B,W,D)
-            logits_label = self.decoder_to_label(col)             # (B,W,2)
+            x = d.view(B, H, W, D_dec)  # (B,H,W,D)
+            scores = self.label_row_pool(x).squeeze(-1)  # (B,H,W)
+            alpha = torch.softmax(scores, dim=1)  # (B,H,W), softmax over rows
+            col = (alpha.unsqueeze(-1) * x).sum(dim=1)  # (B,W,D)
+            logits_label = self.decoder_to_label(col)  # (B,W,2)
 
             return pred, logits_label
         else:
@@ -837,15 +841,14 @@ class TinyBird(nn.Module):
         masked_cols = bool_mask.view(B, H_true, W).any(dim=1)  # (B, W)
 
         # Exclude separators
-        is_sep = (xl == self.sep_class_id)
+        is_sep = xl == self.sep_class_id
         valid = masked_cols & (~is_sep)  # (B, W)
 
         if not valid.any():
             # no supervised label targets in this window
             return logits_label.new_tensor(0.0)
 
-        logits  = logits_label[valid]     # (N_valid, 2)
-        targets = xl[valid].long()        # (N_valid,) in {0,1}
+        logits = logits_label[valid]  # (N_valid, 2)
+        targets = xl[valid].long()  # (N_valid,) in {0,1}
 
-        return F.cross_entropy(logits, targets, label_smoothing=0.05)    
-
+        return F.cross_entropy(logits, targets, label_smoothing=0.05)
