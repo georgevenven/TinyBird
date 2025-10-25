@@ -114,33 +114,44 @@ def test_file(model, dataset, index, device):
     print("x_i_r[0,0,:,1]:", x_i_r[0, :, 1].tolist())
 
 
+
+def proces_xl(x_i, x_l, N, device):
+
+    x_i = x_i.to(device, non_blocking=True).long()
+    x_l = x_l.to(device, non_blocking=True).float()
+
+    B = x_i.shape[0]
+    max_N = int(N.max().item())
+    x_l_out = torch.zeros((B,max_N), dtype=torch.float32, device=device)
+
+    for b in range(B):
+        n_valid = int(N[b].item())
+        for block in range(n_valid):
+            start, end = x_i[b,block,0].item(), x_i[b,block,1].item()
+            x_l_out[b,block] = x_l[b,start:end].mean()
+
+    return x_l_out
+
+
+
+
 def prepare_sample(model, dataset, index, device):
-    x, x_i, x_l, x_f, N, filename = dataset[index]
+    x, x_i, x_l, _ , N, filename = dataset[index]
     x = x.unsqueeze(0).float().to(device)
     x_i = x_i.unsqueeze(0).to(device)
+    x_l = x_l.unsqueeze(0).to(device)
     N = torch.tensor([N], dtype=torch.long, device=device)
+
+    x, x_i, x_l = model.compactify_data(x.clone(), x_i.clone(), N.clone() ,xl=x_l)
+    x_l = proces_xl(x_i, x_l, N, device)
 
     # Compute chirp start/end/dt/lt
     starts = x_i[0, : N.item(), 0]
-    ends = x_i[0, : N.item(), 1]
-    x_dt = torch.cat([torch.tensor([0.0], device=device), starts[1:] - ends[:-1]])
-    x_lt = ends - starts
+    ends   = x_i[0, : N.item(), 1]
+    x_dt   = torch.cat([torch.tensor([0.0], device=device), starts[1:] - ends[:-1]])
+    x_lt   = ends - starts
 
-    x, x_i = model.compactify_data(x.clone(), x_i.clone(), N.clone())
-
-    # Ensure chirp labels align in length with chirp boundaries (trim trailing padding labels)
-    if isinstance(x_l, torch.Tensor):
-        x_l = x_l[: x_i.shape[1]]
-    else:
-        x_l = torch.as_tensor(x_l)[: x_i.shape[1]]
-
-    # Ensure chirp_feats align in length with chirp boundaries (trim trailing padding)
-    if isinstance(x_f, torch.Tensor):
-        x_f = x_f[: x_i.shape[1]]
-    else:
-        x_f = torch.as_tensor(x_f)[: x_i.shape[1]]
-
-    return x, x_i, x_l, x_f, x_dt, x_lt, N, filename
+    return x, x_i, x_l, x_dt, x_lt, N, filename
 
 
 def compute_loss(model, x, x_i, N, start_block, last_block, x_dt, x_lt):
@@ -395,13 +406,12 @@ def save_reconstruction(model, x, x_i, N, last_block, x_dt, x_lt, *, filename, i
 
 
 def process_file(model, dataset, index, device):
-    x, x_i, x_l, x_f, x_dt, x_lt, N, filename = prepare_sample(model, dataset, index, device)
+    x, x_i, x_l, x_dt, x_lt, N, filename = prepare_sample(model, dataset, index, device)
 
     print(f"  Filename: {filename}")
     print(f"  Spectrogram shape: {x.shape}")
     print(f"  Chirp intervals shape: {x_i.shape}")
     print(f"  Chirp labels shape: {x_l.shape}")
-    print(f"  Chirp feats shape: {x_f.shape}")
     print(f"  Number of valid chirps: {N.item()}")
 
     def compute_losses(x, x_i, N, x_dt, x_lt):
@@ -429,7 +439,7 @@ def process_file(model, dataset, index, device):
         all_losses, all_dt, all_lt = compute_losses(x, x_i, N, x_dt, x_lt)
         save_to_cache(filename, (all_losses, all_dt, all_lt))
 
-    return all_losses, all_dt, all_lt, filename, x_l, x_f, x_dt, x_lt
+    return all_losses, all_dt, all_lt, filename, x_l, x_dt, x_lt
 
 
 def main():
@@ -500,7 +510,7 @@ def main():
 
         def run_reconstruction(i: int):
             print(f"\nLoading sample at index {i}")
-            x, x_i, x_l, x_f, x_dt, x_lt, N, filename = prepare_sample(model, dataset, i, device)
+            x, x_i, x_l, x_dt, x_lt, N, filename = prepare_sample(model, dataset, i, device)
 
             for last_block in range(args.start_block, args.last_block + 1):
                 print(f"Generating reconstruction for last_block={last_block}")
@@ -537,20 +547,15 @@ def main():
     # === Default: loss/plotting mode ===
     def process_and_plot(i: int):
         print(f"\nLoading sample at index {i}")
-        all_losses, all_dt, all_lt, filename, x_l, x_f, x_dt, x_lt = process_file(model, dataset, i, device)
+        all_losses, all_dt, all_lt, filename, x_l, x_dt, x_lt = process_file(model, dataset, i, device)
 
         all_np = all_losses.detach().cpu().numpy()
         dt_np = all_dt.detach().cpu().numpy()
         lt_np = all_lt.detach().cpu().numpy()
-        labels_np = x_l.detach().cpu().numpy().astype(int).reshape(-1)
+        labels_np = x_l.detach().cpu().numpy().astype(float).reshape(-1)
         x_dt_np = x_dt.detach().cpu().numpy()
         x_lt_np = x_lt.detach().cpu().numpy()
 
-        # Diagnostics: summarize chirp labels
-        uniq, counts = np.unique(labels_np, return_counts=True)
-        print("chirp_labels summary:")
-        for u, c in zip(uniq.tolist(), counts.tolist()):
-            print(f"  label {u}: {c}")
 
         def plot_heatmap(
             mat_np,
@@ -558,23 +563,25 @@ def main():
             cbar_label: str,
             tag: str,
             labels_np,
-            x_f_np,
             *,
             note: str | None = None,
             cmap_name: str | None = None,
         ):
             fig_hm, ax_hm = plt.subplots(figsize=(12, 8))
             data_ma = np.ma.masked_invalid(mat_np)
+
             # Choose colormap (default depends on tag)
             if cmap_name is None:
                 cmap_name = 'RdYlGn_r' if tag.startswith('loss') else 'viridis'
             cmap = plt.get_cmap(cmap_name).copy()
             cmap.set_bad(color='black')
+
             # Scale to finite data range
             vmin = float(np.nanmin(data_ma)) if np.isfinite(np.nanmin(data_ma)) else 0.0
             vmax = float(np.nanmax(data_ma)) if np.isfinite(np.nanmax(data_ma)) else 1.0
             if vmax <= vmin:
                 vmax = vmin + 1.0
+
             im_hm = ax_hm.imshow(data_ma, aspect='auto', cmap=cmap, origin='lower', vmin=vmin, vmax=vmax)
             cbar_hm = plt.colorbar(im_hm, ax=ax_hm)
             cbar_hm.set_label(cbar_label, rotation=270, labelpad=20, fontsize=12)
@@ -582,7 +589,6 @@ def main():
             # Axes labels reflect matrix semantics: rows=start_block, cols=last_block
             ax_hm.set_xlabel('last_block (end index)')
             ax_hm.set_ylabel('start_block (start index)')
-
             ax_hm.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
             ax_hm.set_title(f'{title}\nIndex {i}, File: {filename}', fontsize=14, pad=20)
 
@@ -606,84 +612,46 @@ def main():
                 s = diam_pt**2
                 ax_hm.scatter(cols, ys, s=s, c="#ff1493", marker='o', edgecolors='white', linewidths=0.4, zorder=7)
 
-            # === Chirp label strips (reused for all heatmaps) ===
+            # === Chirp label strips (continuous 0→1 mapped to green→red) ===
             Hh, Wh = mat_np.shape
-            if isinstance(x_f_np, torch.Tensor):
-                x_f_np = x_f_np.detach().cpu().numpy()
-            labels_adj = labels_np.copy()
-            L_call = x_f_np[:, 0, 3].astype(float)
-            R_call = x_f_np[:, 1, 3].astype(float)
-            for idx2 in range(min(len(labels_adj), x_f_np.shape[0])):
-                if labels_adj[idx2] == 0 and not (L_call[idx2] > 0):
-                    labels_adj[idx2] = -1
-                elif labels_adj[idx2] == 1 and not (R_call[idx2] > 0):
-                    labels_adj[idx2] = -1
+            lbl = np.asarray(labels_np, dtype=float)
+            lbl = np.clip(lbl, 0.0, 1.0)  # guard
 
-            from matplotlib.colors import BoundaryNorm
+            # Ensure we have at least Wh and Hh elements (slice if longer)
+            lbl_x = lbl[:Wh]
+            lbl_y = lbl[:Hh]
 
-            lbl_x = labels_adj[:Wh].astype(int)
-            lbl_y = labels_adj[:Hh].astype(int)
-            cmap_lbl = ListedColormap(["#ffffff", "#add8e6", "#00008b"]).copy()
-            bounds = [-1.5, -0.5, 0.5, 1.5]
-            norm_lbl = BoundaryNorm(bounds, cmap_lbl.N)
-
+            from mpl_toolkits.axes_grid1 import make_axes_locatable
             divider = make_axes_locatable(ax_hm)
-            ax_strip_x = divider.append_axes("bottom", size="3%", pad=0.3, sharex=ax_hm)
-            ax_strip_y = divider.append_axes("left", size="3%", pad=0.45, sharey=ax_hm)
 
+            # 0=green, 1=red → use RdYlGn_r (reversed)
+            cmap_lbl = plt.get_cmap('RdYlGn_r').copy()
+
+            ax_strip_x = divider.append_axes("bottom", size="3%", pad=0.3, sharex=ax_hm)
             ax_strip_x.imshow(
                 lbl_x[np.newaxis, :],
                 aspect='auto',
                 cmap=cmap_lbl,
-                norm=norm_lbl,
                 interpolation='nearest',
                 origin='lower',
+                vmin=0.0,
+                vmax=1.0,
             )
             ax_strip_x.set_xlim(ax_hm.get_xlim())
             ax_strip_x.axis('off')
 
+            ax_strip_y = divider.append_axes("left", size="3%", pad=0.45, sharey=ax_hm)
             ax_strip_y.imshow(
                 lbl_y[:, np.newaxis],
                 aspect='auto',
                 cmap=cmap_lbl,
-                norm=norm_lbl,
                 interpolation='nearest',
                 origin='lower',
+                vmin=0.0,
+                vmax=1.0,
             )
             ax_strip_y.set_ylim(ax_hm.get_ylim())
             ax_strip_y.axis('off')
-
-            # Additional feature strips (reused)
-            if isinstance(x_f_np, torch.Tensor):
-                x_f_np = x_f_np.detach().cpu().numpy()
-            var_names = ["x", "y", "z"]
-            var_indices = [0, 1, 2]
-
-            def _imshow_bottom_strip(values_1d, label_text):
-                ax_b = divider.append_axes("bottom", size="3%", pad=0.12, sharex=ax_hm)
-                strip = np.ma.masked_invalid(values_1d[np.newaxis, :])
-                ax_b.imshow(strip, aspect='auto', cmap=plt.get_cmap('viridis'), interpolation='nearest', origin='lower')
-                ax_b.set_xlim(ax_hm.get_xlim())
-                ax_b.axis('off')
-                ax_b.text(0.0, 0.5, label_text, transform=ax_b.transAxes, fontsize=6, ha='left', va='center')
-
-            def _imshow_left_strip(values_1d, label_text):
-                ax_lf = divider.append_axes("left", size="3%", pad=0.18, sharey=ax_hm)
-                strip = np.ma.masked_invalid(values_1d[:, np.newaxis])
-                ax_lf.imshow(
-                    strip, aspect='auto', cmap=plt.get_cmap('viridis'), interpolation='nearest', origin='lower'
-                )
-                ax_lf.set_ylim(ax_hm.get_ylim())
-                ax_lf.axis('off')
-                ax_lf.text(
-                    0.5, 1.0, label_text, transform=ax_lf.transAxes, fontsize=6, ha='center', va='top', rotation=90
-                )
-
-            for bird_idx, bird_tag in enumerate(["L", "R"]):
-                for vi, vname in zip(var_indices, var_names):
-                    vec = x_f_np[:, bird_idx, vi].astype(float)
-                    _imshow_bottom_strip(vec[:Wh], f"{bird_tag} {vname}")
-                    _imshow_left_strip(vec[:Hh], f"{bird_tag} {vname}")
 
             plt.tight_layout()
             plt.subplots_adjust(bottom=0.12, left=0.10)
@@ -692,14 +660,12 @@ def main():
             plt.close(fig_hm)
             print(f"Saved: {out_path}")
 
-        # Heatmaps use the full sparse matrices (with chirp label strips)
         plot_heatmap(
             all_np,
             title='Loss (MSE) Heatmap – All Blocks Mode',
             cbar_label='Loss (MSE)',
             tag='loss_allblocks',
             labels_np=labels_np,
-            x_f_np=x_f,
             note='NaN = black; low = green; high = red. Sparse near diagonal due to windowing.',
             cmap_name='RdYlGn_r',
         )
@@ -709,7 +675,6 @@ def main():
             cbar_label='Time between blocks',
             tag='dt',
             labels_np=labels_np,
-            x_f_np=x_f,
             note='Δt: amount of time between blocks (gaps). Rows = start_block, Cols = last_block.',
             cmap_name='viridis',
         )
@@ -719,7 +684,6 @@ def main():
             cbar_label='Time within blocks',
             tag='lt',
             labels_np=labels_np,
-            x_f_np=x_f,
             note='ℓt: amount of time in blocks (durations). Rows = start_block, Cols = last_block.',
             cmap_name='viridis',
         )

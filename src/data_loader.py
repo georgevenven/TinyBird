@@ -16,7 +16,7 @@ def batch_size_of(batch):
 
 class SpectogramDataset(Dataset):
     def __init__(self, dir, n_mels=128, n_timebins=1024, pad_crop=True):
-        self.file_dirs = list(Path(dir).glob("*.pt"))
+        self.file_dirs = sorted(list(Path(dir).glob("*.pt")))
         self.n_mels = n_mels
         self.n_timebins = n_timebins
         self.pad_crop = pad_crop
@@ -50,43 +50,31 @@ class SpectogramDataset(Dataset):
 
     # time only crop / pads, if mels are wrong assert will catch
     def crop_or_pad(self, spec):
+        """Pad-only: assert time ≤ n_timebins; right-pad if shorter."""
         frq, time = spec.shape
-
+        assert time <= self.n_timebins, f"spec time {time} exceeds n_timebins {self.n_timebins}"
         if time < self.n_timebins:
-            padding_amnt = self.n_timebins - time 
-            spec = F.pad(spec, (0, padding_amnt, 0, 0)) # 0 pad to the left, padding to the right, nothing on top or bottom 
-
-        elif time > self.n_timebins:
-            start = random.randint(0, time - self.n_timebins)
-            end = start + self.n_timebins
-            spec = spec[:, start:end]
-        
+            padding_amnt = self.n_timebins - time
+            spec = F.pad(spec, (0, padding_amnt, 0, 0))
         return spec
 
     def crop_or_pad_pair(self, spec, labels_1d, pad_value_labels=-1):
         """
-        Crop/pad spectrogram and its 1-D per-time labels together to n_timebins.
+        Pad-only: assert time ≤ n_timebins; right-pad spec and labels together.
         spec: (F, T), labels_1d: (T,)
-        Returns: (spec_out: (F, n_timebins), labels_out: (n_timebins,))
         """
         frq, time = spec.shape
-        assert labels_1d.ndim == 1, f"labels must be 1-D, got {labels_1d.shape}"
-        assert labels_1d.shape[0] == time, \
+        assert labels_1d.ndim == 1 and labels_1d.shape[0] == time, \
             f"labels length {labels_1d.shape[0]} must match spec time {time}"
+        assert time <= self.n_timebins, f"time {time} exceeds n_timebins {self.n_timebins}"
 
         if time < self.n_timebins:
             padding_amnt = self.n_timebins - time
-            spec_out = F.pad(spec, (0, padding_amnt, 0, 0))
+            spec_out   = F.pad(spec, (0, padding_amnt, 0, 0))
             labels_out = F.pad(labels_1d, (0, padding_amnt), value=pad_value_labels)
             return spec_out, labels_out
-
-        elif time > self.n_timebins:
-            start = random.randint(0, time - self.n_timebins)
-            end = start + self.n_timebins
-            return spec[:, start:end], labels_1d[start:end]
-
         else:
-            return spec, labels_1d     
+            return spec, labels_1d
 
     def pad_chirp_intervals(self, chirp_intervals, max_N, pad_value=-1):
         """
@@ -193,19 +181,10 @@ class SpectogramDataset(Dataset):
         # Apply z-score normalization to spectrogram
         spec = (spec - self.mean) / self.std
 
-        # Pairwise crop/pad spec and labels together (time-aligned)
-        if self.pad_crop:
-            spec, chirp_labels_pad = self.crop_or_pad_pair(spec, chirp_labels_time, pad_value_labels=-1)
-            assert spec.shape[0] == self.n_mels and spec.shape[1] == self.n_timebins
-            assert chirp_labels_pad.shape[0] == self.n_timebins
-        else:
-            # If not cropping/padding, still ensure equal time length for safety
-            T = spec.shape[1]
-            if chirp_labels_time.shape[0] != T:
-                # Hard align by simple right-pad/truncate to spec T (shouldn't normally happen)
-                chirp_labels_pad, _ = self.pad_vector(chirp_labels_time, T, pad_value=-1)
-            else:
-                chirp_labels_pad = chirp_labels_time
+        # Pad (no crop) spec + labels together to n_timebins
+        spec, chirp_labels_pad = self.crop_or_pad_pair(spec, chirp_labels_time, pad_value_labels=-1)
+        assert spec.shape == (self.n_mels, self.n_timebins)
+        assert chirp_labels_pad.shape[0] == self.n_timebins
 
         # Final consistency for interval-derived tensors (labels are per-time now)
         N = min(N, N_feats)
