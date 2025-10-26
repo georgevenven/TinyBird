@@ -417,10 +417,12 @@ def process_file(model, dataset, index, device):
         )
         dt_mat = torch.full((n_valid_chirps, n_valid_chirps), float('nan'), device=device)
         lt_mat = torch.full((n_valid_chirps, n_valid_chirps), float('nan'), device=device)
+        total_jobs = sum(max(0, (n_valid_chirps - start_block - 1)) for start_block in range(n_valid_chirps))
+        total_jobs = max(total_jobs, 1)
         print(f"\nComputing losses/dt/lt for {losses_reconstruction.numel()} (rows × starts)...")
-        with tqdm(total=((n_valid_chirps - 1) * (n_valid_chirps - 1)), desc="Computing losses/dt/lt") as pbar:
-            for last_block in range(1, n_valid_chirps):
-                for start_block in range(0, n_valid_chirps - 1):
+        with tqdm(total=total_jobs, desc="Computing losses/dt/lt") as pbar:
+            for start_block in range(0, n_valid_chirps - 1):
+                for last_block in range(start_block + 1, n_valid_chirps):
                     with torch.no_grad():
                         loss_reconstruction, channel_losses, dt_val, lt_val, *_ = compute_loss(
                             model, x, x_i, N, start_block, last_block, x_dt, x_lt
@@ -467,6 +469,103 @@ def process_file(model, dataset, index, device):
         x_dt,
         x_lt,
     )
+
+
+def compute_lift_matrix(loss_matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Given a (N,N) upper-triangular loss matrix, compute the expected loss per context length
+    and the lift (expected - actual) for every (start,last) entry.
+    """
+    n = loss_matrix.shape[0]
+    expected = np.full((n,), np.nan, dtype=np.float64)
+    lift = np.full_like(loss_matrix, np.nan, dtype=np.float64)
+    for delta in range(1, n):
+        vals = []
+        coords = []
+        for start in range(0, n - delta):
+            last = start + delta
+            val = loss_matrix[start, last]
+            if np.isfinite(val):
+                vals.append(val)
+                coords.append((start, last))
+        if not vals:
+            continue
+        baseline = float(np.mean(vals))
+        expected[delta] = baseline
+        for start, last in coords:
+            lift[start, last] = baseline - loss_matrix[start, last]
+    return lift, expected
+
+
+def compute_lift_for_channels(loss_matrix: np.ndarray, channel_losses: np.ndarray):
+    """
+    Computes lift matrices for aggregate loss and each channel-specific loss cube (C,N,N).
+    """
+    lift_all, expected_all = compute_lift_matrix(loss_matrix)
+    lifts_channels = []
+    expected_channels = []
+    for c in range(channel_losses.shape[0]):
+        lift_c, expected_c = compute_lift_matrix(channel_losses[c])
+        lifts_channels.append(lift_c)
+        expected_channels.append(expected_c)
+    lifts_channels = np.stack(lifts_channels, axis=0)
+    expected_channels = np.stack(expected_channels, axis=0)
+    return lift_all, expected_all, lifts_channels, expected_channels
+
+
+def plot_expected_curve(expected_curve, title, filename, index, images_dir, tag):
+    lengths = np.arange(expected_curve.shape[0])
+    mask = np.isfinite(expected_curve)
+    lengths = lengths[mask]
+    if lengths.size == 0:
+        return None
+    values = expected_curve[mask]
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(lengths, values, marker="o", linewidth=2)
+    ax.set_xlabel("Context length (Δ = last - start)")
+    ax.set_ylabel("Expected loss (MSE)")
+    ax.set_title(f"{title}\nIndex {index}, File: {filename}")
+    ax.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
+    out_path = os.path.join(images_dir, f"expected_loss_{tag}_{index}_{filename}.png")
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved: {out_path}")
+    return out_path
+
+
+def plot_block_lift_summary(lift_matrix, filename, index, images_dir, title_prefix="All"):
+    """
+    Summarize which blocks (by start index) provide the most lift relative to expectation.
+    """
+    if lift_matrix.size == 0:
+        return None
+    mean_start = np.nanmean(lift_matrix, axis=1)
+    valid_mask = np.isfinite(mean_start)
+    if not valid_mask.any():
+        return None
+    mean_start = np.where(valid_mask, mean_start, np.nan)
+    fig, ax = plt.subplots(figsize=(12, 4))
+    ax.plot(mean_start, linewidth=2)
+    ax.set_xlabel("Block index (start_block)")
+    ax.set_ylabel("Average lift (expected - actual)")
+    ax.set_title(f"{title_prefix} Block Lift – Index {index}, File: {filename}")
+    ax.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
+    out_path = os.path.join(images_dir, f"block_lift_{title_prefix.lower()}_{index}_{filename}.png")
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved: {out_path}")
+
+    # Log top/bottom performers for quick reference
+    with np.errstate(invalid="ignore"):
+        order = np.argsort(mean_start[valid_mask])
+    # Map sorted order back to actual indices
+    valid_indices = np.where(valid_mask)[0]
+    sorted_blocks = valid_indices[np.argsort(mean_start[valid_mask])]
+    best = sorted_blocks[::-1][:5]
+    worst = sorted_blocks[:5]
+    print("Top lift blocks:", [(int(idx), float(mean_start[idx])) for idx in best])
+    print("Lowest lift blocks:", [(int(idx), float(mean_start[idx])) for idx in worst])
+    return out_path
 
 
 def main():
@@ -594,6 +693,8 @@ def main():
         x_dt_np = x_dt.detach().cpu().numpy()
         x_lt_np = x_lt.detach().cpu().numpy()
 
+        lift_np, expected_curve, lift_ch_np, expected_curve_ch = compute_lift_for_channels(recon_np, recon_ch_np)
+
         def plot_heatmap(
             mat_np,
             title: str,
@@ -718,6 +819,46 @@ def main():
                 note=f'Channel {ch_idx} masked-loss matrix.',
                 cmap_name='RdYlGn_r',
             )
+
+        plot_heatmap(
+            lift_np,
+            title='Lift Heatmap – Reconstruction (all channels)',
+            cbar_label='Lift (expected - actual)',
+            tag='lift_all',
+            labels_true_np=labels_true_np,
+            note='Positive lift indicates a larger reduction than expected for that context length.',
+            cmap_name='coolwarm',
+        )
+        for ch_idx in range(lift_ch_np.shape[0]):
+            plot_heatmap(
+                lift_ch_np[ch_idx],
+                title=f'Lift Heatmap – Reconstruction (channel {ch_idx})',
+                cbar_label='Lift (expected - actual)',
+                tag=f'lift_ch{ch_idx}',
+                labels_true_np=labels_true_np,
+                note=f'Channel {ch_idx} lift relative to baseline context performance.',
+                cmap_name='coolwarm',
+            )
+
+        plot_expected_curve(
+            expected_curve,
+            "Expected Loss vs Context Length (all channels)",
+            filename,
+            i,
+            images_dir,
+            tag="all",
+        )
+        for ch_idx in range(expected_curve_ch.shape[0]):
+            plot_expected_curve(
+                expected_curve_ch[ch_idx],
+                f"Expected Loss vs Context Length (channel {ch_idx})",
+                filename,
+                i,
+                images_dir,
+                tag=f"ch{ch_idx}",
+            )
+
+        plot_block_lift_summary(lift_np, filename, i, images_dir, title_prefix="All")
         plot_heatmap(
             dt_np,
             title='Δt Heatmap – gap between blocks',
