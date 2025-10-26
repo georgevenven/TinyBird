@@ -571,8 +571,17 @@ def plot_mean_scatter(row_mean, col_mean, filename, index, images_dir, tag="scat
     valid = np.isfinite(row_mean) & np.isfinite(col_mean)
     if not valid.any():
         return None
+    xs = row_mean[valid]
+    ys = col_mean[valid]
     fig, ax = plt.subplots(figsize=(6, 6))
-    ax.scatter(row_mean[valid], col_mean[valid], alpha=0.7, s=18, edgecolor='none')
+    ax.scatter(xs, ys, alpha=0.7, s=20, edgecolor='none', color='tab:blue')
+    for blk, xv, yv in zip(np.where(valid)[0], xs, ys):
+        ax.text(xv, yv, str(int(blk)), fontsize=6, color='black', ha='center', va='center')
+    limit = max(abs(xs).max(), abs(ys).max(), 1e-6)
+    ax.set_xlim(-limit, limit)
+    ax.set_ylim(-limit, limit)
+    ax.axhline(0, color='gray', linewidth=0.8, linestyle='--')
+    ax.axvline(0, color='gray', linewidth=0.8, linestyle='--')
     ax.set_xlabel('Mean loss per start_block (context provider)')
     ax.set_ylabel('Mean loss per last_block (prediction target)')
     ax.set_title(
