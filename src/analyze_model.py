@@ -470,13 +470,14 @@ def process_file(model, dataset, index, device):
     )
 
 
-def compute_lift_matrix(loss_matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def compute_lift_matrix(loss_matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Given a (N,N) upper-triangular loss matrix, compute the expected loss per context length
-    and the lift (expected - actual) for every (start,last) entry.
+    Given a (N,N) upper-triangular (wrapped) loss matrix, compute the expected loss per context length,
+    its standard deviation, and the lift (actual - expected) for every (start,last) entry.
     """
     n = loss_matrix.shape[0]
     expected = np.full((n,), np.nan, dtype=np.float64)
+    expected_std = np.full((n,), np.nan, dtype=np.float64)
     lift = np.full_like(loss_matrix, np.nan, dtype=np.float64)
     for delta in range(1, n):
         vals = []
@@ -490,29 +491,72 @@ def compute_lift_matrix(loss_matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray
         if not vals:
             continue
         baseline = float(np.mean(vals))
+        spread = float(np.std(vals))
         expected[delta] = baseline
+        expected_std[delta] = spread
         for start, last in coords:
             lift[start, last] = loss_matrix[start, last] - baseline
-    return lift, expected
+    return lift, expected, expected_std
 
 
 def compute_lift_for_channels(loss_matrix: np.ndarray, channel_losses: np.ndarray):
     """
     Computes lift matrices for aggregate loss and each channel-specific loss cube (C,N,N).
     """
-    lift_all, expected_all = compute_lift_matrix(loss_matrix)
+    lift_all, expected_all, std_all = compute_lift_matrix(loss_matrix)
     lifts_channels = []
     expected_channels = []
+    std_channels = []
     for c in range(channel_losses.shape[0]):
-        lift_c, expected_c = compute_lift_matrix(channel_losses[c])
+        lift_c, expected_c, std_c = compute_lift_matrix(channel_losses[c])
         lifts_channels.append(lift_c)
         expected_channels.append(expected_c)
+        std_channels.append(std_c)
     lifts_channels = np.stack(lifts_channels, axis=0)
     expected_channels = np.stack(expected_channels, axis=0)
-    return lift_all, expected_all, lifts_channels, expected_channels
+    std_channels = np.stack(std_channels, axis=0)
+    return lift_all, expected_all, std_all, lifts_channels, expected_channels, std_channels
 
 
-def plot_expected_curve(expected_curve, title, filename, index, images_dir, tag):
+def build_last_block_profiles(loss_matrix: np.ndarray) -> np.ndarray:
+    n = loss_matrix.shape[0]
+    profiles = np.full((n, n), np.nan, dtype=np.float64)
+    for last in range(n):
+        for delta in range(1, n):
+            start = (last - delta) % n
+            val = loss_matrix[start, last]
+            if np.isfinite(val):
+                profiles[last, delta] = val
+    return profiles
+
+
+def select_highlight_profiles(loss_matrix: np.ndarray, expected_curve: np.ndarray, expected_std: np.ndarray) -> dict:
+    profiles = build_last_block_profiles(loss_matrix)
+    lift_profiles = profiles - expected_curve[np.newaxis, :]
+    mean_lift = np.nanmean(lift_profiles[:, 1:], axis=1)
+    if not np.isfinite(mean_lift).any():
+        return {}
+    best_idx = int(np.nanargmin(mean_lift))
+    worst_idx = int(np.nanargmax(mean_lift))
+    avg_std = float(np.nanmean(expected_std[1:]))
+
+    def closest(target):
+        diff = np.abs(mean_lift - target)
+        idx = int(np.nanargmin(diff))
+        return idx
+
+    better_idx = closest(-avg_std)
+    worse_idx = closest(avg_std)
+
+    return {
+        f"best (last={best_idx})": profiles[best_idx],
+        f"worst (last={worst_idx})": profiles[worst_idx],
+        f"~ -1σ (last={better_idx})": profiles[better_idx],
+        f"~ +1σ (last={worse_idx})": profiles[worse_idx],
+    }
+
+
+def plot_expected_curve(expected_curve, expected_std, highlight_profiles, title, filename, index, images_dir, tag):
     lengths = np.arange(expected_curve.shape[0])
     mask = np.isfinite(expected_curve)
     lengths = lengths[mask]
@@ -520,11 +564,19 @@ def plot_expected_curve(expected_curve, title, filename, index, images_dir, tag)
         return None
     values = expected_curve[mask]
     fig, ax = plt.subplots(figsize=(10, 4))
-    ax.plot(lengths, values, marker="o", linewidth=2)
+    ax.plot(lengths, values, marker="o", linewidth=2, label="Expected loss")
+    if expected_std is not None:
+        std_vals = expected_std[mask]
+        ax.fill_between(lengths, values - std_vals, values + std_vals, alpha=0.2, color='gray', label="±1 std")
+    if highlight_profiles:
+        for label, profile in highlight_profiles.items():
+            prof_vals = profile[mask]
+            ax.plot(lengths, prof_vals, linewidth=1.5, label=label)
     ax.set_xlabel("Context length (Δ = last - start)")
     ax.set_ylabel("Expected loss (MSE)")
     ax.set_title(f"{title}\nIndex {index}, File: {filename}")
     ax.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
+    ax.legend(fontsize=7, loc="best")
     out_path = os.path.join(images_dir, f"expected_loss_{tag}_{index}_{filename}.png")
     fig.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -722,7 +774,9 @@ def main():
         x_dt_np = x_dt.detach().cpu().numpy()
         x_lt_np = x_lt.detach().cpu().numpy()
 
-        lift_np, expected_curve, lift_ch_np, expected_curve_ch = compute_lift_for_channels(recon_np, recon_ch_np)
+        lift_np, expected_curve, expected_std, lift_ch_np, expected_curve_ch, expected_std_ch = compute_lift_for_channels(
+            recon_np, recon_ch_np
+        )
 
         def plot_heatmap(
             mat_np,
@@ -959,8 +1013,11 @@ def main():
                 ch_idx=ch_idx,
             )
 
+        highlights_all = select_highlight_profiles(recon_np, expected_curve, expected_std)
         plot_expected_curve(
             expected_curve,
+            expected_std,
+            highlights_all,
             "Expected Loss vs Context Length (all channels)",
             filename,
             i,
@@ -968,8 +1025,11 @@ def main():
             tag="all",
         )
         for ch_idx in range(expected_curve_ch.shape[0]):
+            highlights_ch = select_highlight_profiles(recon_ch_np[ch_idx], expected_curve_ch[ch_idx], expected_std_ch[ch_idx])
             plot_expected_curve(
                 expected_curve_ch[ch_idx],
+                expected_std_ch[ch_idx],
+                highlights_ch,
                 f"Expected Loss vs Context Length (channel {ch_idx})",
                 filename,
                 i,
