@@ -732,10 +732,10 @@ def main():
             ax_hm.set_xlabel('last_block (end index)')
             ax_hm.set_ylabel('start_block (start index)')
             ax_hm.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
-            ax_hm.set_title(f'{title}\nIndex {i}, File: {filename}', fontsize=14, pad=20)
+            ax_hm.set_title(f'{title}\nPredict block `last_block` (x) using context starting at `start_block` (y)\nIndex {i}, File: {filename}', fontsize=14, pad=20)
 
             if note:
-                ax_hm.annotate(note, xy=(0.99, 0.01), xycoords='axes fraction', fontsize=8, ha='right', va='bottom')
+                ax_hm.annotate(note, xy=(0.99, 0.01), xycoords='axes fraction', fontsize=9, ha='right', va='bottom')
 
             # mark argmin row per column (optional visual cue)
             arr = np.array(mat_np, dtype=float)
@@ -777,7 +777,10 @@ def main():
                 vmax=1.0,
             )
             ax_strip_x.set_xlim(ax_hm.get_xlim())
-            ax_strip_x.axis('off')
+            ax_strip_x.set_ylabel("channel", fontsize=8)
+            ax_strip_x.set_xlabel("Green=L, Red=R", fontsize=8)
+            ax_strip_x.set_yticks([])
+            ax_strip_x.set_xticks([])
 
             ax_strip_y = divider.append_axes("left", size="3%", pad=0.45, sharey=ax_hm)
             ax_strip_y.imshow(
@@ -790,7 +793,23 @@ def main():
                 vmax=1.0,
             )
             ax_strip_y.set_ylim(ax_hm.get_ylim())
-            ax_strip_y.axis('off')
+            ax_strip_y.set_xlabel("channel\n(G=L, R=R)", fontsize=8)
+            ax_strip_y.set_xticks([])
+            ax_strip_y.set_yticks([])
+
+            # Column/row mean plots
+            col_mean = np.nanmean(mat_np, axis=0)
+            row_mean = np.nanmean(mat_np, axis=1)
+            ax_col_mean = divider.append_axes("top", size="8%", pad=0.4, sharex=ax_hm)
+            ax_col_mean.plot(np.arange(mat_np.shape[1]), col_mean, color="black", linewidth=1.5)
+            ax_col_mean.set_ylabel("Mean\nper last", fontsize=8)
+            ax_col_mean.tick_params(axis='x', labelbottom=False)
+            ax_col_mean.grid(True, alpha=0.2)
+            ax_row_mean = divider.append_axes("right", size="8%", pad=0.5, sharey=ax_hm)
+            ax_row_mean.plot(row_mean, np.arange(mat_np.shape[0]), color="black", linewidth=1.5)
+            ax_row_mean.set_xlabel("Mean per\nstart", fontsize=8)
+            ax_row_mean.tick_params(axis='y', labelleft=False)
+            ax_row_mean.grid(True, alpha=0.2)
 
             plt.tight_layout()
             plt.subplots_adjust(bottom=0.12, left=0.10)
@@ -825,7 +844,7 @@ def main():
             cbar_label='Lift (expected - actual)',
             tag='lift_all',
             labels_true_np=labels_true_np,
-            note='Positive lift indicates a larger reduction than expected for that context length.',
+            note='Negative lift → better-than-expected loss; positive lift → worse-than-expected.',
             cmap_name='coolwarm',
         )
         for ch_idx in range(lift_ch_np.shape[0]):
@@ -835,7 +854,7 @@ def main():
                 cbar_label='Lift (expected - actual)',
                 tag=f'lift_ch{ch_idx}',
                 labels_true_np=labels_true_np,
-                note=f'Channel {ch_idx} lift relative to baseline context performance.',
+                note='Negative lift → better-than-expected loss; positive lift → worse-than-expected.',
                 cmap_name='coolwarm',
             )
 
@@ -930,7 +949,11 @@ def main():
             ax_top.plot(x, len10_loss, label="Loss @ start=last_block-10 (context len 10)")
             ax_top.set_xlabel("last_block (end index)")
             ax_top.set_ylabel("Loss (MSE)")
-            ax_top.set_title(f"Loss vs last_block – Index {index}, File: {filename}")
+            ax_top.set_title(
+                f"{title_prefix}Loss vs last_block – Index {index}, File: {filename}\n"
+                "Each curve shows how loss changes as more context is added before predicting `last_block` "
+                "(min: best start; start=last+1: entire circle; start=last-10: fixed-length context)."
+            )
             ax_top.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
             ax_top.legend(loc="best")
 
