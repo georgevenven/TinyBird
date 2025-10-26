@@ -567,24 +567,18 @@ def plot_block_lift_summary(lift_matrix, filename, index, images_dir, title_pref
     return out_path
 
 
-def plot_mean_scatter(col_mean, row_mean, filename, index, images_dir, tag="scatter"):
-    valid = np.isfinite(col_mean) & np.isfinite(row_mean)
+def plot_mean_scatter(row_mean, col_mean, filename, index, images_dir, tag="scatter"):
+    valid = np.isfinite(row_mean) & np.isfinite(col_mean)
     if not valid.any():
         return None
     fig, ax = plt.subplots(figsize=(6, 6))
-    ax.scatter(col_mean[valid], row_mean[valid], alpha=0.7, s=18, edgecolor='none')
-    ax.axhline(0, color='gray', linewidth=0.8, linestyle='--')
-    ax.axvline(0, color='gray', linewidth=0.8, linestyle='--')
-    ax.set_xlabel('Average loss when predicting last_block (column mean)')
-    ax.set_ylabel('Average loss contributed by start_block (row mean)')
+    ax.scatter(row_mean[valid], col_mean[valid], alpha=0.7, s=18, edgecolor='none')
+    ax.set_xlabel('Mean loss per start_block (context provider)')
+    ax.set_ylabel('Mean loss per last_block (prediction target)')
     ax.set_title(
-        "Per-block loss vs contribution\n"
-        "Points in lower-left help others more than they need help themselves."
+        "Block influence vs difficulty\n"
+        "Left side: blocks that reduce others' loss. Bottom: blocks that are easy to predict."
     )
-    for pos in np.linspace(0.1, 0.9, 5):
-        idx = int(pos * (np.where(valid)[0].size - 1))
-        blk = np.where(valid)[0][idx]
-        ax.annotate(str(int(blk)), (col_mean[blk], row_mean[blk]), fontsize=6, alpha=0.8)
     out_path = os.path.join(images_dir, f"mean_scatter_{tag}_{index}_{filename}.png")
     fig.tight_layout()
     fig.savefig(out_path, dpi=300, bbox_inches='tight')
@@ -720,11 +714,11 @@ def main():
 
         lift_np, expected_curve, lift_ch_np, expected_curve_ch = compute_lift_for_channels(recon_np, recon_ch_np)
 
-        def plot_heatmap(
-            mat_np,
-            title: str,
-            cbar_label: str,
-            tag: str,
+    def plot_heatmap(
+        mat_np,
+        title: str,
+        cbar_label: str,
+        tag: str,
             labels_true_np,
             *,
             note: str | None = None,
@@ -771,8 +765,8 @@ def main():
                 cbar_hm.set_ticks([0, 1])
                 cbar_hm.set_ticklabels(['0', '1'])
 
-            ax_hm.set_xlabel('last_block (end index)')
-            ax_hm.set_ylabel('start_block (start index)')
+            ax_hm.set_xlabel('last_block (end index)', labelpad=10)
+            ax_hm.set_ylabel('start_block (start index)', labelpad=10)
             ax_hm.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
             ax_hm.set_title(f'{title}\nPredict block `last_block` (x) using context starting at `start_block` (y)\nIndex {i}, File: {filename}', fontsize=14, pad=20)
 
@@ -842,12 +836,12 @@ def main():
             # Column/row mean plots
             col_mean = np.nanmean(mat_np, axis=0)
             row_mean = np.nanmean(mat_np, axis=1)
-            ax_col_mean = divider.append_axes("top", size="10%", pad=0.45, sharex=ax_hm)
+            ax_col_mean = divider.append_axes("top", size="8%", pad=0.7, sharex=ax_hm)
             ax_col_mean.plot(np.arange(mat_np.shape[1]), col_mean, color="black", linewidth=1.5)
             ax_col_mean.set_ylabel("Mean loss per last_block", fontsize=8, rotation=0, labelpad=25)
             ax_col_mean.tick_params(axis='x', labelbottom=False)
             ax_col_mean.grid(True, alpha=0.2)
-            ax_row_mean = divider.append_axes("right", size="10%", pad=0.55, sharey=ax_hm)
+            ax_row_mean = divider.append_axes("right", size="8%", pad=0.55, sharey=ax_hm)
             ax_row_mean.plot(row_mean, np.arange(mat_np.shape[0]), color="black", linewidth=1.5)
             ax_row_mean.set_xlabel("Mean loss per start_block", fontsize=8)
             for label in ax_row_mean.get_xticklabels():
@@ -856,52 +850,69 @@ def main():
             ax_row_mean.grid(True, alpha=0.2)
 
             plt.tight_layout()
-            plt.subplots_adjust(bottom=0.12, left=0.10)
+            plt.subplots_adjust(bottom=0.14, left=0.12, top=0.9)
             out_path = os.path.join(images_dir, f"heatmap_{tag}_{i}_{filename}.png")
             fig_hm.savefig(out_path, dpi=300, bbox_inches='tight')
             plt.close(fig_hm)
             print(f"Saved: {out_path}")
+            return col_mean, row_mean
 
-        plot_heatmap(
+        recon_mean_cols = []
+        recon_mean_rows = []
+
+        def add_heatmap(mat, title, cbar_label, tag, note, cmap_name='RdYlGn_r', center_zero=False, per_channel=False, ch_idx=None):
+            return plot_heatmap(
+                mat,
+                title=title if not per_channel else f"{title} (channel {ch_idx})",
+                cbar_label=cbar_label,
+                tag=tag if not per_channel else f"{tag}_ch{ch_idx}",
+                labels_true_np=labels_true_np,
+                note=note,
+                cmap_name=cmap_name,
+                center_zero=center_zero,
+            )
+
+        add_heatmap(
             recon_np,
-            title='Loss (MSE) Heatmap – Reconstruction',
-            cbar_label='Loss (MSE)',
-            tag='loss_recon',
-            labels_true_np=labels_true_np,
-            note='NaN = black; low = green; high = red. Pink dots mark the start_block giving the lowest loss for each last_block.',
+            'Loss (MSE) Heatmap – Reconstruction',
+            'Loss (MSE)',
+            'loss_recon',
+            'NaN = black; low = green; high = red. Pink dots mark the start_block giving the lowest loss for each last_block.',
             cmap_name='RdYlGn_r',
         )
         for ch_idx in range(recon_ch_np.shape[0]):
-            plot_heatmap(
+            add_heatmap(
                 recon_ch_np[ch_idx],
-                title=f'Loss (MSE) Heatmap – Reconstruction (channel {ch_idx})',
-                cbar_label='Loss (MSE)',
-                tag=f'loss_recon_ch{ch_idx}',
-                labels_true_np=labels_true_np,
-                note=f'Channel {ch_idx} masked-loss matrix.',
+                'Loss (MSE) Heatmap – Reconstruction',
+                'Loss (MSE)',
+                'loss_recon',
+                f'Channel {ch_idx} masked-loss matrix.',
                 cmap_name='RdYlGn_r',
+                per_channel=True,
+                ch_idx=ch_idx,
             )
 
-        plot_heatmap(
+        lift_means = {}
+        lift_means["all"] = add_heatmap(
             lift_np,
-            title='Lift Heatmap – Reconstruction (all channels)',
-            cbar_label='Lift (expected - actual)',
-            tag='lift_all',
-            labels_true_np=labels_true_np,
-            note='Negative lift (blue) = better-than-expected loss. Positive lift (red) = worse-than-expected.',
+            'Lift Heatmap – Reconstruction (all channels)',
+            'Lift (expected - actual)',
+            'lift_all',
+            'Negative lift (blue) = better-than-expected loss. Positive lift (red) = worse-than-expected.',
             cmap_name='coolwarm',
             center_zero=True,
         )
         for ch_idx in range(lift_ch_np.shape[0]):
-            plot_heatmap(
+            lift_means[f"ch{ch_idx}"] = add_heatmap(
                 lift_ch_np[ch_idx],
-                title=f'Lift Heatmap – Reconstruction (channel {ch_idx})',
-                cbar_label='Lift (expected - actual)',
-                tag=f'lift_ch{ch_idx}',
-                labels_true_np=labels_true_np,
-                note='Negative lift → better-than-expected loss; positive lift → worse-than-expected.',
+                'Lift Heatmap – Reconstruction',
+                'Lift (expected - actual)',
+                'lift',
+                'Negative lift (blue) = better-than-expected loss. Positive lift (red) = worse-than-expected.',
                 cmap_name='coolwarm',
                 center_zero=True,
+                per_channel=True,
+                ch_idx=ch_idx,
             )
 
         plot_expected_curve(
@@ -922,10 +933,16 @@ def main():
                 tag=f"ch{ch_idx}",
             )
 
-        plot_block_lift_summary(lift_np, filename, i, images_dir, title_prefix="All")
-        col_mean = np.nanmean(recon_np, axis=0)
-        row_mean = np.nanmean(recon_np, axis=1)
-        plot_mean_scatter(col_mean, row_mean, filename, i, images_dir, tag="recon")
+        col_mean_all, row_mean_all = lift_means.get("all", (None, None))
+        if col_mean_all is not None:
+            plot_block_lift_summary(lift_np, filename, i, images_dir, title_prefix="All")
+            plot_mean_scatter(row_mean_all, col_mean_all, filename, i, images_dir, tag="lift_all")
+        for ch_idx in range(lift_ch_np.shape[0]):
+            means = lift_means.get(f"ch{ch_idx}")
+            if means is None:
+                continue
+            col_mean_ch, row_mean_ch = means
+            plot_mean_scatter(row_mean_ch, col_mean_ch, filename, i, images_dir, tag=f"lift_ch{ch_idx}")
         plot_heatmap(
             dt_np,
             title='Δt Heatmap – gap between blocks',
