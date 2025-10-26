@@ -577,9 +577,10 @@ def plot_mean_scatter(row_mean, col_mean, filename, index, images_dir, tag="scat
     ax.scatter(xs, ys, alpha=0.7, s=20, edgecolor='none', color='tab:blue')
     for blk, xv, yv in zip(np.where(valid)[0], xs, ys):
         ax.text(xv, yv, str(int(blk)), fontsize=6, color='black', ha='center', va='center')
-    limit = max(abs(xs).max(), abs(ys).max(), 1e-6)
-    ax.set_xlim(-limit, limit)
-    ax.set_ylim(-limit, limit)
+    x_limit = max(abs(xs).max(), 1e-6)
+    y_limit = max(abs(ys).max(), 1e-6)
+    ax.set_xlim(-x_limit, x_limit)
+    ax.set_ylim(-y_limit, y_limit)
     ax.axhline(0, color='gray', linewidth=0.8, linestyle='--')
     ax.axvline(0, color='gray', linewidth=0.8, linestyle='--')
     ax.set_xlabel('Mean loss per start_block (context provider)')
