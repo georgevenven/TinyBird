@@ -855,14 +855,20 @@ def main():
             ax_hm.tick_params(axis='x', which='both', bottom=True, labelbottom=True)
             ax_hm.tick_params(axis='y', which='both', left=True,  labelleft=True)
 
-            # 3) Put integer ticks at a readable stride (e.g., ~12 ticks max)
+            # 3) Put ticks every 10 (0, 10, 20, …). Fall back to step=1 for tiny matrices.
             Hh, Wh = mat_np.shape
-            max_ticks = 12
-            step_x = max(1, int(np.ceil(Wh / max_ticks)))
-            step_y = max(1, int(np.ceil(Hh / max_ticks)))
+            step = 10
+            sx = step if Wh >= step else 1
+            sy = step if Hh >= step else 1
 
-            xticks = np.arange(0, Wh, step_x)
-            yticks = np.arange(0, Hh, step_y)
+            xticks = np.arange(0, Wh, sx)
+            yticks = np.arange(0, Hh, sy)
+
+            # Ensure 0 is included and we don't overshoot the last index
+            if (Wh - 1) not in xticks:
+                xticks = np.append(xticks, Wh - 1)
+            if (Hh - 1) not in yticks:
+                yticks = np.append(yticks, Hh - 1)
 
             ax_hm.set_xticks(xticks)
             ax_hm.set_yticks(yticks)
