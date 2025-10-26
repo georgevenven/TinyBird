@@ -567,6 +567,32 @@ def plot_block_lift_summary(lift_matrix, filename, index, images_dir, title_pref
     return out_path
 
 
+def plot_mean_scatter(col_mean, row_mean, filename, index, images_dir, tag="scatter"):
+    valid = np.isfinite(col_mean) & np.isfinite(row_mean)
+    if not valid.any():
+        return None
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.scatter(col_mean[valid], row_mean[valid], alpha=0.7, s=18, edgecolor='none')
+    ax.axhline(0, color='gray', linewidth=0.8, linestyle='--')
+    ax.axvline(0, color='gray', linewidth=0.8, linestyle='--')
+    ax.set_xlabel('Average loss when predicting last_block (column mean)')
+    ax.set_ylabel('Average loss contributed by start_block (row mean)')
+    ax.set_title(
+        "Per-block loss vs contribution\n"
+        "Points in lower-left help others more than they need help themselves."
+    )
+    for pos in np.linspace(0.1, 0.9, 5):
+        idx = int(pos * (np.where(valid)[0].size - 1))
+        blk = np.where(valid)[0][idx]
+        ax.annotate(str(int(blk)), (col_mean[blk], row_mean[blk]), fontsize=6, alpha=0.8)
+    out_path = os.path.join(images_dir, f"mean_scatter_{tag}_{index}_{filename}.png")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+    print(f"Saved: {out_path}")
+    return out_path
+
+
 def main():
     """Main entry point."""
     args = parse_args()
@@ -703,6 +729,7 @@ def main():
             *,
             note: str | None = None,
             cmap_name: str | None = None,
+            center_zero: bool = False,
         ):
             fig_hm, ax_hm = plt.subplots(figsize=(12, 8))
             data_ma = np.ma.masked_invalid(mat_np)
@@ -722,7 +749,22 @@ def main():
                 if vmax <= vmin:
                     vmax = vmin + 1.0
 
-            im_hm = ax_hm.imshow(data_ma, aspect='auto', cmap=cmap, origin='lower', vmin=vmin, vmax=vmax)
+            from matplotlib.colors import TwoSlopeNorm
+            norm = None
+            if center_zero and not is_binary:
+                vmax = max(vmax, 1e-6)
+                vmin = min(vmin, -1e-6)
+                norm = TwoSlopeNorm(vmin=vmin, vcenter=0.0, vmax=vmax)
+
+            im_hm = ax_hm.imshow(
+                data_ma,
+                aspect='auto',
+                cmap=cmap,
+                origin='lower',
+                vmin=None if norm else vmin,
+                vmax=None if norm else vmax,
+                norm=norm,
+            )
             cbar_hm = plt.colorbar(im_hm, ax=ax_hm)
             cbar_hm.set_label(cbar_label, rotation=270, labelpad=20, fontsize=12)
             if is_binary:
@@ -793,21 +835,23 @@ def main():
                 vmax=1.0,
             )
             ax_strip_y.set_ylim(ax_hm.get_ylim())
-            ax_strip_y.set_xlabel("channel\n(G=L, R=R)", fontsize=8)
+            ax_strip_y.set_ylabel("channel (G=L, R=R)", fontsize=8, rotation=90, labelpad=18)
             ax_strip_y.set_xticks([])
             ax_strip_y.set_yticks([])
 
             # Column/row mean plots
             col_mean = np.nanmean(mat_np, axis=0)
             row_mean = np.nanmean(mat_np, axis=1)
-            ax_col_mean = divider.append_axes("top", size="8%", pad=0.4, sharex=ax_hm)
+            ax_col_mean = divider.append_axes("top", size="10%", pad=0.45, sharex=ax_hm)
             ax_col_mean.plot(np.arange(mat_np.shape[1]), col_mean, color="black", linewidth=1.5)
-            ax_col_mean.set_ylabel("Mean\nper last", fontsize=8)
+            ax_col_mean.set_ylabel("Mean loss per last_block", fontsize=8, rotation=0, labelpad=25)
             ax_col_mean.tick_params(axis='x', labelbottom=False)
             ax_col_mean.grid(True, alpha=0.2)
-            ax_row_mean = divider.append_axes("right", size="8%", pad=0.5, sharey=ax_hm)
+            ax_row_mean = divider.append_axes("right", size="10%", pad=0.55, sharey=ax_hm)
             ax_row_mean.plot(row_mean, np.arange(mat_np.shape[0]), color="black", linewidth=1.5)
-            ax_row_mean.set_xlabel("Mean per\nstart", fontsize=8)
+            ax_row_mean.set_xlabel("Mean loss per start_block", fontsize=8)
+            for label in ax_row_mean.get_xticklabels():
+                label.set_rotation(90)
             ax_row_mean.tick_params(axis='y', labelleft=False)
             ax_row_mean.grid(True, alpha=0.2)
 
@@ -824,7 +868,7 @@ def main():
             cbar_label='Loss (MSE)',
             tag='loss_recon',
             labels_true_np=labels_true_np,
-            note='NaN = black; low = green; high = red. Sparse near diagonal due to windowing.',
+            note='NaN = black; low = green; high = red. Pink dots mark the start_block giving the lowest loss for each last_block.',
             cmap_name='RdYlGn_r',
         )
         for ch_idx in range(recon_ch_np.shape[0]):
@@ -844,8 +888,9 @@ def main():
             cbar_label='Lift (expected - actual)',
             tag='lift_all',
             labels_true_np=labels_true_np,
-            note='Negative lift → better-than-expected loss; positive lift → worse-than-expected.',
+            note='Negative lift (blue) = better-than-expected loss. Positive lift (red) = worse-than-expected.',
             cmap_name='coolwarm',
+            center_zero=True,
         )
         for ch_idx in range(lift_ch_np.shape[0]):
             plot_heatmap(
@@ -856,6 +901,7 @@ def main():
                 labels_true_np=labels_true_np,
                 note='Negative lift → better-than-expected loss; positive lift → worse-than-expected.',
                 cmap_name='coolwarm',
+                center_zero=True,
             )
 
         plot_expected_curve(
@@ -877,6 +923,9 @@ def main():
             )
 
         plot_block_lift_summary(lift_np, filename, i, images_dir, title_prefix="All")
+        col_mean = np.nanmean(recon_np, axis=0)
+        row_mean = np.nanmean(recon_np, axis=1)
+        plot_mean_scatter(col_mean, row_mean, filename, i, images_dir, tag="recon")
         plot_heatmap(
             dt_np,
             title='Δt Heatmap – gap between blocks',
@@ -944,9 +993,9 @@ def main():
             # Top panel: three loss curves
             ax_top = fig.add_subplot(gs[0, 0])
             ax_top.set_title(f"{title_prefix}Loss vs last_block – Index {index}, File: {filename}")
-            ax_top.plot(x, min_loss, label="Min loss vs last_block")
-            ax_top.plot(x, maxctx_loss, label="Loss @ start=last_block+1 (max context)")
-            ax_top.plot(x, len10_loss, label="Loss @ start=last_block-10 (context len 10)")
+            ax_top.plot(x, min_loss, label="Min loss vs last_block (best context)")
+            ax_top.plot(x, maxctx_loss, label="Loss @ start=last_block+1 (full circle context)")
+            ax_top.plot(x, len10_loss, label="Loss @ start=last_block-10 (fixed 10 blocks of context)")
             ax_top.set_xlabel("last_block (end index)")
             ax_top.set_ylabel("Loss (MSE)")
             ax_top.set_title(
@@ -960,13 +1009,13 @@ def main():
             # Bottom panel: Δt and ℓt on twin y-axes (both vs last_block)
             ax_bot = fig.add_subplot(gs[1, 0], sharex=ax_top)
             (line_dt,) = ax_bot.plot(x_axis, dt_plot, color='tab:blue', label="Δt (gap)")
-            ax_bot.set_ylabel("Δt")
-            ax_bot.set_xlabel("last_block (end index)")
+            ax_bot.set_ylabel("Δt (gap between blocks)")
+            ax_bot.set_xlabel("last_block (block being predicted)")
             ax_bot.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
 
             ax_bot_r = ax_bot.twinx()
             (line_lt,) = ax_bot_r.plot(x_axis, lt_plot, color='tab:orange', label="ℓt (duration)")
-            ax_bot_r.set_ylabel("ℓt")
+            ax_bot_r.set_ylabel("ℓt (duration of block)")
 
             # Merge legends for bottom panel
             lines_left, labels_left = ax_bot.get_legend_handles_labels()
