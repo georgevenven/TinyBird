@@ -714,17 +714,17 @@ def main():
 
         lift_np, expected_curve, lift_ch_np, expected_curve_ch = compute_lift_for_channels(recon_np, recon_ch_np)
 
-    def plot_heatmap(
-        mat_np,
-        title: str,
-        cbar_label: str,
-        tag: str,
+        def plot_heatmap(
+            mat_np,
+            title: str,
+            cbar_label: str,
+            tag: str,
             labels_true_np,
             *,
             note: str | None = None,
             cmap_name: str | None = None,
             center_zero: bool = False,
-        ):
+            ):
             fig_hm, ax_hm = plt.subplots(figsize=(12, 8))
             data_ma = np.ma.masked_invalid(mat_np)
 
@@ -854,11 +854,9 @@ def main():
             out_path = os.path.join(images_dir, f"heatmap_{tag}_{i}_{filename}.png")
             fig_hm.savefig(out_path, dpi=300, bbox_inches='tight')
             plt.close(fig_hm)
+
             print(f"Saved: {out_path}")
             return col_mean, row_mean
-
-        recon_mean_cols = []
-        recon_mean_rows = []
 
         def add_heatmap(mat, title, cbar_label, tag, note, cmap_name='RdYlGn_r', center_zero=False, per_channel=False, ch_idx=None):
             return plot_heatmap(
@@ -1060,7 +1058,6 @@ def main():
     print("\n" + "=" * 60)
     print("Analysis complete!")
     print("=" * 60)
-
 
 if __name__ == "__main__":
     main()
