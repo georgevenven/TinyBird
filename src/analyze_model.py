@@ -1207,9 +1207,30 @@ def main():
             # Top panel: three loss curves
             ax_top = fig.add_subplot(gs[0, 0])
             ax_top.set_title(f"{title_prefix}Loss vs last_block – Index {index}, File: {filename}")
-            ax_top.plot(x, min_loss, label="Min loss vs last_block (best context)")
-            ax_top.plot(x, maxctx_loss, label="Loss @ start=last_block+1 (full circle context)")
-            ax_top.plot(x, len10_loss, label="Loss @ start=last_block-10 (fixed 10 blocks of context)")
+            ax_top.plot(
+                x,
+                min_loss,
+                label="Min loss vs last_block (best context)",
+                marker='o',
+                markersize=3,
+                linewidth=1.8,
+            )
+            ax_top.plot(
+                x,
+                maxctx_loss,
+                label="Loss @ start=last_block+1 (full circle context)",
+                marker='s',
+                markersize=3,
+                linewidth=1.6,
+            )
+            ax_top.plot(
+                x,
+                len10_loss,
+                label="Loss @ start=last_block-10 (fixed 10 blocks of context)",
+                marker='^',
+                markersize=3,
+                linewidth=1.4,
+            )
             ax_top.set_xlabel("last_block (end index)")
             ax_top.set_ylabel("Loss (MSE)")
             ax_top.set_title(
@@ -1217,6 +1238,11 @@ def main():
                 "Each curve shows how loss changes as more context is added before predicting `last_block` "
                 "(min: best start; start=last+1: entire circle; start=last-10: fixed-length context)."
             )
+            xtick_step = max(1, cols // 12) if cols > 0 else 1
+            xticks = np.arange(0, cols, xtick_step)
+            if cols > 0 and (cols - 1) not in xticks:
+                xticks = np.append(xticks, cols - 1)
+            ax_top.set_xticks(xticks)
             ax_top.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
             ax_top.legend(loc="best")
 
