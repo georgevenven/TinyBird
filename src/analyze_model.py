@@ -492,7 +492,7 @@ def compute_lift_matrix(loss_matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray
         baseline = float(np.mean(vals))
         expected[delta] = baseline
         for start, last in coords:
-            lift[start, last] = baseline - loss_matrix[start, last]
+            lift[start, last] = loss_matrix[start, last] - baseline
     return lift, expected
 
 
@@ -940,9 +940,9 @@ def main():
         lift_means["all"] = add_heatmap(
             lift_np,
             'Lift Heatmap – Reconstruction (all channels)',
-            'Lift (expected - actual)',
+            'Lift (actual - expected)',
             'lift_all',
-            'Negative lift (blue) = better-than-expected loss. Positive lift (red) = worse-than-expected.',
+            'Negative lift (blue) = actual loss lower than expected (good). Positive lift (red) = worse than expected.',
             cmap_name='coolwarm',
             center_zero=True,
         )
@@ -950,9 +950,9 @@ def main():
             lift_means[f"ch{ch_idx}"] = add_heatmap(
                 lift_ch_np[ch_idx],
                 'Lift Heatmap – Reconstruction',
-                'Lift (expected - actual)',
+                'Lift (actual - expected)',
                 'lift',
-                'Negative lift (blue) = better-than-expected loss. Positive lift (red) = worse-than-expected.',
+                'Negative lift (blue) = actual loss lower than expected (good). Positive lift (red) = worse than expected.',
                 cmap_name='coolwarm',
                 center_zero=True,
                 per_channel=True,
