@@ -417,12 +417,11 @@ def process_file(model, dataset, index, device):
         )
         dt_mat = torch.full((n_valid_chirps, n_valid_chirps), float('nan'), device=device)
         lt_mat = torch.full((n_valid_chirps, n_valid_chirps), float('nan'), device=device)
-        total_jobs = sum(max(0, (n_valid_chirps - start_block - 1)) for start_block in range(n_valid_chirps))
-        total_jobs = max(total_jobs, 1)
+        total_jobs = max((n_valid_chirps - 1) * (n_valid_chirps - 1), 1)
         print(f"\nComputing losses/dt/lt for {losses_reconstruction.numel()} (rows × starts)...")
         with tqdm(total=total_jobs, desc="Computing losses/dt/lt") as pbar:
-            for start_block in range(0, n_valid_chirps - 1):
-                for last_block in range(start_block + 1, n_valid_chirps):
+            for last_block in range(1, n_valid_chirps):
+                for start_block in range(0, n_valid_chirps - 1):
                     with torch.no_grad():
                         loss_reconstruction, channel_losses, dt_val, lt_val, *_ = compute_loss(
                             model, x, x_i, N, start_block, last_block, x_dt, x_lt
@@ -482,8 +481,8 @@ def compute_lift_matrix(loss_matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray
     for delta in range(1, n):
         vals = []
         coords = []
-        for start in range(0, n - delta):
-            last = start + delta
+        for start in range(0, n):
+            last = (start + delta) % n
             val = loss_matrix[start, last]
             if np.isfinite(val):
                 vals.append(val)
