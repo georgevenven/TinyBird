@@ -530,12 +530,14 @@ def build_last_block_profiles(loss_matrix: np.ndarray) -> np.ndarray:
     return profiles
 
 
-def select_highlight_profiles(loss_matrix: np.ndarray, expected_curve: np.ndarray, expected_std: np.ndarray) -> dict:
+def select_highlight_profiles(
+    loss_matrix: np.ndarray, expected_curve: np.ndarray, expected_std: np.ndarray
+) -> list[tuple[str, np.ndarray, str]]:
     profiles = build_last_block_profiles(loss_matrix)
     lift_profiles = profiles - expected_curve[np.newaxis, :]
     mean_lift = np.nanmean(lift_profiles[:, 1:], axis=1)
     if not np.isfinite(mean_lift).any():
-        return {}
+        return []
     best_idx = int(np.nanargmin(mean_lift))
     worst_idx = int(np.nanargmax(mean_lift))
     avg_std = float(np.nanmean(expected_std[1:]))
@@ -545,15 +547,15 @@ def select_highlight_profiles(loss_matrix: np.ndarray, expected_curve: np.ndarra
         idx = int(np.nanargmin(diff))
         return idx
 
-    better_idx = closest(-avg_std)
-    worse_idx = closest(avg_std)
+    better_idx = closest(-avg_std) if np.isfinite(avg_std) else best_idx
+    worse_idx = closest(avg_std) if np.isfinite(avg_std) else worst_idx
 
-    return {
-        f"best (last={best_idx})": profiles[best_idx],
-        f"worst (last={worst_idx})": profiles[worst_idx],
-        f"~ -1σ (last={better_idx})": profiles[better_idx],
-        f"~ +1σ (last={worse_idx})": profiles[worse_idx],
-    }
+    return [
+        (f"best (last={best_idx})", profiles[best_idx], "better_dark"),
+        (f"~ -1σ (last={better_idx})", profiles[better_idx], "better_light"),
+        (f"~ +1σ (last={worse_idx})", profiles[worse_idx], "worse_light"),
+        (f"worst (last={worst_idx})", profiles[worst_idx], "worse_dark"),
+    ]
 
 
 def plot_expected_curve(expected_curve, expected_std, highlight_profiles, title, filename, index, images_dir, tag):
@@ -564,14 +566,26 @@ def plot_expected_curve(expected_curve, expected_std, highlight_profiles, title,
         return None
     values = expected_curve[mask]
     fig, ax = plt.subplots(figsize=(10, 4))
-    ax.plot(lengths, values, marker="o", linewidth=2, label="Expected loss")
+    ax.plot(lengths, values, marker="o", linewidth=2, color='black', label="Expected loss")
     if expected_std is not None:
         std_vals = expected_std[mask]
         ax.fill_between(lengths, values - std_vals, values + std_vals, alpha=0.2, color='gray', label="±1 std")
     if highlight_profiles:
-        for label, profile in highlight_profiles.items():
+        color_map = {
+            "better_dark": "#1f77b4",
+            "better_light": "#87cefa",
+            "worse_light": "#ffa500",
+            "worse_dark": "#d62728",
+        }
+        for label, profile, category in highlight_profiles:
             prof_vals = profile[mask]
-            ax.plot(lengths, prof_vals, linewidth=1.5, label=label)
+            ax.plot(
+                lengths,
+                prof_vals,
+                linewidth=1.6,
+                color=color_map.get(category, "#666666"),
+                label=label,
+            )
     ax.set_xlabel("Context length (Δ = last - start)")
     ax.set_ylabel("Expected loss (MSE)")
     ax.set_title(f"{title}\nIndex {index}, File: {filename}")
@@ -596,11 +610,21 @@ def plot_block_lift_summary(lift_matrix, filename, index, images_dir, title_pref
         return None
     mean_start = np.where(valid_mask, mean_start, np.nan)
     fig, ax = plt.subplots(figsize=(12, 4))
-    ax.plot(mean_start, linewidth=2)
+    x = np.arange(mean_start.shape[0])
+    ax.plot(x, mean_start, linewidth=2, marker='o', markersize=3)
     ax.set_xlabel("Block index (start_block)")
-    ax.set_ylabel("Average lift (expected - actual)")
+    ax.set_ylabel("Average lift (actual - expected)")
     ax.set_title(f"{title_prefix} Block Lift – Index {index}, File: {filename}")
     ax.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
+    finite_vals = mean_start[valid_mask]
+    if finite_vals.size:
+        limit = np.nanmax(np.abs(finite_vals))
+        if np.isfinite(limit) and limit > 0:
+            ax.set_ylim(-limit, limit)
+    ax.axhline(0.0, color='black', linewidth=1.0, linestyle='--', alpha=0.7)
+    if mean_start.shape[0] > 1:
+        step = max(1, mean_start.shape[0] // 12)
+        ax.set_xticks(np.arange(0, mean_start.shape[0], step))
     out_path = os.path.join(images_dir, f"block_lift_{title_prefix.lower()}_{index}_{filename}.png")
     fig.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -614,6 +638,19 @@ def plot_block_lift_summary(lift_matrix, filename, index, images_dir, title_pref
     sorted_blocks = valid_indices[np.argsort(mean_start[valid_mask])]
     best = sorted_blocks[::-1][:5]
     worst = sorted_blocks[:5]
+    highlight_indices = np.unique(np.concatenate([best, worst]))
+    ax.scatter(highlight_indices, mean_start[highlight_indices], color='black', s=40, zorder=5)
+    for idx in highlight_indices:
+        val = mean_start[idx]
+        ax.text(
+            idx,
+            val,
+            str(int(idx)),
+            fontsize=7,
+            fontweight='bold',
+            ha='center',
+            va='bottom' if val >= 0 else 'top',
+        )
     print("Top lift blocks:", [(int(idx), float(mean_start[idx])) for idx in best])
     print("Lowest lift blocks:", [(int(idx), float(mean_start[idx])) for idx in worst])
     return out_path
@@ -627,11 +664,26 @@ def plot_mean_scatter(row_mean, col_mean, filename, index, images_dir, tag="scat
     xs = row_mean[valid]
     ys = col_mean[valid]
     fig, ax = plt.subplots(figsize=(6, 6))
-    colors = np.linspace(0, 1, len(xs))
-    scatter = ax.scatter(xs, ys, alpha=0.9, s=30, c=colors, cmap='viridis', edgecolor='none')
-    for blk, xv, yv in zip(indices, xs, ys):
-        txt = ax.text(xv, yv, str(int(blk)), fontsize=6, color='black', ha='center', va='center')
-        txt.set_bbox(dict(facecolor='white', alpha=0.6, edgecolor='none', pad=0.5))
+    norm = (indices - indices.min()) / max(1, (indices.max() - indices.min()))
+    scatter = ax.scatter(xs, ys, alpha=0.9, s=30, c=norm, cmap='viridis', edgecolor='none')
+    distances = np.abs(xs) + np.abs(ys)
+    extreme_mask = np.zeros_like(distances, dtype=bool)
+    if distances.size:
+        topk = min(10, distances.size)
+        extreme_indices = np.argpartition(distances, -topk)[-topk:]
+        extreme_mask[extreme_indices] = True
+    for idx_pt, (blk, xv, yv) in enumerate(zip(indices, xs, ys)):
+        txt = ax.text(
+            xv,
+            yv,
+            str(int(blk)),
+            fontsize=6,
+            color='black',
+            ha='center',
+            va='center',
+            fontweight='bold' if extreme_mask[idx_pt] else 'normal',
+        )
+        txt.set_bbox(dict(facecolor='white', alpha=0.65, edgecolor='none', pad=0.5))
     x_limit = max(abs(xs).max(), 1e-6)
     y_limit = max(abs(ys).max(), 1e-6)
     ax.set_xlim(-x_limit, x_limit)
@@ -645,7 +697,17 @@ def plot_mean_scatter(row_mean, col_mean, filename, index, images_dir, tag="scat
         "Left side: blocks that reduce others' loss. Bottom: blocks that are easy to predict."
     )
     legend_elements, legend_labels = scatter.legend_elements(num=6)
-    ax.legend(legend_elements, legend_labels, title="Block index bins", loc="upper left", fontsize=7)
+    sample_blocks = np.linspace(indices.min(), indices.max(), num=min(8, len(indices)), dtype=int)
+    sample_blocks = np.unique(sample_blocks)
+    legend_handles = []
+    legend_labels = []
+    from matplotlib.lines import Line2D
+    cmap = plt.get_cmap('viridis')
+    for blk in sample_blocks:
+        norm_val = (blk - indices.min()) / max(1, (indices.max() - indices.min()))
+        legend_handles.append(Line2D([0], [0], marker='o', color='none', markerfacecolor=cmap(norm_val), markersize=6))
+        legend_labels.append(f"last={blk}")
+    ax.legend(legend_handles, legend_labels, title="Block index", loc="upper left", fontsize=7)
     out_path = os.path.join(images_dir, f"mean_scatter_{tag}_{index}_{filename}.png")
     fig.tight_layout()
     fig.savefig(out_path, dpi=300, bbox_inches='tight')
@@ -982,7 +1044,7 @@ def main():
             'Loss (MSE)',
             'loss_recon',
             'NaN = black; low = green; high = red. Pink dots mark the start_block giving the lowest loss for each last_block.',
-            cmap_name='coolwarm_r',
+            cmap_name='coolwarm',
         )
         for ch_idx in range(recon_ch_np.shape[0]):
             add_heatmap(
@@ -991,7 +1053,7 @@ def main():
                 'Loss (MSE)',
                 'loss_recon',
                 f'Channel {ch_idx} masked-loss matrix.',
-                cmap_name='coolwarm_r',
+                cmap_name='coolwarm',
                 per_channel=True,
                 ch_idx=ch_idx,
             )
