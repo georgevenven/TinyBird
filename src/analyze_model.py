@@ -530,6 +530,23 @@ def build_last_block_profiles(loss_matrix: np.ndarray) -> np.ndarray:
     return profiles
 
 
+def compute_best_loss_curve(loss_matrix: np.ndarray) -> np.ndarray:
+    """
+    Returns the lowest achievable loss per last_block (column-wise minima over start_block).
+    Matches the "best context" series in the line charts.
+    """
+    if loss_matrix.ndim != 2:
+        raise ValueError("Expected a 2D loss matrix (start_block x last_block).")
+    _, cols = loss_matrix.shape
+    best_loss = np.full(cols, np.nan, dtype=float)
+    for last in range(cols):
+        column = loss_matrix[:, last]
+        finite = column[np.isfinite(column)]
+        if finite.size:
+            best_loss[last] = float(np.min(finite))
+    return best_loss
+
+
 def select_highlight_profiles(
     loss_matrix: np.ndarray, expected_curve: np.ndarray, expected_std: np.ndarray
 ) -> list[tuple[str, np.ndarray, str]]:
@@ -656,13 +673,13 @@ def plot_block_lift_summary(lift_matrix, filename, index, images_dir, title_pref
     return out_path
 
 
-def plot_mean_scatter(row_mean, col_min, filename, index, images_dir, tag="scatter"):
-    valid = np.isfinite(row_mean) & np.isfinite(col_min)
+def plot_mean_scatter(row_mean, best_loss_curve, filename, index, images_dir, tag="scatter"):
+    valid = np.isfinite(row_mean) & np.isfinite(best_loss_curve)
     if not valid.any():
         return None
     indices = np.where(valid)[0]
     xs = row_mean[valid]
-    ys = col_min[valid]
+    ys = best_loss_curve[valid]
     fig, ax = plt.subplots(figsize=(6, 6))
     norm = (indices - indices.min()) / max(1, (indices.max() - indices.min()))
     scatter = ax.scatter(xs, ys, alpha=0.9, s=30, c=norm, cmap='viridis', edgecolor='none')
@@ -685,13 +702,19 @@ def plot_mean_scatter(row_mean, col_min, filename, index, images_dir, tag="scatt
         )
         txt.set_bbox(dict(facecolor='white', alpha=0.65, edgecolor='none', pad=0.5))
     x_limit = max(abs(xs).max(), 1e-6)
-    y_limit = max(abs(ys).max(), 1e-6)
+    y_mean = float(ys.mean())
+    max_dev = float(np.max(np.abs(ys - y_mean))) if ys.size else 0.0
+    if not np.isfinite(max_dev) or max_dev == 0.0:
+        max_dev = max(abs(y_mean) * 0.05, 1e-6)
+    y_min = y_mean - max_dev
+    y_max = y_mean + max_dev
     ax.set_xlim(-x_limit, x_limit)
-    ax.set_ylim(-y_limit, y_limit)
+    ax.set_ylim(y_min, y_max)
+    ax.axhline(y_mean, color='gray', linewidth=1.0, linestyle='--', alpha=0.8, label='_nolegend_')
     ax.axhline(0, color='gray', linewidth=0.8, linestyle='--')
     ax.axvline(0, color='gray', linewidth=0.8, linestyle='--')
     ax.set_xlabel('Mean loss per start_block (context provider)')
-    ax.set_ylabel('Lowest loss per last_block (prediction target)')
+    ax.set_ylabel('Lowest loss per last_block (best context)')
     ax.set_title(
         "Block influence vs difficulty\n"
         "Left side: blocks that reduce others' loss. Bottom: blocks that are easy to predict."
@@ -843,6 +866,12 @@ def main():
 
         lift_np, expected_curve, expected_std, lift_ch_np, expected_curve_ch, expected_std_ch = compute_lift_for_channels(
             recon_np, recon_ch_np
+        )
+        best_loss_all = compute_best_loss_curve(recon_np)
+        best_loss_channels = (
+            np.stack([compute_best_loss_curve(recon_ch_np[ch_idx]) for ch_idx in range(recon_ch_np.shape[0])], axis=0)
+            if recon_ch_np.size
+            else np.empty((0, recon_np.shape[1]))
         )
 
         def plot_heatmap(
@@ -1105,15 +1134,17 @@ def main():
             )
 
         col_min_all, row_mean_all = lift_means.get("all", (None, None))
-        if col_min_all is not None:
+        if row_mean_all is not None:
             plot_block_lift_summary(lift_np, filename, i, images_dir, title_prefix="All")
-            plot_mean_scatter(row_mean_all, col_min_all, filename, i, images_dir, tag="lift_all")
+            plot_mean_scatter(row_mean_all, best_loss_all, filename, i, images_dir, tag="lift_all")
         for ch_idx in range(lift_ch_np.shape[0]):
             means = lift_means.get(f"ch{ch_idx}")
             if means is None:
                 continue
             col_min_ch, row_mean_ch = means
-            plot_mean_scatter(row_mean_ch, col_min_ch, filename, i, images_dir, tag=f"lift_ch{ch_idx}")
+            best_loss_ch = best_loss_channels[ch_idx] if ch_idx < best_loss_channels.shape[0] else None
+            if best_loss_ch is not None:
+                plot_mean_scatter(row_mean_ch, best_loss_ch, filename, i, images_dir, tag=f"lift_ch{ch_idx}")
         plot_heatmap(
             dt_np,
             title='Δt Heatmap – gap between blocks',
@@ -1142,25 +1173,20 @@ def main():
             x = np.arange(cols)
 
             # Prepare vectors filled with NaN. Matplotlib will skip NaNs.
-            min_loss = np.full(cols, np.nan, dtype=float)
+            min_loss = compute_best_loss_curve(all_np)
             maxctx_loss = np.full(cols, np.nan, dtype=float)  # start = last+1
             len10_loss = np.full(cols, np.nan, dtype=float)  # start = last-10
 
-            # Column-wise computation
+            # Column-wise computation for the fixed context baselines
             for last in range(cols):
-                col = all_np[:, last]
-                # (1) lowest achieved loss for this last_block
-                if np.isfinite(col).any():
-                    min_loss[last] = np.nanmin(col)
-
-                # (2) largest context: start_block = last + 1
+                # largest context: start_block = last + 1
                 sb = last + 1
                 if 0 <= sb < rows:
                     val = all_np[sb, last]
                     if np.isfinite(val):
                         maxctx_loss[last] = val
 
-                # (3) fixed context length 10: start_block = last - 10
+                # fixed context length 10: start_block = last - 10
                 sb2 = last - 10
                 if 0 <= sb2 < rows:
                     val2 = all_np[sb2, last]
