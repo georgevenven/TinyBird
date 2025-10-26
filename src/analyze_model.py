@@ -656,13 +656,13 @@ def plot_block_lift_summary(lift_matrix, filename, index, images_dir, title_pref
     return out_path
 
 
-def plot_mean_scatter(row_mean, col_mean, filename, index, images_dir, tag="scatter"):
-    valid = np.isfinite(row_mean) & np.isfinite(col_mean)
+def plot_mean_scatter(row_mean, col_min, filename, index, images_dir, tag="scatter"):
+    valid = np.isfinite(row_mean) & np.isfinite(col_min)
     if not valid.any():
         return None
     indices = np.where(valid)[0]
     xs = row_mean[valid]
-    ys = col_mean[valid]
+    ys = col_min[valid]
     fig, ax = plt.subplots(figsize=(6, 6))
     norm = (indices - indices.min()) / max(1, (indices.max() - indices.min()))
     scatter = ax.scatter(xs, ys, alpha=0.9, s=30, c=norm, cmap='viridis', edgecolor='none')
@@ -691,7 +691,7 @@ def plot_mean_scatter(row_mean, col_mean, filename, index, images_dir, tag="scat
     ax.axhline(0, color='gray', linewidth=0.8, linestyle='--')
     ax.axvline(0, color='gray', linewidth=0.8, linestyle='--')
     ax.set_xlabel('Mean loss per start_block (context provider)')
-    ax.set_ylabel('Mean loss per last_block (prediction target)')
+    ax.set_ylabel('Lowest loss per last_block (prediction target)')
     ax.set_title(
         "Block influence vs difficulty\n"
         "Left side: blocks that reduce others' loss. Bottom: blocks that are easy to predict."
@@ -1000,7 +1000,6 @@ def main():
             ax_hm.tick_params(axis='both', direction='in')
 
             # Column/row mean plots
-            col_mean = np.nanmean(mat_np, axis=0)
             row_mean = np.nanmean(mat_np, axis=1)
             col_min = np.nanmin(mat_np, axis=0)
             ax_col_mean = divider.append_axes("top", size="8%", pad=0.7, sharex=ax_hm)
@@ -1024,7 +1023,7 @@ def main():
             plt.close(fig_hm)
 
             print(f"Saved: {out_path}")
-            return col_mean, row_mean
+            return col_min, row_mean
 
         def add_heatmap(mat, title, cbar_label, tag, note, cmap_name='RdYlGn_r', center_zero=False, per_channel=False, ch_idx=None):
             return plot_heatmap(
@@ -1105,16 +1104,16 @@ def main():
                 tag=f"ch{ch_idx}",
             )
 
-        col_mean_all, row_mean_all = lift_means.get("all", (None, None))
-        if col_mean_all is not None:
+        col_min_all, row_mean_all = lift_means.get("all", (None, None))
+        if col_min_all is not None:
             plot_block_lift_summary(lift_np, filename, i, images_dir, title_prefix="All")
-            plot_mean_scatter(row_mean_all, col_mean_all, filename, i, images_dir, tag="lift_all")
+            plot_mean_scatter(row_mean_all, col_min_all, filename, i, images_dir, tag="lift_all")
         for ch_idx in range(lift_ch_np.shape[0]):
             means = lift_means.get(f"ch{ch_idx}")
             if means is None:
                 continue
-            col_mean_ch, row_mean_ch = means
-            plot_mean_scatter(row_mean_ch, col_mean_ch, filename, i, images_dir, tag=f"lift_ch{ch_idx}")
+            col_min_ch, row_mean_ch = means
+            plot_mean_scatter(row_mean_ch, col_min_ch, filename, i, images_dir, tag=f"lift_ch{ch_idx}")
         plot_heatmap(
             dt_np,
             title='Δt Heatmap – gap between blocks',
