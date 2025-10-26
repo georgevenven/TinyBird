@@ -623,12 +623,15 @@ def plot_mean_scatter(row_mean, col_mean, filename, index, images_dir, tag="scat
     valid = np.isfinite(row_mean) & np.isfinite(col_mean)
     if not valid.any():
         return None
+    indices = np.where(valid)[0]
     xs = row_mean[valid]
     ys = col_mean[valid]
     fig, ax = plt.subplots(figsize=(6, 6))
-    ax.scatter(xs, ys, alpha=0.7, s=20, edgecolor='none', color='tab:blue')
-    for blk, xv, yv in zip(np.where(valid)[0], xs, ys):
-        ax.text(xv, yv, str(int(blk)), fontsize=6, color='black', ha='center', va='center')
+    colors = np.linspace(0, 1, len(xs))
+    scatter = ax.scatter(xs, ys, alpha=0.9, s=30, c=colors, cmap='viridis', edgecolor='none')
+    for blk, xv, yv in zip(indices, xs, ys):
+        txt = ax.text(xv, yv, str(int(blk)), fontsize=6, color='black', ha='center', va='center')
+        txt.set_bbox(dict(facecolor='white', alpha=0.6, edgecolor='none', pad=0.5))
     x_limit = max(abs(xs).max(), 1e-6)
     y_limit = max(abs(ys).max(), 1e-6)
     ax.set_xlim(-x_limit, x_limit)
@@ -641,6 +644,8 @@ def plot_mean_scatter(row_mean, col_mean, filename, index, images_dir, tag="scat
         "Block influence vs difficulty\n"
         "Left side: blocks that reduce others' loss. Bottom: blocks that are easy to predict."
     )
+    legend_elements, legend_labels = scatter.legend_elements(num=6)
+    ax.legend(legend_elements, legend_labels, title="Block index bins", loc="upper left", fontsize=7)
     out_path = os.path.join(images_dir, f"mean_scatter_{tag}_{index}_{filename}.png")
     fig.tight_layout()
     fig.savefig(out_path, dpi=300, bbox_inches='tight')
@@ -935,9 +940,10 @@ def main():
             # Column/row mean plots
             col_mean = np.nanmean(mat_np, axis=0)
             row_mean = np.nanmean(mat_np, axis=1)
+            col_min = np.nanmin(mat_np, axis=0)
             ax_col_mean = divider.append_axes("top", size="8%", pad=0.7, sharex=ax_hm)
-            ax_col_mean.plot(np.arange(mat_np.shape[1]), col_mean, color="black", linewidth=1.5)
-            ax_col_mean.set_ylabel("Mean loss per last_block", fontsize=8, rotation=0, labelpad=25)
+            ax_col_mean.plot(np.arange(mat_np.shape[1]), col_min, color="black", linewidth=1.5)
+            ax_col_mean.set_ylabel("Lowest loss per last_block", fontsize=8, rotation=0, labelpad=25)
             ax_col_mean.tick_params(axis='x', labelbottom=False)
             ax_col_mean.grid(True, alpha=0.2)
             ax_row_mean = divider.append_axes("right", size="8%", pad=0.55, sharey=ax_hm)
@@ -976,7 +982,7 @@ def main():
             'Loss (MSE)',
             'loss_recon',
             'NaN = black; low = green; high = red. Pink dots mark the start_block giving the lowest loss for each last_block.',
-            cmap_name='RdYlGn_r',
+            cmap_name='coolwarm_r',
         )
         for ch_idx in range(recon_ch_np.shape[0]):
             add_heatmap(
@@ -985,7 +991,7 @@ def main():
                 'Loss (MSE)',
                 'loss_recon',
                 f'Channel {ch_idx} masked-loss matrix.',
-                cmap_name='RdYlGn_r',
+                cmap_name='coolwarm_r',
                 per_channel=True,
                 ch_idx=ch_idx,
             )
