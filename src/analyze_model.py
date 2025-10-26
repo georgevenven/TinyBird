@@ -129,7 +129,7 @@ def prepare_sample(model, dataset, index, device):
     x, x_i, x_l, _, N, filename = dataset[index]
     x = x.unsqueeze(0).float().to(device)
     x_i = x_i.unsqueeze(0).to(device)
-    x_l = x_l.unsqueeze(0).to(device)
+    x_l = x_l.unsqueeze(0).to(device).float()
     N = torch.tensor([N], dtype=torch.long, device=device)
 
     # Compute chirp start/end/dt/lt
@@ -138,13 +138,13 @@ def prepare_sample(model, dataset, index, device):
     x_dt = torch.cat([torch.tensor([0.0], device=device), starts[1:] - ends[:-1]])
     x_lt = ends - starts
 
-    x, x_i, x_l = model.compactify_data(x.clone(), x_i.clone(), N.clone(), xl=x_l)
     x_l_mean = process_xl(x_i, x_l, N, device)
+    x, x_i = model.compactify_data(x.clone(), x_i.clone(), N.clone())
 
-    return x, x_i, x_l, x_l_mean, x_dt, x_lt, N, filename
+    return x, x_i, x_l_mean, x_dt, x_lt, N, filename
 
 
-def compute_loss(model, x, x_i, x_l, N, start_block, last_block, x_dt, x_lt):
+def compute_loss(model, x, x_i, N, start_block, last_block, x_dt, x_lt):
     """
     Compute masked MSE loss for a given block configuration.
     Returns: (loss, xs, x_is, bool_mask, pred, mblock, indices)
@@ -164,32 +164,12 @@ def compute_loss(model, x, x_i, x_l, N, start_block, last_block, x_dt, x_lt):
         return nan, nan, nan, dt, lt, None, None, None, None, None, None
 
     try:
-        xs, x_is, x_ls = model.sample_data_indices(x.clone(), x_i.clone(), N.clone(), indices, xl=x_l)
+        xs, x_is = model.sample_data_indices(x.clone(), x_i.clone(), N.clone(), indices)
         W = xs.shape[-1]
-        h, idx_restore, bool_mask, T, x_l_tok_cond = model.forward_encoder(xs, x_is, xl=x_ls, mblock=mblock)
-        pred, logits_label = model.forward_decoder(h, idx_restore, T, xl_tok_cond=x_l_tok_cond, W=W)
-        reconstruction_loss = model.loss_mse(xs, pred, bool_mask)
-        label_loss = model.loss_label(logits_label, x_ls, bool_mask, W)
-
-
-        B, Ttok, C = logits_label.shape
-        assert B == 1 and C == 2, f"Unexpected logits shape {logits_label.shape}"
-        Htok = Ttok // W
-        logits_col = logits_label.view(B, Htok, W, C).mean(dim=1)[0]  # (W, 2)
-
-        # Masked block span
-        s = int(x_is[0, -1, 0].item())
-        e = int(x_is[0, -1, 1].item())
-
-        # === PREDICTED CLASS (0/1) FOR THE MASKED BLOCK ===
-        # Aggregate logits over the masked span and argmax → 0/1
-        logits_block = logits_col[s:e, :]                   # (L, 2)
-        logits_sum   = logits_block.sum(dim=0)              # (2,)
-        pred_class   = int(torch.argmax(logits_sum).item()) # 0 or 1
-
-        pred_masked_block = torch.tensor(float(pred_class), device=x.device)
-
-        return reconstruction_loss, label_loss, pred_masked_block, dt, lt, xs, x_is, bool_mask, pred, mblock, indices
+        h, idx_restore, bool_mask, T = model.forward_encoder(xs, x_is, mblock=mblock)
+        pred = model.forward_decoder(h, idx_restore, T)
+        reconstruction_loss, channel_losses = model.loss_mse(xs, pred, bool_mask, return_per_channel=True)
+        return reconstruction_loss, channel_losses, dt, lt, xs, x_is, bool_mask, pred, mblock, indices
 
     except RuntimeError as e:
         msg = str(e).lower()
@@ -204,7 +184,7 @@ def compute_loss(model, x, x_i, x_l, N, start_block, last_block, x_dt, x_lt):
             raise
 
 
-def save_reconstruction(model, x, x_i, x_l, N, last_block, x_dt, x_lt, *, filename, index, images_dir='images'):
+def save_reconstruction(model, x, x_i, N, last_block, x_dt, x_lt, *, filename, index, images_dir='images'):
     """
     Save a side-by-side reconstruction visualization for a given block configuration.
     Returns: (output_path, loss)
@@ -228,9 +208,9 @@ def save_reconstruction(model, x, x_i, x_l, N, last_block, x_dt, x_lt, *, filena
         # If anything goes wrong with cache logic, silently fall back
         best_start = default_start
 
-    loss, loss_label, labels_pred_chirp, dt, lt, xs, x_is, bool_mask, pred, mblock, indices = compute_loss(
-        model, x, x_i, x_l, N, start_block=best_start, last_block=last_block, x_dt=x_dt, x_lt=x_lt
-    )
+        loss, _, dt, lt, xs, x_is, bool_mask, pred, mblock, indices = compute_loss(
+            model, x, x_i, N, start_block=best_start, last_block=last_block, x_dt=x_dt, x_lt=x_lt
+        )
 
     if xs is None or pred is None or bool_mask is None:
         return None, loss
@@ -421,19 +401,20 @@ def save_reconstruction(model, x, x_i, x_l, N, last_block, x_dt, x_lt, *, filena
 
 
 def process_file(model, dataset, index, device):
-    x, x_i, x_l, x_l_mean, x_dt, x_lt, N, filename = prepare_sample(model, dataset, index, device)
+    x, x_i, x_l_mean, x_dt, x_lt, N, filename = prepare_sample(model, dataset, index, device)
 
     print(f"  Filename: {filename}")
     print(f"  Spectrogram shape: {x.shape}")
     print(f"  Chirp intervals shape: {x_i.shape}")
-    print(f"  Chirp labels shape: {x_l.shape}")
     print(f"  Number of valid chirps: {N.item()}")
 
-    def compute_losses(x, x_i, x_l, N, x_dt, x_lt):
+    def compute_losses(x, x_i, N, x_dt, x_lt):
         n_valid_chirps = N.max().item()
+        channels = int(x.shape[1])
         losses_reconstruction = torch.full((n_valid_chirps, n_valid_chirps), float('nan'), device=device)
-        losses_label = torch.full((n_valid_chirps, n_valid_chirps), float('nan'), device=device)
-        labels_preds = torch.full((n_valid_chirps, n_valid_chirps), float('nan'), device=device)
+        losses_reconstruction_channels = torch.full(
+            (channels, n_valid_chirps, n_valid_chirps), float('nan'), device=device
+        )
         dt_mat = torch.full((n_valid_chirps, n_valid_chirps), float('nan'), device=device)
         lt_mat = torch.full((n_valid_chirps, n_valid_chirps), float('nan'), device=device)
         print(f"\nComputing losses/dt/lt for {losses_reconstruction.numel()} (rows × starts)...")
@@ -441,39 +422,47 @@ def process_file(model, dataset, index, device):
             for last_block in range(1, n_valid_chirps):
                 for start_block in range(0, n_valid_chirps - 1):
                     with torch.no_grad():
-                        loss_reconstruction, loss_label, labels_pred_chirp, dt_val, lt_val, *_ = compute_loss(
-                            model, x, x_i, x_l, N, start_block, last_block, x_dt, x_lt
+                        loss_reconstruction, channel_losses, dt_val, lt_val, *_ = compute_loss(
+                            model, x, x_i, N, start_block, last_block, x_dt, x_lt
                         )
                     losses_reconstruction[start_block, last_block] = (
                         float('nan') if torch.isnan(loss_reconstruction) else loss_reconstruction
                     )
-                    losses_label[start_block, last_block] = float('nan') if torch.isnan(loss_label) else loss_label
-                    labels_preds[start_block, last_block] = (
-                        float('nan') if torch.isnan(labels_pred_chirp) else labels_pred_chirp
-                    )
+                    losses_reconstruction_channels[:, start_block, last_block] = channel_losses.squeeze(0)
                     dt_mat[start_block, last_block] = dt_val
                     lt_mat[start_block, last_block] = lt_val
                     pbar.update(1)
-        return losses_reconstruction, losses_label, labels_preds, dt_mat, lt_mat
+        return losses_reconstruction, losses_reconstruction_channels, dt_mat, lt_mat
 
     cached = load_from_cache(filename)
     if cached is not None:
         print(f"Loaded cached matrices for {filename}")
-        all_losses_reconstruction, all_losses_label, all_preds_label, all_dt, all_lt = cached
+        cached_valid = isinstance(cached, tuple) and len(cached) in (3, 4, 5)
+        if cached_valid and len(cached) == 4:
+            all_losses_reconstruction, all_losses_channels, all_dt, all_lt = cached
+        elif cached_valid and len(cached) == 3:
+            # lacks per-channel data; force recompute
+            cached_valid = False
+        elif cached_valid and len(cached) == 5:
+            all_losses_reconstruction, _, _, all_dt, all_lt = cached
+            cached_valid = False
+        if not cached_valid:
+            cached = None
     else:
-        all_losses_reconstruction, all_losses_label, all_preds_label, all_dt, all_lt = compute_losses(
-            x, x_i, x_l, N, x_dt, x_lt
+        cached = None
+
+    if cached is None:
+        all_losses_reconstruction, all_losses_channels, all_dt, all_lt = compute_losses(
+            x, x_i, N, x_dt, x_lt
         )
-        save_to_cache(filename, (all_losses_reconstruction, all_losses_label, all_preds_label, all_dt, all_lt))
+        save_to_cache(filename, (all_losses_reconstruction, all_losses_channels, all_dt, all_lt))
 
     return (
         all_losses_reconstruction,
-        all_losses_label,
-        all_preds_label,
+        all_losses_channels,
         all_dt,
         all_lt,
         filename,
-        x_l,
         x_l_mean,
         x_dt,
         x_lt,
@@ -548,7 +537,7 @@ def main():
 
         def run_reconstruction(i: int):
             print(f"\nLoading sample at index {i}")
-            x, x_i, x_l, x_l_mean, x_dt, x_lt, N, filename = prepare_sample(model, dataset, i, device)
+            x, x_i, x_l_mean, x_dt, x_lt, N, filename = prepare_sample(model, dataset, i, device)
 
             for last_block in range(args.start_block, args.last_block + 1):
                 print(f"Generating reconstruction for last_block={last_block}")
@@ -556,7 +545,6 @@ def main():
                     model,
                     x,
                     x_i,
-                    x_l,
                     N,
                     last_block=last_block,
                     x_dt=x_dt,
@@ -588,20 +576,17 @@ def main():
         print(f"\nLoading sample at index {i}")
         (
             all_losses_reconstruction,
-            all_losses_label,
-            all_preds_label,
+            all_losses_channels,
             all_dt,
             all_lt,
             filename,
-            x_l,
             x_l_mean,
             x_dt,
             x_lt,
         ) = process_file(model, dataset, i, device)
 
         recon_np = all_losses_reconstruction.detach().cpu().numpy()
-        label_np = all_losses_label.detach().cpu().numpy()
-        pred_np = all_preds_label.detach().cpu().numpy()
+        recon_ch_np = all_losses_channels.detach().cpu().numpy()  # (C, N, N)
         dt_np = all_dt.detach().cpu().numpy()
         lt_np = all_lt.detach().cpu().numpy()
 
@@ -623,18 +608,9 @@ def main():
             data_ma = np.ma.masked_invalid(mat_np)
 
             if cmap_name is None:
-                if tag == 'label_pred':
-                    # 0 → green, 1 → red
-                    from matplotlib.colors import ListedColormap
-                    cmap = ListedColormap(['#2ca02c', '#d62728']).copy()
-                    is_binary = True
-                else:
-                    cmap_name = 'RdYlGn_r' if tag.startswith('loss') else 'viridis'
-                    cmap = plt.get_cmap(cmap_name).copy()
-                    is_binary = False
-            else:
-                cmap = plt.get_cmap(cmap_name).copy()
-                is_binary = (tag == 'label_pred')
+                cmap_name = 'RdYlGn_r' if tag.startswith('loss') else 'viridis'
+            cmap = plt.get_cmap(cmap_name).copy()
+            is_binary = False
 
             cmap.set_bad(color='black')
 
@@ -732,24 +708,16 @@ def main():
             note='NaN = black; low = green; high = red. Sparse near diagonal due to windowing.',
             cmap_name='RdYlGn_r',
         )
-        plot_heatmap(
-            label_np,
-            title='Label Loss Heatmap',
-            cbar_label='Label Loss',
-            tag='loss_label',
-            labels_true_np=labels_true_np,
-            note='Per-block label loss for masked columns.',
-            cmap_name='RdYlGn_r',
-        )
-        plot_heatmap(
-            pred_np,
-            title='Label Prediction Heatmap',
-            cbar_label='Predicted class (0/1)',
-            tag='label_pred',
-            labels_true_np=labels_true_np,
-            note='Predicted class for masked block (last block in window).',
-            cmap_name=None,
-        )
+        for ch_idx in range(recon_ch_np.shape[0]):
+            plot_heatmap(
+                recon_ch_np[ch_idx],
+                title=f'Loss (MSE) Heatmap – Reconstruction (channel {ch_idx})',
+                cbar_label='Loss (MSE)',
+                tag=f'loss_recon_ch{ch_idx}',
+                labels_true_np=labels_true_np,
+                note=f'Channel {ch_idx} masked-loss matrix.',
+                cmap_name='RdYlGn_r',
+            )
         plot_heatmap(
             dt_np,
             title='Δt Heatmap – gap between blocks',
@@ -849,7 +817,6 @@ def main():
             print(f"Saved: {out_path}")
 
         plot_line_summaries(recon_np, x_dt_np, x_lt_np, filename, i, images_dir, title_prefix="Recon ")
-        plot_line_summaries(label_np, x_dt_np, x_lt_np, filename, i, images_dir, title_prefix="Label ")
 
     # If a single index is specified, only process that file; otherwise process all
     if args.index >= 0:

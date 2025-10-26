@@ -303,203 +303,56 @@ class Trainer:
     # --- Metrics & logging helpers -------------------------------------------------
     # ---------- Metrics & logging helpers (modular & concise) ----------
 
-# --- in Trainer ---------------------------------------------------------------
-
-    def _valid_label_eval_tensors(self, logits_label, x_l, bool_mask, W):
+    def _aggregate_val_metrics(self, items):
         """
-        Returns y_true, y_pred restricted to masked, non-separator columns.
-        Also returns 'acc' over those columns and a 'has_valid' flag.
-
-        logits_label: (B, W, 2)  # already pooled over rows
-        x_l:          (B, W)
-        bool_mask:    (B, H_true*W)  # token mask, True = masked
-        W:            int
+        Compute simple averages of validation losses across worker results.
         """
-        with torch.no_grad():
-            B, W2, C = logits_label.shape
-            assert W2 == W and C == 2, f"Expected (B,{W},2), got {tuple(logits_label.shape)}"
+        if not items:
+            return float('nan'), float('nan')
 
-            # Recover true H from the mask (not from logits_label)
-            Bm, Tmask = bool_mask.shape
-            assert Bm == B and (Tmask % W) == 0, f"bool_mask shape {tuple(bool_mask.shape)} not compatible with W={W}"
-            H_true = Tmask // W
+        loss_total_avg = float(torch.tensor([it["loss_total"] for it in items]).mean().item())
+        loss_recon_avg = float(torch.tensor([it["loss_recon"] for it in items]).mean().item())
+        return loss_total_avg, loss_recon_avg
 
-            # Per-column predictions
-            preds_col = logits_label.argmax(dim=-1)  # (B, W)
-
-            # Valid columns: masked anywhere across rows & not a separator in ground truth
-            masked_cols = bool_mask.view(B, H_true, W).any(dim=1)  # (B, W)
-            is_sep = (x_l == self.tinybird.sep_class_id)          # (B, W)
-            valid = masked_cols & (~is_sep)
-
-            if not valid.any():
-                return None, None, float("nan"), False
-
-            y_true = x_l[valid].long()
-            y_pred = preds_col[valid].long()
-            acc = (y_pred == y_true).float().mean().item()
-            return y_true, y_pred, acc, True
-
-
-    def _compute_label_metrics(self, logits_label, x_l, bool_mask, W):
+    def _log_losses(self, tag, step_num, loss_total, loss_recon):
         """
-        Metrics on masked, non-separator columns with logits_label shaped (B, W, 2).
-        """
-        y_true, y_pred, acc, has_valid = self._valid_label_eval_tensors(logits_label, x_l, bool_mask, W)
-        metrics = {
-            "has_valid": has_valid,
-            "acc": float("nan") if not has_valid else acc,
-            "pct_true1_pred1": float("nan"),
-            "pct_true0_pred0": float("nan"),
-            "y_true": None,
-            "y_pred": None,
-            # internal counts for weighted val averaging
-            "_n_valid": 0,
-            "_n_true1": 0,
-            "_n_true0": 0,
-            "_n_correct": 0,
-            "_n_correct1": 0,
-            "_n_correct0": 0,
-        }
-        if not has_valid:
-            return metrics
-
-        mask_true1 = (y_true == 1)
-        mask_true0 = (y_true == 0)
-
-        n_true1 = int(mask_true1.sum().item())
-        n_true0 = int(mask_true0.sum().item())
-        n_valid = int(y_true.numel())
-        n_correct  = int((y_pred == y_true).sum().item())
-        n_correct1 = int((y_pred[mask_true1] == 1).sum().item()) if n_true1 > 0 else 0
-        n_correct0 = int((y_pred[mask_true0] == 0).sum().item()) if n_true0 > 0 else 0
-
-        pct_true1_pred1 = n_correct1 / n_true1 if n_true1 > 0 else float("nan")
-        pct_true0_pred0 = n_correct0 / n_true0 if n_true0 > 0 else float("nan")
-
-        metrics.update({
-            "pct_true1_pred1": pct_true1_pred1,
-            "pct_true0_pred0": pct_true0_pred0,
-            "y_true": y_true.detach().cpu(),
-            "y_pred": y_pred.detach().cpu(),
-            "_n_valid": n_valid,
-            "_n_true1": n_true1,
-            "_n_true0": n_true0,
-            "_n_correct": n_correct,
-            "_n_correct1": n_correct1,
-            "_n_correct0": n_correct0,
-        })
-        return metrics
-
-    def _log_losses_and_metrics(self, tag, step_num, loss_total, loss_recon, loss_label, metrics):
-        """
-        Log scalar losses + requested percentages; keep the W&B confusion-matrix plot.
+        Log reconstruction objectives to TensorBoard/W&B with consistent tagging.
         """
         log_batch_shapes(
             f"{tag}",
             step_num,
             loss_total=float(loss_total),
             loss_recon=float(loss_recon),
-            loss_label=float(loss_label),
-            label_acc=float(metrics["acc"]) if metrics["acc"] == metrics["acc"] else 0.0,
-            pct_true1_pred1=float(metrics["pct_true1_pred1"])
-            if metrics["pct_true1_pred1"] == metrics["pct_true1_pred1"]
-            else 0.0,
-            pct_true0_pred0=float(metrics["pct_true0_pred0"])
-            if metrics["pct_true0_pred0"] == metrics["pct_true0_pred0"]
-            else 0.0,
         )
 
-        # Confusion matrix (pretty plot only; no raw counts)
-        try:
-            if metrics["has_valid"] and metrics["y_true"] is not None:
-                wandb.log(
-                    {
-                        f"{tag}/label_confmat": wandb.plot.confusion_matrix(
-                            probs=None,
-                            y_true=metrics["y_true"].tolist(),
-                            preds=metrics["y_pred"].tolist(),
-                            class_names=["class0", "class1"],
-                        )
-                    },
-                    step=int(step_num),
-                    commit=False,
-                )
-        except Exception:
-            pass
+        if self.writer is not None:
+            self.writer.add_scalar(f"{tag}/loss", float(loss_total), step_num)
+            self.writer.add_scalar(f"{tag}/loss_recon", float(loss_recon), step_num)
 
-    def _aggregate_val_metrics(self, items):
-        """
-        items: list of dicts, each with keys:
-        loss_total, loss_recon, loss_lbl, metrics (with internal *_count fields)
-        Returns: (loss_total_avg, loss_recon_avg, loss_lbl_avg, agg_metrics)
-        """
-        if not items:
-            return float('nan'), float('nan'), float('nan'), {
-                "has_valid": False, "acc": float('nan'),
-                "pct_true1_pred1": float('nan'), "pct_true0_pred0": float('nan'),
-                "y_true": None, "y_pred": None
-            }
-
-        # Loss averages
-        loss_total_avg = float(torch.tensor([it["loss_total"] for it in items]).mean().item())
-        loss_recon_avg = float(torch.tensor([it["loss_recon"] for it in items]).mean().item())
-        loss_lbl_avg   = float(torch.tensor([it["loss_lbl"]   for it in items]).mean().item())
-
-        # Counts for weighted averages
-        n_valid   = sum(it["metrics"]["_n_valid"]   for it in items)
-        n_correct = sum(it["metrics"]["_n_correct"] for it in items)
-        n_true1   = sum(it["metrics"]["_n_true1"]   for it in items)
-        n_true0   = sum(it["metrics"]["_n_true0"]   for it in items)
-        n_corr1   = sum(it["metrics"]["_n_correct1"] for it in items)
-        n_corr0   = sum(it["metrics"]["_n_correct0"] for it in items)
-
-        acc = (n_correct / n_valid) if n_valid > 0 else float('nan')
-        pct_true1_pred1 = (n_corr1 / n_true1) if n_true1 > 0 else float('nan')
-        pct_true0_pred0 = (n_corr0 / n_true0) if n_true0 > 0 else float('nan')
+        wandb.log(
+            {
+                f"{tag}/loss": float(loss_total),
+                f"{tag}/loss_recon": float(loss_recon),
+            },
+            step=int(step_num),
+            commit=False,
+        )
 
 
-        # For the W&B confusion matrix, aggregate across batches with a cap to keep payload small
-        y_true_list, y_pred_list = [], []
-        cap = 10_000  # max points to include in the plot
-        for it in items:
-            yt = it["metrics"]["y_true"]
-            yp = it["metrics"]["y_pred"]
-            if yt is None or yp is None:
-                continue
-            take = min(cap - len(y_true_list), len(yt))
-            if take <= 0:
-                break
-            y_true_list.extend(yt[:take].tolist())
-            y_pred_list.extend(yp[:take].tolist())
-
-        agg_metrics = {
-            "has_valid": n_valid > 0,
-            "acc": acc,
-            "pct_true1_pred1": pct_true1_pred1,
-            "pct_true0_pred0": pct_true0_pred0,
-            "y_true": torch.tensor(y_true_list) if y_true_list else None,
-            "y_pred": torch.tensor(y_pred_list) if y_pred_list else None,
-        }
-        return loss_total_avg, loss_recon_avg, loss_lbl_avg, agg_metrics
-
-
-    def _forward_encode_decode(self, x, x_i, N, x_l, step_num, is_training: bool, log_metrics: bool = True):
+    def _forward_encode_decode(self, x, x_i, N, step_num, is_training: bool, log_metrics: bool = True):
         """
         Runs the full forward path (data shaping → encoder/decoder → losses → metrics),
         logs batch shapes + losses/metrics, and returns losses for the caller.
 
         Returns:
-            loss_total, loss_recon, loss_lbl, H, W
+            loss_total, loss_recon, H, W
         """
-        # --- data shaping pipeline ---
-        x, x_i, x_l = self.tinybird.compactify_data(x, x_i, N, xl=x_l)
+        x, x_i = self.tinybird.compactify_data(x, x_i, N)
 
         if is_training:
-            x_l = self.tinybird.randomize_label(x_l)
-            x, x_i, x_l = self.tinybird.remap_boundaries(x, x_i, N, xl=x_l)  # randomized remap
+            x, x_i = self.tinybird.remap_boundaries(x, x_i, N)  # randomized remap
 
-        x, x_i, x_l = self.tinybird.sample_data_seq_length(x, x_i, N, seq_len=8000, xl=x_l)
+        x, x_i = self.tinybird.sample_data_seq_length(x, x_i, N, seq_len=8000)
 
         B, H, W, N_blocks = x.shape[0], x.shape[-2], x.shape[-1], x_i.shape[1]
 
@@ -515,30 +368,23 @@ class Trainer:
         tag = "train_batch" if is_training else "val_batch"
         log_batch_shapes(tag, step_num, B=B, W=W, N=N_blocks)
 
-        h, idx_restore, bool_mask, T, x_l_tok_cond = self.tinybird.forward_encoder(
-            x, x_i, mblock=mblock, masked_blocks=masked_blocks, xl=x_l
+        h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(
+            x, x_i, mblock=mblock, masked_blocks=masked_blocks
         )
 
         masked_fraction = bool_mask.float().mean().item()
         log_batch_shapes(tag, step_num, masked_fraction=masked_fraction)
 
-        # decoder + heads
-        pred, logits_label = self.tinybird.forward_decoder(h, idx_restore, T, xl_tok_cond=x_l_tok_cond, W=W)
+        pred = self.tinybird.forward_decoder(h, idx_restore, T)
 
-        lambda_label = 0.3
         loss_recon = self.tinybird.loss_mse(x, pred, bool_mask)
-        loss_lbl = self.tinybird.loss_label(logits_label, x_l, bool_mask, W)
-        loss_total = loss_recon + lambda_label * loss_lbl
+        loss_total = loss_recon
 
-        # metrics
-        metrics = self._compute_label_metrics(logits_label, x_l, bool_mask, W)
         if log_metrics:
             run_tag = "train" if is_training else "val"
-            self._log_losses_and_metrics(
-                run_tag, step_num, loss_total.item(), loss_recon.item(), loss_lbl.item(), metrics
-            )
+            self._log_losses(run_tag, step_num, loss_total.item(), loss_recon.item())
 
-        return loss_total, loss_recon, loss_lbl, H, W, metrics
+        return loss_total, loss_recon, H, W
 
     def step(self, step_num, batch, is_training=True):
         """
@@ -557,12 +403,11 @@ class Trainer:
             torch.cuda.reset_peak_memory_stats(self.device)
 
         # spec, chirp_intervals, chirp_labels_pad, chirp_feats_pad, N, filename
-        spectrograms, chirp_intervals, chirp_labels, _, N, _ = batch
+        spectrograms, chirp_intervals, _, _, N, _ = batch
 
         x = spectrograms.to(self.device, non_blocking=True).float()  # (B, 1, H, W)
         x_i = chirp_intervals.to(self.device, non_blocking=True)  # (B, N, 2)
         N = N.to(self.device, non_blocking=True)  # (B, 1) # number of chirp intervals
-        x_l = chirp_labels.to(self.device, non_blocking=True).long()  # (B, N) # channel labels
 
         if is_training:
             self.tinybird.train()
@@ -575,13 +420,13 @@ class Trainer:
             with torch.set_grad_enabled(is_training):
                 if self.use_amp:
                     with torch.amp.autocast('cuda'):
-                        loss, loss_recon, loss_lbl, H, W, _ = self._forward_encode_decode(
-                            x, x_i, N, x_l, step_num, is_training=is_training, log_metrics=is_training
+                        loss, loss_recon, H, W = self._forward_encode_decode(
+                            x, x_i, N, step_num, is_training=is_training, log_metrics=is_training
                         )
 
                 else:
-                    loss, loss_recon, loss_lbl, H, W, _ = self._forward_encode_decode(
-                        x, x_i, N, x_l, step_num, is_training=is_training, log_metrics=is_training
+                    loss, loss_recon, H, W = self._forward_encode_decode(
+                        x, x_i, N, step_num, is_training=is_training, log_metrics=is_training
                     )
 
         # Backward pass only for training
@@ -662,9 +507,9 @@ class Trainer:
                 h, idx_restore, bool_mask, T = self.tinybird.forward_encoder(x, x_i, masked_blocks=1)
                 pred = self.tinybird.forward_decoder(h, idx_restore, T)
 
-        # Depatchify prediction to get back (B, 1, H, W) format
+        # Depatchify prediction to get back (B, C, H, W) format
         def depatchify(pred_patches):
-            """pred_patches: (B, T, P) → (B, 1, H, W) using the CURRENT x dims."""
+            """pred_patches: (B, T, P) → (B, C, H, W) using the CURRENT x dims."""
             H, W = x.shape[2], x.shape[3]  # after compactify/sample
             patch_size = self.config["patch_size"]
             fold = nn.Fold(output_size=(H, W), kernel_size=patch_size, stride=patch_size)
@@ -836,32 +681,29 @@ class Trainer:
                             val_batch = next(val_iter)
 
                         # unpack + device (same as in step())
-                        spectrograms, chirp_intervals, chirp_labels, _, N, _ = val_batch
+                        spectrograms, chirp_intervals, _, _, N, _ = val_batch
                         x   = spectrograms.to(self.device, non_blocking=True).float()
                         x_i = chirp_intervals.to(self.device, non_blocking=True)
                         Nv  = N.to(self.device, non_blocking=True)
-                        x_l = chirp_labels.to(self.device, non_blocking=True).long()
 
                         with cuda_mem_scope(self.device, step=step_num):
                             if self.use_amp:
                                 with torch.amp.autocast('cuda'):
-                                    loss, loss_recon, loss_lbl, H, W, metrics = self._forward_encode_decode(
-                                        x, x_i, Nv, x_l, step_num, is_training=False, log_metrics=False
+                                    loss, loss_recon, H, W = self._forward_encode_decode(
+                                        x, x_i, Nv, step_num, is_training=False, log_metrics=False
                                     )
                             else:
-                                loss, loss_recon, loss_lbl, H, W, metrics = self._forward_encode_decode(
-                                    x, x_i, Nv, x_l, step_num, is_training=False, log_metrics=False
+                                loss, loss_recon, H, W = self._forward_encode_decode(
+                                    x, x_i, Nv, step_num, is_training=False, log_metrics=False
                                 )
 
                         val_items.append({
                             "loss_total": float(loss.item()),
                             "loss_recon": float(loss_recon.item()),
-                            "loss_lbl":   float(loss_lbl.item()),
-                            "metrics":    metrics,
                         })
 
                 # Aggregate across 20 batches
-                val_loss, val_loss_recon, val_loss_lbl, val_metrics = self._aggregate_val_metrics(val_items)
+                val_loss, val_loss_recon = self._aggregate_val_metrics(val_items)
 
                 # Update EMA val loss (mirror the training EMA logic)
                 if self.ema_val_loss is None:
@@ -884,8 +726,8 @@ class Trainer:
                 with open(self.loss_log_path, 'a') as f:
                     f.write(f"{step_num},{train_loss:.6f},{self.ema_train_loss:.6f},{val_loss:.6f},{self.ema_val_loss:.6f}\\n")
 
-                # Single consolidated log for validation (losses + averaged metrics)
-                self._log_losses_and_metrics("val", step_num, val_loss, val_loss_recon, val_loss_lbl, val_metrics)
+                # Single consolidated log for validation losses
+                self._log_losses("val", step_num, val_loss, val_loss_recon)
 
                 # Save weights + W&B scalars
                 weight_path = os.path.join(self.weights_path, f"model_step_{step_num:06d}.pth")
@@ -1021,6 +863,7 @@ if __name__ == "__main__":
     parser.add_argument("--patch_width", type=int, default=1, help="patch width")
     parser.add_argument("--mels", type=int, default=128, help="number of mel bins")
     parser.add_argument("--num_timebins", type=int, default=1024, help="n number of time bins")
+    parser.add_argument("--in_channels", type=int, default=2, help="number of spectrogram channels")
     parser.add_argument("--dropout", type=float, default=0.1, help="dropout rate")
     parser.add_argument("--mask_p", type=float, default=0.75, help="mask probability")
     parser.add_argument("--eval_every", type=int, default=500, help="evaluate every N steps")
@@ -1097,6 +940,8 @@ if __name__ == "__main__":
                 parser.error("--train_dir, --val_dir, and --run_name are required when not using --continue_from")
             config = vars(args)
         config['is_continuing'] = False
+
+    config.setdefault("in_channels", 2)
 
     # Calculate seq_len from num_timebins and patch dimensions
     assert config["num_timebins"] % config["patch_width"] == 0, (

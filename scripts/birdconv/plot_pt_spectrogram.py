@@ -32,7 +32,15 @@ def load_spectrogram(pt_path: Path) -> np.ndarray:
     if 'chirp_intervals' not in data:
         raise KeyError(f"Key 'chirp_intervals' not found in {pt_path}")
 
-    return data['s'].detach().cpu().numpy(), data['chirp_intervals'].detach().cpu().numpy()
+    spec = data['s'].detach().cpu().numpy()
+    if spec.ndim == 3:
+        if spec.shape[0] == 1:
+            spec = spec[0]
+        else:
+            # average stereo channels for visualization
+            spec = np.mean(spec, axis=0)
+    chirps = data['chirp_intervals'].detach().cpu().numpy()
+    return spec, chirps
 
 
 def compute_windows(num_frames: int, frames_per_window: int) -> list[tuple[int, int]]:

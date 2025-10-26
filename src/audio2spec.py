@@ -303,7 +303,7 @@ def aggregate_and_print_summary(summary_rows: list[dict], dst_dir: Path) -> None
         print(f"{L}\t{mu:.2f}\t{np.sqrt(var):.2f}\t{mn:.2f}\t{mx:.2f}\t{c}")
 
 
-def _detect_and_load_audio(fp: Path, target_sr: int, channel: int = -1) -> tuple[np.ndarray, int, int]:
+def _detect_and_load_audio(fp: Path, target_sr: int, channel: int | str = -1) -> tuple[np.ndarray, int, int]:
     """
     Load audio from `fp` and return (wav, actual_sr, channel_count).
     The logic mirrors the previous implementation to preserve identical behavior.
@@ -343,10 +343,13 @@ def _detect_and_load_audio(fp: Path, target_sr: int, channel: int = -1) -> tuple
             channel_count = 1  # safe fallback
 
     # Load once; let librosa resample if needed. Handle channel selection uniformly.
+    take_all_channels = channel == "all"
     mono = channel == -1
-    wav, actual_sr = librosa.load(fp, sr=target_sr if needs_resampling else None, mono=mono)
-    if not mono:
-        # librosa.load(mono=False) returns shape (n_channels, n_samples)
+    wav, actual_sr = librosa.load(fp, sr=target_sr if needs_resampling else None, mono=mono if not take_all_channels else False)
+    if take_all_channels:
+        if wav.ndim == 1:
+            wav = wav[np.newaxis, :]
+    elif not mono:
         wav = wav[int(channel), :]
 
     # If we skipped resampling above but SR still mismatches, resample now.
@@ -485,36 +488,110 @@ def _process_core(
             # Fallback: if duration check fails, proceed with loading
             pass
 
-        def spectrogram(fp, sr, n_fft, step, use_mel, n_mels, channel=-1, s_ref=None):
-            wav, actual_sr, channel_count = _detect_and_load_audio(fp, sr, channel)
+        desired_channels = 2
+        wav_multi, actual_sr, channel_count = _detect_and_load_audio(fp, sr, channel="all")
+        if channel_count < desired_channels:
+            return {"file": str(fp), "skipped": True, "reason": "mono_audio"}
+        if wav_multi.ndim == 1:
+            wav_multi = wav_multi[np.newaxis, :]
+        available_channels = int(wav_multi.shape[0])
+        if available_channels == 0:
+            raise ValueError(f"{fp}: no audio channels detected")
+
+        def _slice_wave(ch_idx: int) -> np.ndarray:
+            idx = max(0, min(ch_idx, available_channels - 1))
+            return np.ascontiguousarray(wav_multi[idx])
+
+        channel_specs: list[dict[str, Any]] = []
+        s_ref: float | None = None
+        hop_length = step
+        for ch in range(min(desired_channels, available_channels)):
+            wav_ch = _slice_wave(ch)
             S_db, chirps, ref = compute_spectrogram(
-                wav, actual_sr, n_fft, step, mel=use_mel, n_mels=n_mels, s_ref=s_ref
+                wav_ch, actual_sr, n_fft, hop_length, mel=use_mel, n_mels=n_mels, s_ref=s_ref
             )
-            return S_db, chirps, ref, actual_sr, channel_count
+            if s_ref is None:
+                s_ref = ref
+            channel_specs.append({"S_db": S_db, "chirps": chirps, "wav": wav_ch})
 
-        S, chirp_intervals, s_ref, actual_sr, channel_count = spectrogram(fp, sr, n_fft, step, use_mel, n_mels)
+        # Duplicate mono recordings to keep a consistent 2-channel shape downstream
+        while len(channel_specs) < desired_channels:
+            base = channel_specs[0]
+            channel_specs.append(
+                {"S_db": base["S_db"].copy(), "chirps": base["chirps"].copy(), "wav": base["wav"].copy()}
+            )
 
-        # ── NEW: per-column chirp_labels based on instantaneous dB power, not intervals ─────────
-        # chirp_labels length == S.shape[1] (T). For stereo, label 1 if right energy > left, else 0.
-        if channel_count > 1:
-            S0, _, _, _, _ = spectrogram(fp, sr, n_fft, step, use_mel, n_mels, channel=0, s_ref=s_ref)
-            S1, _, _, _, _ = spectrogram(fp, sr, n_fft, step, use_mel, n_mels, channel=1, s_ref=s_ref)
-            P0 = librosa.db_to_power(S0, ref=1.0)   # (F, T)
-            P1 = librosa.db_to_power(S1, ref=1.0)   # (F, T)
-            e0 = np.sum(P0, axis=0, dtype=np.float64)  # (T,)
-            e1 = np.sum(P1, axis=0, dtype=np.float64)  # (T,)
-            chrip_labels = (e1 > e0).astype(np.int32)  # (T,) in {0,1}
+        def _active_rms(wav_channel: np.ndarray, intervals: np.ndarray) -> float:
+            intervals = np.asarray(intervals, dtype=np.int64).reshape(-1, 2) if intervals.size else np.empty((0, 2), dtype=np.int64)
+            if intervals.size == 0:
+                return float(np.sqrt(np.mean(np.square(wav_channel, dtype=np.float64)) + 1e-12))
+            segments = []
+            for start, end in intervals:
+                s = int(start) * hop_length
+                e = min(len(wav_channel), int(end) * hop_length)
+                if e > s:
+                    segments.append(wav_channel[s:e])
+            if not segments:
+                return float(np.sqrt(np.mean(np.square(wav_channel, dtype=np.float64)) + 1e-12))
+            concat = np.concatenate(segments)
+            return float(np.sqrt(np.mean(np.square(concat, dtype=np.float64)) + 1e-12))
+
+        rms_values = [ _active_rms(entry["wav"], entry["chirps"]) for entry in channel_specs ]
+        target_rms = max(rms_values) if rms_values else 1.0
+
+        for entry, rms in zip(channel_specs, rms_values):
+            if target_rms <= 0 or rms <= 0:
+                gain = 1.0
+            else:
+                gain = target_rms / max(rms, 1e-8)
+            entry["gain"] = gain
+            if gain != 1.0:
+                entry["S_db"] = entry["S_db"] + 20.0 * np.log10(gain)
+
+        # Build union of chirp intervals across channels
+        def _union_intervals(interval_arrays: list[np.ndarray]) -> np.ndarray:
+            arrays = [np.asarray(arr, dtype=np.int64).reshape(-1, 2) for arr in interval_arrays if arr is not None]
+            if not arrays:
+                return np.empty((0, 2), dtype=np.int32)
+            non_empty = [a for a in arrays if a.size > 0]
+            if not non_empty:
+                return np.empty((0, 2), dtype=np.int32)
+            combined = np.vstack(non_empty)
+            combined = combined[np.argsort(combined[:, 0])]
+            merged: list[tuple[int, int]] = []
+            for start, end in combined:
+                if not merged or start > merged[-1][1]:
+                    merged.append((int(start), int(end)))
+                else:
+                    ps, pe = merged[-1]
+                    merged[-1] = (ps, max(pe, int(end)))
+            merged_arr = np.asarray(merged, dtype=np.int32)
+            if merged_arr.size:
+                if np.any(merged_arr[:, 1] <= merged_arr[:, 0]):
+                    raise ValueError(f"{fp}: invalid chirp interval detected: {merged_arr}")
+                if merged_arr.shape[0] > 1 and np.any(merged_arr[1:, 0] < merged_arr[:-1, 1]):
+                    raise ValueError(f"{fp}: overlapping chirp intervals after merge: {merged_arr}")
+            return merged_arr
+
+        chirp_intervals = _union_intervals([entry["chirps"] for entry in channel_specs])
+        S_channels = np.stack([entry["S_db"] for entry in channel_specs], axis=0).astype(np.float32, copy=False)
+        time_bins = S_channels.shape[-1]
+
+        # derive per-frame channel labels from normalized channel energies
+        P_channels = [librosa.db_to_power(entry["S_db"], ref=1.0) for entry in channel_specs]
+        energies = [np.sum(p, axis=0, dtype=np.float64) for p in P_channels]
+        if len(energies) >= 2:
+            chrip_labels = (energies[1] > energies[0]).astype(np.int32)
         else:
-            # Mono: default all zeros, length T
-            chrip_labels = np.zeros((S.shape[1],), dtype=np.int32)
+            chrip_labels = np.zeros((time_bins,), dtype=np.int32)
 
-        if S.shape[1] < min_timebins:
+        if time_bins < min_timebins:
             return {"file": str(fp), "skipped": True}
 
         # Compute per‑chirp features from additional_data
         chirp_feats = _extract_additional_features(fp, chirp_intervals, step, actual_sr)
         # labels identical to before
-        labels = np.zeros(S.shape[1], dtype=np.int32)
+        labels = np.zeros(time_bins, dtype=np.int32)
         for lab, tb_on, tb_off in lab_map.get(fp.stem, []):
             labels[tb_on:tb_off] = lab
 
@@ -524,7 +601,7 @@ def _process_core(
         file_stats = {"file": Path(fp).stem, "path": str(fp), **stats}
 
         # ─── save outputs ────────────────────────────────────────────
-        _save_outputs_pt_or_npz(fmt, dst_dir, fp.stem, S, chirp_intervals, labels, chrip_labels, chirp_feats)
+        _save_outputs_pt_or_npz(fmt, dst_dir, fp.stem, S_channels, chirp_intervals, labels, chrip_labels, chirp_feats)
 
         # free memory fast (local scope GC will handle)
         return file_stats

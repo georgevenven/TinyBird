@@ -64,9 +64,12 @@ class SpectogramDataset(Dataset):
     def crop_or_pad_pair(self, spec, labels_1d, pad_value_labels=-1):
         """
         Pad-only: assert time ≤ n_timebins; right-pad spec and labels together.
-        spec: (F, T), labels_1d: (T,)
+        spec: (..., F, T), labels_1d: (T,)
         """
-        frq, time = spec.shape
+        assert spec.shape[-2] == self.n_mels, (
+            f"spec mel dim {spec.shape[-2]} must match dataset n_mels {self.n_mels}"
+        )
+        time = spec.shape[-1]
         assert labels_1d.ndim == 1 and labels_1d.shape[0] == time, (
             f"labels length {labels_1d.shape[0]} must match spec time {time}"
         )
@@ -74,11 +77,12 @@ class SpectogramDataset(Dataset):
 
         if time < self.n_timebins:
             padding_amnt = self.n_timebins - time
-            spec_out = F.pad(spec, (0, padding_amnt, 0, 0))
+            pad_shape = (*spec.shape[:-1], padding_amnt)
+            pad_tensor = torch.zeros(pad_shape, dtype=spec.dtype, device=spec.device)
+            spec_out = torch.cat([spec, pad_tensor], dim=-1)
             labels_out = F.pad(labels_1d, (0, padding_amnt), value=pad_value_labels)
             return spec_out, labels_out
-        else:
-            return spec, labels_1d
+        return spec, labels_1d
 
     def pad_chirp_intervals(self, chirp_intervals, max_N, pad_value=-1):
         """
@@ -150,6 +154,8 @@ class SpectogramDataset(Dataset):
         # Convert to torch if numpy
         if not isinstance(spec, torch.Tensor):
             spec = torch.as_tensor(spec)
+        if spec.ndim == 2:
+            spec = spec.unsqueeze(0)  # legacy mono files
 
         # # Intervals (Nx2)
         chirp_int_np = f['chirp_intervals']
@@ -185,7 +191,8 @@ class SpectogramDataset(Dataset):
 
         # Pad (no crop) spec + labels together to n_timebins
         spec, chirp_labels_pad = self.crop_or_pad_pair(spec, chirp_labels_time, pad_value_labels=-1)
-        assert spec.shape == (self.n_mels, self.n_timebins)
+        assert spec.shape[-2] == self.n_mels
+        assert spec.shape[-1] == self.n_timebins
         assert chirp_labels_pad.shape[0] == self.n_timebins
 
         # Final consistency for interval-derived tensors (labels are per-time now)
@@ -194,7 +201,6 @@ class SpectogramDataset(Dataset):
         chirp_feats_pad = chirp_feats_pad[: self.n_timebins]
 
         filename = path.stem
-        spec = spec.unsqueeze(0)
         return spec, chirp_intervals, chirp_labels_pad, chirp_feats_pad, N, filename
 
     def __len__(self):

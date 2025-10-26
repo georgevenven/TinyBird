@@ -1,8 +1,6 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-import random
-
 
 class MLPHead(nn.Module):
     """
@@ -38,9 +36,13 @@ class TinyBird(nn.Module):
         self.enc_hidden_d = config["enc_hidden_d"]
         self.dec_hidden_d = config["dec_hidden_d"]
         self.H  = config["mels"]
+        self.in_channels = config.get("in_channels", 2)
 
         self.patch_projection = nn.Conv2d(
-            in_channels=1, out_channels=config["enc_hidden_d"], kernel_size=self.patch_size, stride=self.patch_size
+            in_channels=self.in_channels,
+            out_channels=config["enc_hidden_d"],
+            kernel_size=self.patch_size,
+            stride=self.patch_size,
         )
 
         self.encoder_transformer_block = nn.TransformerEncoderLayer(
@@ -67,35 +69,15 @@ class TinyBird(nn.Module):
         self.encoder_to_decoder = nn.Linear(self.enc_hidden_d, self.dec_hidden_d)
 
         # --- Pixel head ---
+        self.patch_area = self.patch_size[0] * self.patch_size[1]
+
         self.decoder_to_pixel = MLPHead(
             in_dim=self.dec_hidden_d,
-            out_dim=self.patch_size[0] * self.patch_size[1],
+            out_dim=self.patch_area * self.in_channels,
             hidden_dim=config.get("pixel_mlp_d", 2 * self.dec_hidden_d),
             dropout=config["dropout"],
             num_layers=config.get("pixel_mlp_layers", 2),
         )
-
-        # --- Label head ---
-        self.decoder_to_label = MLPHead(
-            in_dim=self.dec_hidden_d,
-            out_dim=2,
-            hidden_dim=config.get("label_mlp_d", 2 * self.dec_hidden_d),
-            dropout=config["dropout"],
-            num_layers=config.get("label_mlp_layers", 2),
-        )
-        # classifier head for label prediction (2 classes: left channel, right channel)
-        # 0 = Left channel
-        # 1 = Right channel
-        # --- Row-attention pooling for labels (learned weights over H) ---
-        self.label_row_pool = nn.Linear(self.dec_hidden_d, 1)
-
-        self.label_enc = nn.Embedding(4, self.H)
-        # 0 = Left channel
-        # 1 = Right channel
-        # 2 = separator
-        # 3 = [LABEL_MASK]  # for masked columns
-        self.sep_class_id = 2
-        self.mask_class_id = 3
 
         self.sep_param = nn.Parameter(torch.zeros(1, 1, 1))
         self.mask_token = nn.Parameter(torch.zeros(1, 1, self.dec_hidden_d))
@@ -111,18 +93,6 @@ class TinyBird(nn.Module):
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
 
-        # Freeze and zero out unwanted rows
-        with torch.no_grad():
-            self.label_enc.weight[self.sep_class_id].zero_()  # separator
-            self.label_enc.weight[self.mask_class_id].zero_()  # [LABEL_MASK]
-
-        # Make sure gradients never change these rows
-        self.label_enc.weight.register_hook(
-            lambda grad: grad.clone().index_fill_(
-                0, torch.tensor([self.sep_class_id, self.mask_class_id], device=grad.device), 0.0
-            )
-        )
-
     def tokenize_spectrogram(self, x):
         # x  (B, C=1, H , W)
         z = self.patch_projection(x)  # (B, D_enc, H', W')
@@ -137,31 +107,7 @@ class TinyBird(nn.Module):
 
         return z + self.pos_enc[:, :T, :]  # (B, T, D_enc)
 
-    def apply_label_encoding(self, z: torch.Tensor, xl: torch.Tensor):
-        # z: (B, T, D_enc)
-        # xl: (B, T)
-
-        # IF APPLYING AFTER PATCH ENCODING
-        # B, T, D_enc = z.shape
-        # Txl = xl.shape[1]
-        # assert T == Txl, f"Size of z and xl must be the same, got x size is {T} and xl size is {Txl}"
-
-        #TRYING BEFORE PATCH ENCODING
-        B, T, D_enc = z.shape
-
-
-        return z + self.label_enc(xl)  # (B, T, D_enc)
-
-    def randomize_label(self, x_l: torch.Tensor) -> torch.Tensor:
-        if random.random() < 0.5:
-            return x_l  # no change
-
-        out = x_l.clone()
-        mask01 = (out == 0) | (out == 1)
-        out[mask01] = 1 - out[mask01]  # flips 0<->1
-        return out
-
-    def compactify_data(self, x: torch.Tensor, xi: torch.Tensor, N: torch.Tensor, xl: torch.Tensor = None):
+    def compactify_data(self, x: torch.Tensor, xi: torch.Tensor, N: torch.Tensor):
         """
         Remove silence from spectrograms keeping chirp blocks.
 
@@ -169,15 +115,13 @@ class TinyBird(nn.Module):
             x: Spectrograms (B, C, H, W)
             xi: Chirp boundaries (B, N_max, 2) [start, end)
             N: Valid chirp counts per item (B,)
-            xl: Left channel labels (B, N_max)
         Returns:
             x_new: Compacted spectrograms (B, C, H, w_max)
             xi_new: Updated boundaries in compressed coordinates (B, N_max, 2)
         """
         # x:  (B, C, H, W) #spectrogram
-        # xi: (B, W, 2)    #[start, end) of slices,  N slicesper item
+        # xi: (B, W, 2)    #[start, end) of slices,  N slices per item
         # N:  (B, )        #number of valid slices per item
-        # xl: (B, W)       #channel labels
 
         B, C, H, W = x.shape
 
@@ -201,8 +145,6 @@ class TinyBird(nn.Module):
         # w_max: (B, )           #width of each item
 
         x_new = torch.zeros_like(x)  # ensures columns beyond valid region are zero
-        if xl is not None:
-            xl_new = torch.zeros(B, w_max.max().item(), device=x.device, dtype=xl.dtype)
 
         # Expand the learnable separator scalar to a column on the **current** device/dtype
         sep_col_vec = self.sep_param.expand(1, x.size(2), 1)[0, :, 0]
@@ -216,19 +158,12 @@ class TinyBird(nn.Module):
 
                 if en > sn and e0 > s0:
                     x_new[b, :, :, sn:en] = x[b, :, :, s0:e0]
-                    if xl_new is not None:
-                        xl_new[b, sn:en] = xl[b, s0:e0]
                 if i < n_valid - 1 and en < W:
                     x_new[b, :, :, en] = sep_col_vec
-                    if xl_new is not None:
-                        xl_new[b, en] = self.sep_class_id
         x_new = x_new[:, :, :, : int(w_max.max().item())]
 
         # x_new:  (B, C, H, w_max) #spectrogram, with silence removed
-        if xl_new is not None:
-            return x_new, xi_new, xl_new
-        else:
-            return x_new, xi_new
+        return x_new, xi_new
 
     def sample_data_seq_length(
         self,
@@ -237,7 +172,6 @@ class TinyBird(nn.Module):
         N: torch.Tensor,
         seq_len: int,
         mblock: int = -1,
-        xl: torch.Tensor = None,
     ):
         """
         Sample random or fixed contiguous window of data, with the last block masked.
@@ -297,8 +231,6 @@ class TinyBird(nn.Module):
 
         # --- window the spectrogram x_out to the desired seq_len. Ensure that the window ends on the last column of the masked block. ---
         x_out = torch.zeros(B, C, H, seq_len, device=device, dtype=x.dtype)
-        if xl is not None:
-            xl_out = torch.zeros(B, seq_len, device=device, dtype=xl.dtype)
 
         mb_start_idx = torch.zeros(B, dtype=torch.long, device=device)
         for b in range(B):
@@ -307,8 +239,6 @@ class TinyBird(nn.Module):
             start_col = end_col - seq_len
 
             x_out[b, :, :, :] = x[b, :, :, start_col:end_col]
-            if xl is not None:
-                xl_out[b] = xl[b, start_col:end_col]
 
             blocks = torch.nonzero(xi[b, :, 0] >= start_col, as_tuple=False).squeeze(1)
             mb_start_idx[b] = blocks[0] if len(blocks) > 0 else 0
@@ -330,10 +260,7 @@ class TinyBird(nn.Module):
             f"xi_out[b,:,1] should always be seq_len for all items in the batch. got {xi_out[:, :, 1]}"
         )
 
-        if xl is not None:
-            return x_out, xi_out, xl_out
-        else:
-            return x_out, xi_out
+        return x_out, xi_out
 
     def sample_data(
         self,
@@ -342,7 +269,6 @@ class TinyBird(nn.Module):
         N: torch.Tensor,
         n_blocks: int,
         start: int = -1,
-        xl: torch.Tensor = None,
     ):
         """
         Sample random contiguous windows of chirp blocks.
@@ -384,8 +310,6 @@ class TinyBird(nn.Module):
 
         x_out = torch.zeros(B, C, H, max_width, device=device, dtype=x.dtype)
         xi_out = torch.zeros(B, n_blocks, 2, device=device, dtype=xi.dtype)
-        if xl is not None:
-            xl_out = torch.zeros(B, max_width, device=device, dtype=xl.dtype)
 
         for b in range(B):
             en = int(en_raw[b].item())
@@ -393,19 +317,14 @@ class TinyBird(nn.Module):
             en = st + max_width  # right-align to end
 
             x_out[b, :, :, :] = x[b, :, :, st:en]  # crop the spectrogram to the new window
-            if xl is not None:
-                xl_out[b] = xl[b, st:en]
 
             xi_out[b] = xi[b, start[b] : end[b], :].clone()  # remap the boundaries to the new window
             xi_out[b, :, 0] = xi_out[b, :, 0] - st
             xi_out[b, :, 1] = xi_out[b, :, 1] - st
 
-        if xl is not None:
-            return x_out, xi_out, xl_out
-        else:
-            return x_out, xi_out
+        return x_out, xi_out
 
-    def sample_data_indices(self, x: torch.Tensor, xi: torch.Tensor, N: torch.Tensor, indices, xl: torch.Tensor = None):
+    def sample_data_indices(self, x: torch.Tensor, xi: torch.Tensor, N: torch.Tensor, indices):
         """
         Sample a window of chirp blocks using explicit block indices (not necessarily contiguous).
 
@@ -414,12 +333,9 @@ class TinyBird(nn.Module):
             xi: Chirp boundaries (B, N_max, 2)
             N: Valid chirp counts per item (B,)
             indices: Iterable of integer block indices to extract, in the order to be concatenated
-            xl: channel labels (B, N_max)
-
         Returns:
             x_out:  Concatenated spectrograms of the selected blocks with 1-col separators (B, C, H, max_width)
             xi_out: Remapped boundaries in the new window coordinates, one row per selected index (B, K, 2)
-            is xl is passed in, returns xl_out: channel labels (B, max_width)
         """
         B, C, H, W = x.shape
         device = x.device
@@ -452,8 +368,6 @@ class TinyBird(nn.Module):
 
         x_out = torch.zeros(B, C, H, max_width, device=device, dtype=x.dtype)
         xi_out = torch.zeros(B, K, 2, device=device, dtype=xi.dtype)
-        if xl is not None:
-            xl_out = torch.zeros(B, max_width, device=device, dtype=xl.dtype)
 
         for b in range(B):
             pos = 0
@@ -463,10 +377,7 @@ class TinyBird(nn.Module):
                 e0 = int(xi[b, idx, 1].item())
                 w = max(0, e0 - s0)
 
-                # Copy all channels, not just channel 0
                 x_out[b, :, :, pos : pos + w] = x[b, :, :, s0:e0]
-                if xl is not None:
-                    xl_out[b, pos : pos + w] = xl[b, s0:e0]
 
                 xi_out[b, k, 0] = pos
                 xi_out[b, k, 1] = pos + w
@@ -474,20 +385,12 @@ class TinyBird(nn.Module):
 
                 # Insert separator if not the last selected block and room remains
                 if k < K - 1 and divider_pos > 0:
-                    # Use a separator column; e0 is end-exclusive so clamp to W-1
                     x_out[b, :, :, pos] = x[b, :, :, divider_pos]
-                    if xl is not None:
-                        xl_out[b, pos] = self.sep_class_id
                     pos += 1
 
-        if xl is not None:
-            return x_out, xi_out, xl_out
-        else:
-            return x_out, xi_out
+        return x_out, xi_out
 
-    def remap_boundaries(
-        self, x: torch.Tensor, xi: torch.Tensor, N: torch.Tensor, move_block: int = -1, xl: torch.Tensor = None
-    ):
+    def remap_boundaries(self, x: torch.Tensor, xi: torch.Tensor, N: torch.Tensor, move_block: int = -1):
         B, _, H, W = x.shape
         device = x.device
         N = N.view(B, 1)
@@ -499,8 +402,7 @@ class TinyBird(nn.Module):
 
         x_out = x.clone()
         xi_out = xi.clone()
-        if xl is not None:
-            xl_out = xl.clone()
+        # purely permutation of spectrogram + xi
 
         for b in range(B):
             # pick a random block between 0 and N[b]-1
@@ -532,15 +434,7 @@ class TinyBird(nn.Module):
             x_out[b, :, :, lbe - nbb] = x[b, :, :, be]
             x_out[b, :, :, lbe - nbb + 1 : lbe] = x[b, :, :, 0:be]
 
-            if xl is not None:
-                xl_out[b, 0 : lbe - nbb] = xl[b, nbb:lbe]
-                xl_out[b, lbe - nbb] = xl[b, be]
-                xl_out[b, lbe - nbb + 1 : lbe] = xl[b, 0:be]
-
-        if xl is not None:
-            return x_out, xi_out, xl_out
-        else:
-            return x_out, xi_out
+        return x_out, xi_out
 
     def build_column_mask(
         self,
@@ -638,7 +532,7 @@ class TinyBird(nn.Module):
 
         return z_keep, idx_restore
 
-    def forward_encoder(self, x: torch.Tensor, xi: torch.Tensor, xl: torch.Tensor = None, **column_mask_args):
+    def forward_encoder(self, x: torch.Tensor, xi: torch.Tensor, **column_mask_args):
         """
         Patchify → add positional encodings → build a **column-wise** mask from chirp boundaries →
         keep only unmasked tokens → encode with the Transformer encoder.
@@ -669,37 +563,12 @@ class TinyBird(nn.Module):
         """
         # x:  (B, C=1, H, W)
         # xi: (B, N, 2)
-        B, _, H, W = x.shape
-        bool_mask = self.build_column_mask(xi, hw=(H, W), **column_mask_args)
-
-        if xl is not None:
-            # Columns masked anywhere along rows
-            masked_cols = bool_mask.view(B, H, W).any(dim=1)  # (B, W)
-
-            # Prepare label ids and apply [LABEL_MASK] to masked columns
-            xl_cols = xl.clone().long()                       # (B, W)
-            xl_cols[masked_cols] = self.mask_class_id
-
-            # Embedding: each id → H-dim vector (mel axis)
-            # Result: (B, W, H) → permute to (B, H, W) → add channel dim → (B, 1, H, W)
-            lbl_plane = self.label_enc(xl_cols)               # (B, W, H)
-            lbl_plane = lbl_plane.permute(0, 2, 1).unsqueeze(1)  # (B,1,H,W)
-
-            x = x + lbl_plane
-
-
+        _, _, H, W = x.shape
         z, H, W = self.tokenize_spectrogram(x)  # (B, T, D_enc), H, W
         z = self.apply_position_encoding(z)  # (B, T, D_enc)
 
         bool_mask = self.build_column_mask(xi, hw=(H, W), **column_mask_args)
         # bool_mask : (B, H*W), True = masked (column-wise across H) bool_mask are exclusive
-
-        # IF AFTER APPLYING AFTER PATCH ENCODING
-        # if xl is not None:
-        #     xl_tok = xl.unsqueeze(1).expand(B, H, W).reshape(B, H * W)
-        #     xl_tok_cond = xl_tok.clone().long()
-        #     xl_tok_cond[bool_mask] = self.mask_class_id
-        #     z = self.apply_label_encoding(z, xl_tok_cond)
 
         z_keep, idx_restore = self.mask(z, bool_mask)  # ensure the encoder never sees masked tokens
         # z_keep: Kept tokens (B, keep_count, D)
@@ -707,11 +576,7 @@ class TinyBird(nn.Module):
 
         h = self.encoder(z_keep)  # (B, keep, D_enc)
 
-        if xl is not None:
-            xl_tok_cond = xl_cols.unsqueeze(1).expand(B, H, W).reshape(B, H * W)  # (B, T)
-            return h, idx_restore, bool_mask, H * W, xl_tok_cond
-        else:
-            return h, idx_restore, bool_mask, H * W  # (B, keep, D_enc), (B, T), (B, T), (B,T), T
+        return h, idx_restore, bool_mask, H * W  # (B, keep, D_enc), (B, T), (B, T), (B,T), T
 
     def forward_encoder_inference(self, x: torch.Tensor):
         """
@@ -725,9 +590,7 @@ class TinyBird(nn.Module):
         z = self.apply_position_encoding(z)  # (B, T, D_enc)
         return self.encoder(z)  # (B, T, D_enc)
 
-    def forward_decoder(
-        self, h: torch.Tensor, idx_restore: torch.Tensor, T: int, xl_tok_cond: torch.Tensor = None, W=None
-    ):
+    def forward_decoder(self, h: torch.Tensor, idx_restore: torch.Tensor, T: int):
         """
         Project encoder outputs to decoder width → insert learned mask tokens → unshuffle back to the
         original token order → add decoder positional encodings → run the Transformer decoder → predict
@@ -779,34 +642,27 @@ class TinyBird(nn.Module):
 
         d = self.decoder(y_full)  # (B, T, D_dec)
         pred = self.decoder_to_pixel(d)  # Final per-token patch prediction: (B, T, P). P is pixels per patch
-        if xl_tok_cond is not None:
-            # logits_label = self.decoder_to_label(d)
-            assert W is not None, "Need H,W for row pooling"
-            H = T // W
-            x = d.view(B, H, W, D_dec)  # (B,H,W,D)
-            scores = self.label_row_pool(x).squeeze(-1)  # (B,H,W)
-            alpha = torch.softmax(scores, dim=1)  # (B,H,W), softmax over rows
-            col = (alpha.unsqueeze(-1) * x).sum(dim=1)  # (B,W,D)
-            logits_label = self.decoder_to_label(col)  # (B,W,2)
+        return pred
 
-            return pred, logits_label
-        else:
-            return pred
-
-    def loss_mse(self, x: torch.Tensor, pred: torch.Tensor, bool_mask: torch.Tensor):
+    def loss_mse(
+        self, x: torch.Tensor, pred: torch.Tensor, bool_mask: torch.Tensor, *, return_per_channel: bool = False
+    ):
         """
         Compute MSE on masked patches only.
-        x:    (B, 1, H, W)
-        pred: (B, T, P)
+        x:    (B, C, H, W)
+        pred: (B, T, C * patch_area)
         """
         # Ensure bool_mask is on the same device as pred for indexing during backward
         bool_mask = bool_mask.to(pred.device)
         unfold = nn.Unfold(
             kernel_size=self.patch_size, stride=self.patch_size
         )  # unfolds spectrogram into patches of size P
-        target = (
-            unfold(x).transpose(1, 2).to(device=pred.device, dtype=pred.dtype)
-        )  # (B, T, P), where T = num patches, P = patch_height * patch_width
+        target = unfold(x).transpose(1, 2).to(device=pred.device, dtype=pred.dtype)  # (B, T, C*patch_area)
+        B, _, H, W = x.shape
+        channels = x.shape[1]
+        patch_area = self.patch_area
+        target = target.view(B, -1, channels, patch_area)
+        pred_view = pred.view(B, -1, channels, patch_area)
 
         # Normalize target patches
         # target_mean = target.mean(dim=-1, keepdim=True)  # (B, T, 1), mean per patch
@@ -814,21 +670,22 @@ class TinyBird(nn.Module):
         # target = (target - target_mean) / (target_std + 1e-6)  # normalized target patches, shape (B, T, P)
 
         # # Numerically stable per-patch normalization in FP32 to avoid NaNs under AMP/FP16
-        t32 = target.float()  # (B, T, P) in FP32
-        mean32 = t32.mean(dim=-1, keepdim=True)  # (B, T, 1)
+        t32 = target.float()  # (B, T, C, patch_area) in FP32
+        mean32 = t32.mean(dim=-1, keepdim=True)  # (B, T, C, 1)
         # Use variance + eps, unbiased=False for stability
-        var32 = t32.var(dim=-1, keepdim=True, unbiased=False)  # (B, T, 1)
+        var32 = t32.var(dim=-1, keepdim=True, unbiased=False)  # (B, T, C, 1)
         eps = 1e-5
-        std32 = torch.sqrt(torch.clamp(var32, min=0.0) + eps)  # (B, T, 1)
-        norm32 = (t32 - mean32) / std32  # (B, T, P)
+        std32 = torch.sqrt(torch.clamp(var32, min=0.0) + eps)  # (B, T, C, 1)
+        norm32 = (t32 - mean32) / std32  # (B, T, C, patch_area)
         # Replace any residual NaN/Inf (e.g., completely constant or empty patches)
-        norm32 = torch.nan_to_num(norm32, nan=0.0, posinf=0.0, neginf=0.0)  # (B, T, P)
-        target = norm32.to(dtype=pred.dtype)  # (B, T, P) match pred dtype
+        norm32 = torch.nan_to_num(norm32, nan=0.0, posinf=0.0, neginf=0.0)  # (B, T, C, patch_area)
+        target = norm32.to(dtype=pred.dtype)
 
         # loss = ((pred - target) ** 2)[bool_mask].mean()  # compute MSE only on masked patches; pred is (B, T, P), bool_mask is (B, T)
 
         # MSE per pixel; compute a single masked mean across all masked pixels (size-invariant)
-        per_pixel = (pred - target).pow(2)  # (B, T, P)
+        per_pixel_ch = (pred_view - target).pow(2)  # (B, T, C, patch_area)
+        per_pixel = per_pixel_ch.view(B, -1, channels * patch_area)
         # Defensive guard: sanitize before reduction
         if torch.isnan(per_pixel).any() or torch.isinf(per_pixel).any():
             if not hasattr(self, "_loss_nan_warned"):
@@ -838,7 +695,7 @@ class TinyBird(nn.Module):
             per_pixel = torch.nan_to_num(per_pixel, nan=0.0, posinf=0.0, neginf=0.0)
 
         # Expand the (B,T) mask to pixels and take a single mean over all masked pixels
-        mask3d = bool_mask.unsqueeze(-1).expand_as(per_pixel)  # (B, T, P)
+        mask3d = bool_mask.unsqueeze(-1).expand_as(per_pixel)  # (B, T, C*patch_area)
         masked_pixels = per_pixel[mask3d]
         if masked_pixels.numel() == 0:
             # Fallback: avoid division by zero if mask is empty (e.g., visualization mode)
@@ -846,35 +703,12 @@ class TinyBird(nn.Module):
         else:
             loss = masked_pixels.mean()
 
-        return loss
+        if not return_per_channel:
+            return loss
 
-    def loss_label(self, logits_label: torch.Tensor, xl: torch.Tensor, bool_mask: torch.Tensor, W: int):
-        """
-        logits_label: (B, W, 2)  ← pooled to columns already
-        xl:           (B, W) with ids {0,1,2} (2=separator)
-        bool_mask:    (B, H_true*W) token mask from the encoder (True = masked)
-        W:            width (#columns) in the current window
-        """
-        B, W2, C = logits_label.shape
-        assert W2 == W and C == 2, f"Expected (B,{W},2), got {tuple(logits_label.shape)}"
-
-        # Recover true H from the mask
-        Bm, Tmask = bool_mask.shape
-        assert Bm == B and Tmask % W == 0, f"bool_mask shape {tuple(bool_mask.shape)} not compatible with W={W}"
-        H_true = Tmask // W
-
-        # Columns masked anywhere along rows
-        masked_cols = bool_mask.view(B, H_true, W).any(dim=1)  # (B, W)
-
-        # Exclude separators
-        is_sep = xl == self.sep_class_id
-        valid = masked_cols & (~is_sep)  # (B, W)
-
-        if not valid.any():
-            # no supervised label targets in this window
-            return logits_label.new_tensor(0.0)
-
-        logits = logits_label[valid]  # (N_valid, 2)
-        targets = xl[valid].long()  # (N_valid,) in {0,1}
-
-        return F.cross_entropy(logits, targets, label_smoothing=0.05)
+        mask4d = bool_mask.unsqueeze(-1).unsqueeze(-1).to(per_pixel_ch.dtype)
+        mask4d = mask4d.expand(-1, -1, channels, patch_area)
+        per_channel_sums = (per_pixel_ch * mask4d).sum(dim=(1, 3))  # (B, C)
+        counts = mask4d.sum(dim=(1, 3)).clamp(min=1e-8)
+        channel_losses = per_channel_sums / counts
+        return loss, channel_losses
