@@ -843,6 +843,35 @@ def main():
             ax_strip_y.set_xticks([])
             ax_strip_y.set_yticks([])
 
+            # --- after creating ax_strip_x and ax_strip_y ---
+
+            # 1) Turn OFF ticks/labels on the strips (they're just color bands)
+            ax_strip_x.tick_params(axis='x', which='both', bottom=False, labelbottom=False)
+            ax_strip_x.tick_params(axis='y', which='both', left=False, labelleft=False)
+            ax_strip_y.tick_params(axis='x', which='both', bottom=False, labelbottom=False)
+            ax_strip_y.tick_params(axis='y', which='both', left=False, labelleft=False)
+
+            # 2) Turn ON ticks on the main heatmap (they got auto-disabled by sharex/sharey)
+            ax_hm.tick_params(axis='x', which='both', bottom=True, labelbottom=True)
+            ax_hm.tick_params(axis='y', which='both', left=True,  labelleft=True)
+
+            # 3) Put integer ticks at a readable stride (e.g., ~12 ticks max)
+            Hh, Wh = mat_np.shape
+            max_ticks = 12
+            step_x = max(1, int(np.ceil(Wh / max_ticks)))
+            step_y = max(1, int(np.ceil(Hh / max_ticks)))
+
+            xticks = np.arange(0, Wh, step_x)
+            yticks = np.arange(0, Hh, step_y)
+
+            ax_hm.set_xticks(xticks)
+            ax_hm.set_yticks(yticks)
+            ax_hm.set_xticklabels([str(int(t)) for t in xticks], fontsize=9)
+            ax_hm.set_yticklabels([str(int(t)) for t in yticks], fontsize=9)
+
+            # (optional) keep ticks inside to avoid overlap with strips
+            ax_hm.tick_params(axis='both', direction='in')
+
             # Column/row mean plots
             col_mean = np.nanmean(mat_np, axis=0)
             row_mean = np.nanmean(mat_np, axis=1)
@@ -859,8 +888,9 @@ def main():
             ax_row_mean.tick_params(axis='y', labelleft=False)
             ax_row_mean.grid(True, alpha=0.2)
 
+
             plt.tight_layout()
-            plt.subplots_adjust(bottom=0.14, left=0.12, top=0.9)
+            plt.subplots_adjust(bottom=0.14, left=0.12, top=0.9, right=.95)
             out_path = os.path.join(images_dir, f"heatmap_{tag}_{i}_{filename}.png")
             fig_hm.savefig(out_path, dpi=300, bbox_inches='tight')
             plt.close(fig_hm)
