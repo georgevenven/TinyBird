@@ -204,6 +204,9 @@ class Trainer:
         # Print parameter counts
         count_parameters(self.tinybird)
 
+        # TensorBoard writer placeholder (populate elsewhere if desired)
+        self.writer = None
+
         # Initialize optimizer
         self.optimizer = AdamW(self.tinybird.parameters(), lr=config["lr"], weight_decay=config["weight_decay"])
 
