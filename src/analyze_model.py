@@ -1699,11 +1699,11 @@ def main():
                 best_loss_filtered_aligned = np.full(recon_np.shape[0], np.nan, dtype=float)
                 for new_idx, orig_idx in enumerate(keep_indices):
                     best_loss_filtered_aligned[orig_idx] = best_loss_filtered[new_idx]
-                mean_loss_after = float(np.nanmean(best_loss_filtered))
-            else:
-                filtered_losses_np = None
-                best_loss_filtered_aligned = np.full(recon_np.shape[0], np.nan, dtype=float)
-                mean_loss_after = np.nan
+        mean_loss_after = float(np.nanmean(best_loss_filtered))
+    else:
+        filtered_losses_np = None
+        best_loss_filtered_aligned = np.full(recon_np.shape[0], np.nan, dtype=float)
+        mean_loss_after = np.nan
 
         print(
             f"Removal set size: {len(removal_indices)}; mean best loss {mean_loss_before:.6f} → {mean_loss_after:.6f}"
@@ -1846,6 +1846,12 @@ def main():
                 "Each curve shows how loss changes as more context is added before predicting `last_block` "
                 "(min: best start; start=last+1: entire circle; start=last-10: fixed-length context)."
             )
+            mean_original = float(np.nanmean(min_loss)) if np.isfinite(min_loss).any() else np.nan
+            mean_after = float(np.nanmean(best_loss_filtered)) if best_loss_filtered is not None and np.isfinite(best_loss_filtered).any() else np.nan
+            if np.isfinite(mean_original):
+                ax_top.axhline(mean_original, color='black', linestyle=':', linewidth=1.5, label='Mean best loss (original)')
+            if np.isfinite(mean_after):
+                ax_top.axhline(mean_after, color='tab:blue', linestyle='-.', linewidth=1.5, label='Mean best loss (after removal)')
             if cols > 0:
                 if cols <= 10:
                     xticks = np.array([0])
@@ -1906,7 +1912,7 @@ def main():
             best_loss_before = np.asarray(best_loss_before, dtype=float)
             best_loss_after = np.asarray(best_loss_after, dtype=float)
             x = np.arange(best_loss_before.shape[0])
-            fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=(12, 6), gridspec_kw={'height_ratios': [3, 1]})
+            fig, ax_top = plt.subplots(figsize=(12, 4))
             ax_top.plot(x, np.ma.masked_invalid(best_loss_before), label='Best loss (original)', color='black', linewidth=2.0)
             ax_top.plot(
                 x,
@@ -1923,14 +1929,11 @@ def main():
             ax_top.set_xlabel('Block index (last_block)')
             ax_top.set_ylabel('Best loss (MSE)')
             ax_top.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+            if np.isfinite(mean_before):
+                ax_top.axhline(mean_before, color='black', linestyle=':', linewidth=1.5, label='Mean best loss (original)')
+            if np.isfinite(mean_after):
+                ax_top.axhline(mean_after, color='tab:blue', linestyle='-.', linewidth=1.5, label='Mean best loss (after removal)')
             ax_top.legend(loc='best')
-
-            ax_bot.bar(['Original', 'After removal'], [mean_before, mean_after], color=['gray', 'tab:blue'])
-            ax_bot.set_ylabel('Mean best loss (MSE)')
-            ax_bot.set_title('Mean of best-context loss across blocks')
-            for idx_bar, value in enumerate([mean_before, mean_after]):
-                if np.isfinite(value):
-                    ax_bot.text(idx_bar, value, f"{value:.4f}", ha='center', va='bottom')
             fig.tight_layout()
             out_path = os.path.join(images_dir, f"best_loss_comparison_{index}_{filename}.png")
             fig.savefig(out_path, dpi=300, bbox_inches='tight')
