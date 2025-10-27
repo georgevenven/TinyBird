@@ -220,28 +220,39 @@ def save_reconstruction(model, x, x_i, N, last_block, x_dt, x_lt, *, filename, i
     if xs is None or pred is None or bool_mask is None:
         return [], loss, channel_losses_np
 
-    def _reconstruct(xs, pred, bool_mask, patch_size):
+    def _reconstruct_channel(xs, pred, bool_mask, patch_size, channel_idx):
         """
+        Reconstruct a single channel by denormalizing decoder predictions for that channel only.
         xs:   (B, C, H, W) input spectrogram window
         pred: (B, T, P) decoder output in the same normalized space as loss
         bool_mask: (B, T) which tokens were masked
-        Returns: (B, C, H, W) image where masked patches are replaced with denormalized predictions.
+        Returns: (B, 1, H, W) image for the requested channel.
         """
-        B, C, H, W = xs.shape
-        unfold = torch.nn.Unfold(kernel_size=patch_size, stride=patch_size)
-        fold = torch.nn.Fold(output_size=(H, W), kernel_size=patch_size, stride=patch_size)
+        if isinstance(patch_size, int):
+            patch_size_tuple = (patch_size, patch_size)
+        else:
+            patch_size_tuple = tuple(patch_size)
+        ph, pw = patch_size_tuple
+        patch_area = ph * pw
 
-        x_patches = unfold(xs).transpose(1, 2)  # (B, T, P)
+        xs_ch = xs[:, channel_idx : channel_idx + 1]  # (B, 1, H, W)
+        unfold = torch.nn.Unfold(kernel_size=patch_size_tuple, stride=patch_size_tuple)
+        fold = torch.nn.Fold(output_size=xs_ch.shape[-2:], kernel_size=patch_size_tuple, stride=patch_size_tuple)
+
+        x_patches = unfold(xs_ch).transpose(1, 2)  # (B, T, patch_area)
         target_mean = x_patches.mean(dim=-1, keepdim=True)
         target_std = x_patches.std(dim=-1, keepdim=True)
 
-        pred_denorm = pred * (target_std + 1e-6) + target_mean
+        start = channel_idx * patch_area
+        stop = start + patch_area
+        pred_slice = pred[..., start:stop]
+        pred_denorm = pred_slice * (target_std + 1e-6) + target_mean
 
         out_patches = x_patches.clone()
         out_patches[bool_mask] = pred_denorm[bool_mask]
-        out_patches = out_patches.transpose(1, 2)  # (B, P, T)
-        x_rec = fold(out_patches)  # (B, C, H, W)
-        return x_rec
+        out_patches = out_patches.transpose(1, 2)  # (B, patch_area, T)
+        x_rec_ch = fold(out_patches)  # (B, 1, H, W)
+        return x_rec_ch
 
     def _column_mask_2d(bool_mask, H, W, patch_size):
         """
@@ -259,7 +270,6 @@ def save_reconstruction(model, x, x_i, N, last_block, x_dt, x_lt, *, filename, i
             pos = int(x_is_b[k, 1])
             ax.axvline(pos - 0.5, linewidth=0.8, alpha=0.8, color='cyan')
 
-    x_rec = _reconstruct(xs, pred, bool_mask, model.patch_size)
     B, C, H, W = xs.shape
     col_mask = _column_mask_2d(bool_mask, H, W, model.patch_size)[0].detach().cpu().numpy()
     col_mask_bool = col_mask.astype(bool)
@@ -289,8 +299,9 @@ def save_reconstruction(model, x, x_i, N, last_block, x_dt, x_lt, *, filename, i
     paths = []
     os.makedirs(images_dir, exist_ok=True)
     for ch in range(C):
+        x_rec_ch = _reconstruct_channel(xs, pred, bool_mask, model.patch_size, ch)
         xs_cpu = xs[0, ch].detach().cpu().numpy()
-        x_rec_cpu = x_rec[0, ch].detach().cpu().numpy()
+        x_rec_cpu = x_rec_ch[0, 0].detach().cpu().numpy()
         vmin = min(np.nanmin(xs_cpu), np.nanmin(x_rec_cpu))
         vmax = max(np.nanmax(xs_cpu), np.nanmax(x_rec_cpu))
 
