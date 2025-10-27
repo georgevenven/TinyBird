@@ -547,26 +547,37 @@ def compute_best_loss_curve(loss_matrix: np.ndarray) -> np.ndarray:
     return best_loss
 
 
-def compute_context_gain_matrix(loss_matrix: np.ndarray) -> np.ndarray:
+def compute_context_gain_matrix(loss_matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """
     Measures the incremental change in loss obtained by extending the context one block earlier.
-    For each start_block row, compares the loss at start_block vs start_block-1 (modulo N).
-    Positive values indicate loss reduction when including the additional block.
+    For each start_block row, compares the loss at start_block vs start_block+1 (i.e., dropping the earliest block).
+    Positive values indicate the added block hurts performance; negative values mean the added block lowers loss.
+    Returns both the per-(start,last) benefit relative to the per-column mean and the column-wise mean itself.
     """
     if loss_matrix.ndim != 2:
         raise ValueError("Expected a 2D loss matrix (start_block x last_block).")
     rows, cols = loss_matrix.shape
     gain = np.full((rows, cols), np.nan, dtype=np.float64)
     if rows == 0 or cols == 0:
-        return gain
+        return gain, np.full(cols, np.nan, dtype=np.float64)
     for start in range(rows):
-        prev = (start - 1) % rows
+        next_start = (start + 1) % rows
         for last in range(cols):
             cur = loss_matrix[start, last]
-            prev_val = loss_matrix[prev, last]
-            if np.isfinite(cur) and np.isfinite(prev_val):
-                gain[start, last] = cur - prev_val
-    return gain
+            next_val = loss_matrix[next_start, last]
+            if np.isfinite(cur) and np.isfinite(next_val):
+                gain[start, last] = cur - next_val
+
+    finite_mask = np.isfinite(gain)
+    if finite_mask.any():
+        finite_vals = np.abs(gain[finite_mask])
+        scale = float(np.nanpercentile(finite_vals, 90)) if finite_vals.size else 0.0
+        zero_tol = max(1e-8, scale * 1e-3)
+        gain[np.abs(gain) < zero_tol] = 0.0
+
+    mean_delta = np.nanmean(gain, axis=0, keepdims=True)
+    benefit = gain - mean_delta
+    return benefit, mean_delta.squeeze(0)
 
 
 def select_highlight_profiles(
@@ -652,7 +663,7 @@ def plot_block_lift_summary(benefit_matrix, filename, index, images_dir, title_p
     x = np.arange(mean_start.shape[0])
     ax.plot(x, mean_start, linewidth=2, marker='o', markersize=3)
     ax.set_xlabel("Block index (start_block)")
-    ax.set_ylabel("Average Δ loss (start_block vs start_block-1)")
+    ax.set_ylabel("Average Δ loss advantage (start vs start+1)")
     ax.set_title(f"{title_prefix} Context Benefit – Index {index}, File: {filename}")
     ax.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
     finite_vals = mean_start[valid_mask]
@@ -735,11 +746,11 @@ def plot_mean_scatter(row_mean, best_loss_curve, filename, index, images_dir, ta
     ax.axhline(y_mean, color='gray', linewidth=1.0, linestyle='--', alpha=0.8, label='_nolegend_')
     ax.axhline(0, color='gray', linewidth=0.8, linestyle='--')
     ax.axvline(0, color='gray', linewidth=0.8, linestyle='--')
-    ax.set_xlabel('Avg Δ loss per start_block (context benefit)')
+    ax.set_xlabel('Avg Δ vs mean per start_block (context benefit)')
     ax.set_ylabel('Lowest loss per last_block (best context)')
     ax.set_title(
         "Context benefit vs difficulty\n"
-        "Left side: blocks whose inclusion helps later predictions. Bottom: blocks that are easy to predict."
+        "Left side: blocks whose added context outperforms the average improvement. Bottom: blocks that are easy to predict."
     )
     legend_elements, legend_labels = scatter.legend_elements(num=6)
     sample_blocks = np.linspace(indices.min(), indices.max(), num=min(8, len(indices)), dtype=int)
@@ -895,12 +906,15 @@ def main():
             if recon_ch_np.size
             else np.empty((0, recon_np.shape[1]))
         )
-        context_gain_all = compute_context_gain_matrix(recon_np)
-        context_gain_channels = (
-            np.stack([compute_context_gain_matrix(recon_ch_np[ch_idx]) for ch_idx in range(recon_ch_np.shape[0])], axis=0)
-            if recon_ch_np.size
-            else np.empty((0, recon_np.shape[0], recon_np.shape[1]))
-        )
+        context_gain_all, _ = compute_context_gain_matrix(recon_np)
+        context_gain_channels = []
+        if recon_ch_np.size:
+            for ch_idx in range(recon_ch_np.shape[0]):
+                gain_ch, _ = compute_context_gain_matrix(recon_ch_np[ch_idx])
+                context_gain_channels.append(gain_ch)
+            context_gain_channels = np.stack(context_gain_channels, axis=0)
+        else:
+            context_gain_channels = np.empty((0, recon_np.shape[0], recon_np.shape[1]))
 
         def plot_heatmap(
             mat_np,
@@ -1157,29 +1171,29 @@ def main():
         gain_means["all"] = add_heatmap(
             context_gain_all,
             'Context Benefit Heatmap – Reconstruction (all channels)',
-            'Δ loss when extending context by one block',
+            'Δ loss vs per-last mean (start vs start+1)',
             'lift_all',
-            'Positive values = larger loss before adding the previous block (benefit). Negative = new block hurts predictions.',
+            'Blue = this block reduces loss more than an average added block (better-than-mean benefit). Red = worse than mean.',
             cmap_name='coolwarm',
             center_zero=True,
             top_curve=best_loss_all,
             top_curve_label="Lowest loss per last_block",
-            row_label="Avg Δ loss per start_block",
+            row_label="Avg Δ vs mean per start_block",
         )
         for ch_idx in range(context_gain_channels.shape[0]):
             gain_means[f"ch{ch_idx}"] = add_heatmap(
                 context_gain_channels[ch_idx],
                 'Context Benefit Heatmap – Reconstruction',
-                'Δ loss when extending context by one block',
+                'Δ loss vs per-last mean (start vs start+1)',
                 'lift',
-                'Positive values = larger loss before adding the previous block (benefit). Negative = new block hurts predictions.',
+                'Blue = this block reduces loss more than an average added block (better-than-mean benefit). Red = worse than mean.',
                 cmap_name='coolwarm',
                 center_zero=True,
                 per_channel=True,
                 ch_idx=ch_idx,
                 top_curve=best_loss_channels[ch_idx],
                 top_curve_label="Lowest loss per last_block",
-                row_label="Avg Δ loss per start_block",
+                row_label="Avg Δ vs mean per start_block",
             )
 
         highlights_all = select_highlight_profiles(recon_np, expected_curve, expected_std)
