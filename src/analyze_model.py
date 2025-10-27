@@ -1699,37 +1699,37 @@ def main():
                 best_loss_filtered_aligned = np.full(recon_np.shape[0], np.nan, dtype=float)
                 for new_idx, orig_idx in enumerate(keep_indices):
                     best_loss_filtered_aligned[orig_idx] = best_loss_filtered[new_idx]
-        mean_loss_after = float(np.nanmean(best_loss_filtered))
-    else:
-        filtered_losses_np = None
-        best_loss_filtered_aligned = np.full(recon_np.shape[0], np.nan, dtype=float)
-        mean_loss_after = np.nan
+                mean_loss_after = float(np.nanmean(best_loss_filtered))
+            else:
+                filtered_losses_np = None
+                best_loss_filtered_aligned = np.full(recon_np.shape[0], np.nan, dtype=float)
+                mean_loss_after = np.nan
 
-        print(
-            f"Removal set size: {len(removal_indices)}; mean best loss {mean_loss_before:.6f} → {mean_loss_after:.6f}"
-        )
-
-        if row_sum_all is not None:
-            plot_block_lift_summary(context_gain_all, filename, i, images_dir, title_prefix="All")
-            plot_mean_scatter(
-                row_sum_all, best_loss_all, filename, i, images_dir, tag="lift_all", removal_indices=removal_indices
-            )
-        for ch_idx in range(context_gain_channels.shape[0]):
-            means = gain_means.get(f"ch{ch_idx}")
-            if means is None:
-                continue
-            _, row_mean_ch = means
-            best_loss_ch = best_loss_channels[ch_idx] if ch_idx < best_loss_channels.shape[0] else None
-            if best_loss_ch is not None:
-                plot_mean_scatter(
-                    row_mean_ch,
-                    best_loss_ch,
-                    filename,
-                    i,
-                    images_dir,
-                    tag=f"lift_ch{ch_idx}",
-                    removal_indices=removal_indices,
+                print(
+                    f"Removal set size: {len(removal_indices)}; mean best loss {mean_loss_before:.6f} → {mean_loss_after:.6f}"
                 )
+
+                if row_sum_all is not None:
+                    plot_block_lift_summary(context_gain_all, filename, i, images_dir, title_prefix="All")
+                    plot_mean_scatter(
+                        row_sum_all, best_loss_all, filename, i, images_dir, tag="lift_all", removal_indices=removal_indices
+                    )
+                for ch_idx in range(context_gain_channels.shape[0]):
+                    means = gain_means.get(f"ch{ch_idx}")
+                    if means is None:
+                        continue
+                    _, row_mean_ch = means
+                    best_loss_ch = best_loss_channels[ch_idx] if ch_idx < best_loss_channels.shape[0] else None
+                    if best_loss_ch is not None:
+                        plot_mean_scatter(
+                            row_mean_ch,
+                            best_loss_ch,
+                            filename,
+                            i,
+                            images_dir,
+                            tag=f"lift_ch{ch_idx}",
+                            removal_indices=removal_indices,
+                        )
         plot_heatmap(
             dt_np,
             title='Δt Heatmap – gap between blocks',
