@@ -144,22 +144,41 @@ def prepare_sample(model, dataset, index, device):
     return x, x_i, x_l_mean, x_dt, x_lt, N, filename
 
 
-def compute_loss(model, x, x_i, N, start_block, last_block, x_dt, x_lt):
+def compute_loss(model, x, x_i, N, start_block, last_block, x_dt, x_lt, exclude_blocks=None):
     """
     Compute masked MSE loss for a given block configuration.
     Returns: (loss, xs, x_is, bool_mask, pred, mblock, indices)
     """
 
-    indices = list(range(last_block + 1, N.max().item())) + list(range(last_block + 1))
-    start_index = indices.index(start_block)
+    total_blocks = int(N.max().item())
+    exclude_set = set(exclude_blocks or [])
+    if start_block in exclude_set or last_block in exclude_set:
+        raise ValueError("start_block or last_block is in the excluded set.")
 
-    indices = indices[start_index:]
+    def advance(idx):
+        return (idx + 1) % total_blocks
+
+    indices = []
+    current = start_block
+    visited = 0
+    while True:
+        if current not in exclude_set:
+            indices.append(current)
+        if current == last_block:
+            break
+        current = advance(current)
+        visited += 1
+        if visited > total_blocks + len(exclude_set):
+            raise RuntimeError("Failed to reach last_block without looping indefinitely.")
+
+    if not indices or indices[-1] != last_block:
+        raise RuntimeError("Invalid context path computed for compute_loss.")
+
     mblock = [len(indices) - 1]
-
     dt = x_dt[indices].sum().item()
     lt = x_lt[indices].sum().item()
 
-    if start_block == last_block:
+    if len(indices) == 1:
         nan = torch.tensor(float('nan'), device=x.device)
         return nan, nan, nan, dt, lt, None, None, None, None, None, None
 
@@ -244,6 +263,53 @@ def column_mask_from_bool_mask(bool_mask, H, W, patch_size):
     Htok = max(1, H // ph)
     Wtok = max(1, W // pw)
     return bool_mask.reshape(-1, Htok, Wtok).any(dim=1)
+
+
+def compute_losses_filtered(
+    model,
+    x,
+    x_i,
+    N,
+    x_dt,
+    x_lt,
+    *,
+    exclude_set,
+    included_indices,
+    device,
+):
+    channels = int(x.shape[1])
+    m = len(included_indices)
+    losses_filtered = torch.full((m, m), float('nan'), device=device)
+    losses_filtered_channels = torch.full((channels, m, m), float('nan'), device=device)
+    dt_filtered = torch.full((m, m), float('nan'), device=device)
+    lt_filtered = torch.full((m, m), float('nan'), device=device)
+    total_jobs = max((m - 1) * (m - 1), 1)
+    with tqdm(total=total_jobs, desc="Recomputing filtered losses") as pbar:
+        for last_idx, last_block in enumerate(included_indices):
+            for start_idx, start_block in enumerate(included_indices):
+                if start_block == last_block:
+                    continue
+                with torch.no_grad():
+                    loss_recon, channel_losses, dt_val, lt_val, *_ = compute_loss(
+                        model,
+                        x,
+                        x_i,
+                        N,
+                        start_block=start_block,
+                        last_block=last_block,
+                        x_dt=x_dt,
+                        x_lt=x_lt,
+                        exclude_blocks=exclude_set,
+                    )
+                losses_filtered[start_idx, last_idx] = (
+                    float('nan') if torch.isnan(loss_recon) else loss_recon
+                )
+                if channel_losses is not None and torch.is_tensor(channel_losses):
+                    losses_filtered_channels[:, start_idx, last_idx] = channel_losses.squeeze(0)
+                dt_filtered[start_idx, last_idx] = dt_val
+                lt_filtered[start_idx, last_idx] = lt_val
+                pbar.update(1)
+    return losses_filtered, losses_filtered_channels, dt_filtered, lt_filtered
 
 
 def compute_best_context_indices(loss_matrix: torch.Tensor) -> np.ndarray:
@@ -657,15 +723,16 @@ def process_file(model, dataset, index, device):
         cache_dirty = True
 
     if cache_dirty:
-        # Always persist cache on CPU tensors
-        cache_to_store = {
-            "loss_matrix": all_losses_reconstruction.cpu(),
-            "channel_loss_matrix": all_losses_channels.cpu(),
-            "dt_matrix": all_dt.cpu(),
-            "lt_matrix": all_lt.cpu(),
-            "recon_channel_pref": recon_channel_pref.cpu(),
-        }
-        save_to_cache(filename, cache_to_store)
+        cache_data.update(
+            {
+                "loss_matrix": all_losses_reconstruction.cpu(),
+                "channel_loss_matrix": all_losses_channels.cpu(),
+                "dt_matrix": all_dt.cpu(),
+                "lt_matrix": all_lt.cpu(),
+                "recon_channel_pref": recon_channel_pref.cpu(),
+            }
+        )
+        save_to_cache(filename, cache_data)
 
     return (
         all_losses_reconstruction,
@@ -677,6 +744,10 @@ def process_file(model, dataset, index, device):
         x_dt,
         x_lt,
         recon_channel_pref,
+        cache_data,
+        x,
+        x_i,
+        N,
     )
 
 
@@ -1161,6 +1232,10 @@ def main():
             x_dt,
             x_lt,
             recon_channel_pref,
+            cache_data,
+            x_sample,
+            x_i_sample,
+            N_sample,
         ) = process_file(model, dataset, i, device)
 
         recon_np = all_losses_reconstruction.detach().cpu().numpy()
@@ -1561,18 +1636,75 @@ def main():
         keep_indices = np.array(
             [idx for idx in range(recon_np.shape[0]) if idx not in set(removal_indices)], dtype=int
         )
-        filtered_losses_np = None
-        best_loss_filtered_aligned = np.full(recon_np.shape[0], np.nan, dtype=float)
-        mean_loss_after = np.nan
-        if keep_indices.size > 0:
-            filtered_losses_np = recon_np[np.ix_(keep_indices, keep_indices)]
-            best_loss_filtered = compute_best_loss_curve(filtered_losses_np)
-            for new_idx, orig_idx in enumerate(keep_indices):
-                best_loss_filtered_aligned[orig_idx] = best_loss_filtered[new_idx]
-            mean_loss_after = float(np.nanmean(best_loss_filtered))
         mean_loss_before = (
             float(np.nanmean(best_loss_all[valid_mask_scatter])) if valid_mask_scatter.any() else np.nan
         )
+
+        removal_key = tuple(int(r) for r in np.sort(removal_indices))
+        filtered_losses_t = cache_data.get("filtered_loss_matrix")
+        filtered_channel_losses_t = cache_data.get("filtered_channel_loss_matrix")
+        filtered_included = cache_data.get("filtered_included_indices")
+        filtered_removed = tuple(cache_data.get("filtered_removed_indices", []))
+
+        if removal_indices.size == 0:
+            best_loss_filtered_aligned = best_loss_all.copy()
+            mean_loss_after = mean_loss_before
+            filtered_losses_np = recon_np.copy()
+        else:
+            need_recompute = True
+            if (
+                filtered_losses_t is not None
+                and filtered_included is not None
+                and filtered_removed == removal_key
+            ):
+                need_recompute = False
+            if need_recompute:
+                exclusion_set = set(int(idx) for idx in removal_indices)
+                included_indices_list = [int(idx) for idx in keep_indices.tolist()]
+                if included_indices_list:
+                    filtered_losses_t, filtered_channel_losses_t, filtered_dt_t, filtered_lt_t = compute_losses_filtered(
+                        model,
+                        x_sample,
+                        x_i_sample,
+                        N_sample,
+                        x_dt,
+                        x_lt,
+                        exclude_set=exclusion_set,
+                        included_indices=included_indices_list,
+                        device=device,
+                    )
+                    filtered_losses_t = filtered_losses_t.detach().cpu()
+                    filtered_channel_losses_t = filtered_channel_losses_t.detach().cpu()
+                    filtered_dt_t = filtered_dt_t.detach().cpu()
+                    filtered_lt_t = filtered_lt_t.detach().cpu()
+                else:
+                    filtered_losses_t = None
+                    filtered_channel_losses_t = None
+                    filtered_dt_t = None
+                    filtered_lt_t = None
+                cache_data.update(
+                    {
+                        "filtered_loss_matrix": filtered_losses_t,
+                        "filtered_channel_loss_matrix": filtered_channel_losses_t,
+                        "filtered_dt_matrix": filtered_dt_t,
+                        "filtered_lt_matrix": filtered_lt_t,
+                        "filtered_included_indices": [int(idx) for idx in keep_indices.tolist()],
+                        "filtered_removed_indices": list(removal_key),
+                    }
+                )
+                save_to_cache(filename, cache_data)
+            if filtered_losses_t is not None:
+                filtered_losses_np = filtered_losses_t.numpy()
+                best_loss_filtered = compute_best_loss_curve(filtered_losses_np)
+                best_loss_filtered_aligned = np.full(recon_np.shape[0], np.nan, dtype=float)
+                for new_idx, orig_idx in enumerate(keep_indices):
+                    best_loss_filtered_aligned[orig_idx] = best_loss_filtered[new_idx]
+                mean_loss_after = float(np.nanmean(best_loss_filtered))
+            else:
+                filtered_losses_np = None
+                best_loss_filtered_aligned = np.full(recon_np.shape[0], np.nan, dtype=float)
+                mean_loss_after = np.nan
+
         print(
             f"Removal set size: {len(removal_indices)}; mean best loss {mean_loss_before:.6f} → {mean_loss_after:.6f}"
         )
