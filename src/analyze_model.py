@@ -184,6 +184,166 @@ def compute_loss(model, x, x_i, N, start_block, last_block, x_dt, x_lt):
             raise
 
 
+def _normalize_patch_size(patch_size):
+    if isinstance(patch_size, (tuple, list)):
+        assert len(patch_size) == 2, "patch_size tuple must have length 2"
+        return int(patch_size[0]), int(patch_size[1])
+    return int(patch_size), int(patch_size)
+
+
+def reconstruct_channel_from_tokens(xs, pred, bool_mask, patch_size, channel_idx):
+    """
+    Reconstruct a single channel by replacing masked tokens with decoder predictions.
+
+    Args:
+        xs: (B, C, H, W) normalized spectrogram window.
+        pred: (B, T, P) decoder output in normalized space.
+        bool_mask: (B, T) boolean mask for tokens that were masked.
+        patch_size: tuple or int describing patch height/width.
+        channel_idx: which channel to reconstruct.
+
+    Returns:
+        Tensor of shape (B, 1, H, W) containing the reconstructed channel.
+    """
+    ph, pw = _normalize_patch_size(patch_size)
+    patch_area = ph * pw
+
+    xs_ch = xs[:, channel_idx : channel_idx + 1]
+    unfold = torch.nn.Unfold(kernel_size=(ph, pw), stride=(ph, pw))
+    fold = torch.nn.Fold(output_size=xs_ch.shape[-2:], kernel_size=(ph, pw), stride=(ph, pw))
+
+    x_patches = unfold(xs_ch).transpose(1, 2)  # (B, T, patch_area)
+    target_mean = x_patches.mean(dim=-1, keepdim=True)
+    target_std = x_patches.std(dim=-1, keepdim=True)
+
+    start = channel_idx * patch_area
+    stop = start + patch_area
+    pred_slice = pred[..., start:stop]
+    pred_denorm = pred_slice * (target_std + 1e-6) + target_mean
+
+    out_patches = x_patches.clone()
+    out_patches[bool_mask] = pred_denorm[bool_mask]
+    out_patches = out_patches.transpose(1, 2)  # (B, patch_area, T)
+    x_rec_ch = fold(out_patches)  # (B, 1, H, W)
+    return x_rec_ch
+
+
+def column_mask_from_bool_mask(bool_mask, H, W, patch_size):
+    """
+    Convert token-level mask to per-column mask in pixel space.
+
+    Args:
+        bool_mask: (B, T) boolean tensor.
+        H, W: spatial dimensions.
+        patch_size: tuple or int describing patch size.
+
+    Returns:
+        Tensor of shape (B, W) with True where any patch in the column was masked.
+    """
+    ph, pw = _normalize_patch_size(patch_size)
+    Htok = max(1, H // ph)
+    Wtok = max(1, W // pw)
+    return bool_mask.reshape(-1, Htok, Wtok).any(dim=1)
+
+
+def compute_best_context_indices(loss_matrix: torch.Tensor) -> np.ndarray:
+    """
+    For each last_block (column) return the start_block (row) that achieves the lowest loss.
+    Returns an array of shape (N,) with -1 where no finite loss is available.
+    """
+    mat_np = loss_matrix.detach().cpu().numpy()
+    n = mat_np.shape[0]
+    best = np.full(n, -1, dtype=np.int32)
+    for last in range(n):
+        col = mat_np[:, last]
+        finite = np.isfinite(col)
+        if finite.any():
+            best[last] = int(np.nanargmin(np.where(finite, col, np.nan)))
+    return best
+
+
+def compute_reconstructed_channel_preference(
+    model,
+    x,
+    x_i,
+    N,
+    x_dt,
+    x_lt,
+    loss_matrix: torch.Tensor,
+    dataset_mean: float,
+    dataset_std: float,
+) -> np.ndarray:
+    """
+    For each last_block, reconstruct the masked block using the best-loss context and
+    compute the mean channel preference (analogous to chirp_labels).
+
+    Returns:
+        np.ndarray of shape (N,) with values in [0,1] or NaN where unavailable.
+    """
+    best_indices = compute_best_context_indices(loss_matrix)
+    n_blocks = int(N.max().item())
+    results = np.full((n_blocks,), np.nan, dtype=np.float32)
+    dataset_mean = float(dataset_mean)
+    dataset_std = float(dataset_std)
+
+    for last_block in range(n_blocks):
+        start_block = int(best_indices[last_block])
+        if start_block < 0 or start_block == last_block:
+            continue
+        with torch.no_grad():
+            loss, channel_losses, dt, lt, xs, x_is, bool_mask, pred, mblock, indices = compute_loss(
+                model,
+                x,
+                x_i,
+                N,
+                start_block=start_block,
+                last_block=last_block,
+                x_dt=x_dt,
+                x_lt=x_lt,
+            )
+        if xs is None or pred is None or bool_mask is None or x_is is None or indices is None:
+            continue
+
+        B, C, H, W = xs.shape
+        if C < 2:
+            continue
+
+        target_idx = len(indices) - 1
+        bounds = x_is[0, target_idx].detach().cpu().numpy()
+        block_start = int(bounds[0])
+        block_end = int(bounds[1])
+        if block_end <= block_start:
+            continue
+        block_start = max(0, min(block_start, W - 1))
+        block_end = max(block_start + 1, min(block_end, W))
+
+        col_mask_tensor = column_mask_from_bool_mask(bool_mask.bool(), H, W, model.patch_size)
+        col_mask = col_mask_tensor[0].detach().cpu().numpy().astype(bool)
+        block_columns = np.arange(block_start, block_end)
+        if col_mask.any():
+            masked_cols = np.where(col_mask)[0]
+            overlap = np.intersect1d(block_columns, masked_cols)
+            if overlap.size > 0:
+                block_columns = overlap
+        if block_columns.size == 0:
+            continue
+
+        energies = []
+        for ch in range(C):
+            x_rec_ch = reconstruct_channel_from_tokens(xs, pred, bool_mask, model.patch_size, ch)
+            x_rec_np = x_rec_ch[0, 0].detach().cpu().numpy()
+            denorm = x_rec_np * dataset_std + dataset_mean
+            power = np.power(10.0, denorm / 10.0, dtype=np.float64)
+            energies.append(power.sum(axis=0))
+        energies = np.stack(energies, axis=0)
+        block_energy = energies[:, block_columns]
+        if block_energy.shape[0] < 2 or block_energy.shape[1] == 0:
+            continue
+        labels = (block_energy[1] > block_energy[0]).astype(np.float32)
+        results[last_block] = float(labels.mean())
+    return results
+
+
 def save_reconstruction(model, x, x_i, N, last_block, x_dt, x_lt, *, filename, index, images_dir='images'):
     """
     Save reconstruction visualizations for a given block configuration.
@@ -220,50 +380,6 @@ def save_reconstruction(model, x, x_i, N, last_block, x_dt, x_lt, *, filename, i
     if xs is None or pred is None or bool_mask is None:
         return [], loss, channel_losses_np
 
-    def _reconstruct_channel(xs, pred, bool_mask, patch_size, channel_idx):
-        """
-        Reconstruct a single channel by denormalizing decoder predictions for that channel only.
-        xs:   (B, C, H, W) input spectrogram window
-        pred: (B, T, P) decoder output in the same normalized space as loss
-        bool_mask: (B, T) which tokens were masked
-        Returns: (B, 1, H, W) image for the requested channel.
-        """
-        if isinstance(patch_size, int):
-            patch_size_tuple = (patch_size, patch_size)
-        else:
-            patch_size_tuple = tuple(patch_size)
-        ph, pw = patch_size_tuple
-        patch_area = ph * pw
-
-        xs_ch = xs[:, channel_idx : channel_idx + 1]  # (B, 1, H, W)
-        unfold = torch.nn.Unfold(kernel_size=patch_size_tuple, stride=patch_size_tuple)
-        fold = torch.nn.Fold(output_size=xs_ch.shape[-2:], kernel_size=patch_size_tuple, stride=patch_size_tuple)
-
-        x_patches = unfold(xs_ch).transpose(1, 2)  # (B, T, patch_area)
-        target_mean = x_patches.mean(dim=-1, keepdim=True)
-        target_std = x_patches.std(dim=-1, keepdim=True)
-
-        start = channel_idx * patch_area
-        stop = start + patch_area
-        pred_slice = pred[..., start:stop]
-        pred_denorm = pred_slice * (target_std + 1e-6) + target_mean
-
-        out_patches = x_patches.clone()
-        out_patches[bool_mask] = pred_denorm[bool_mask]
-        out_patches = out_patches.transpose(1, 2)  # (B, patch_area, T)
-        x_rec_ch = fold(out_patches)  # (B, 1, H, W)
-        return x_rec_ch
-
-    def _column_mask_2d(bool_mask, H, W, patch_size):
-        """
-        Convert a token-level mask (B, T) into a per-column mask (B, W) in pixel space.
-        T = H' * W', where H' = H // patch_height, W' = W // patch_width.
-        """
-        ph, pw = patch_size
-        Htok = max(1, H // ph)
-        Wtok = max(1, W // pw)
-        return bool_mask.view(-1, Htok, Wtok).any(dim=1)
-
     def _draw_separators(ax, x_is_b):
         K = x_is_b.shape[0]
         for k in range(K - 1):
@@ -271,7 +387,7 @@ def save_reconstruction(model, x, x_i, N, last_block, x_dt, x_lt, *, filename, i
             ax.axvline(pos - 0.5, linewidth=0.8, alpha=0.8, color='cyan')
 
     B, C, H, W = xs.shape
-    col_mask = _column_mask_2d(bool_mask, H, W, model.patch_size)[0].detach().cpu().numpy()
+    col_mask = column_mask_from_bool_mask(bool_mask.bool(), H, W, model.patch_size)[0].detach().cpu().numpy()
     col_mask_bool = col_mask.astype(bool)
     true_idxs = np.where(col_mask_bool)[0]
     zoom_has_span = true_idxs.size > 0
@@ -299,7 +415,7 @@ def save_reconstruction(model, x, x_i, N, last_block, x_dt, x_lt, *, filename, i
     paths = []
     os.makedirs(images_dir, exist_ok=True)
     for ch in range(C):
-        x_rec_ch = _reconstruct_channel(xs, pred, bool_mask, model.patch_size, ch)
+        x_rec_ch = reconstruct_channel_from_tokens(xs, pred, bool_mask, model.patch_size, ch)
         xs_cpu = xs[0, ch].detach().cpu().numpy()
         x_rec_cpu = x_rec_ch[0, 0].detach().cpu().numpy()
         vmin = min(np.nanmin(xs_cpu), np.nanmin(x_rec_cpu))
@@ -461,27 +577,95 @@ def process_file(model, dataset, index, device):
         return losses_reconstruction, losses_reconstruction_channels, dt_mat, lt_mat
 
     cached = load_from_cache(filename)
-    if cached is not None:
-        print(f"Loaded cached matrices for {filename}")
-        cached_valid = isinstance(cached, tuple) and len(cached) in (3, 4, 5)
-        if cached_valid and len(cached) == 4:
-            all_losses_reconstruction, all_losses_channels, all_dt, all_lt = cached
-        elif cached_valid and len(cached) == 3:
-            # lacks per-channel data; force recompute
-            cached_valid = False
-        elif cached_valid and len(cached) == 5:
-            all_losses_reconstruction, _, _, all_dt, all_lt = cached
-            cached_valid = False
-        if not cached_valid:
-            cached = None
-    else:
-        cached = None
+    cache_data = {}
+    cache_dirty = False
 
-    if cached is None:
-        all_losses_reconstruction, all_losses_channels, all_dt, all_lt = compute_losses(
-            x, x_i, N, x_dt, x_lt
+    def _ensure_tensor(val):
+        if isinstance(val, torch.Tensor):
+            return val
+        if isinstance(val, np.ndarray):
+            return torch.from_numpy(val)
+        return None
+
+    if isinstance(cached, dict):
+        cache_data = dict(cached)
+        print(f"Loaded cached data for {filename}")
+    elif isinstance(cached, tuple):
+        # Legacy tuple format: upgrade to dict
+        if len(cached) >= 4:
+            cache_data = {
+                "loss_matrix": _ensure_tensor(cached[0]),
+                "channel_loss_matrix": _ensure_tensor(cached[1]),
+                "dt_matrix": _ensure_tensor(cached[2]),
+                "lt_matrix": _ensure_tensor(cached[3]),
+            }
+            if len(cached) >= 5:
+                cache_data["recon_channel_pref"] = _ensure_tensor(cached[4])
+            cache_dirty = True  # ensure re-saved in new format
+            print(f"Upgraded legacy cache for {filename}")
+        elif cached is not None:
+            print(f"Discarding incompatible cache for {filename}")
+    elif cached is not None:
+        print(f"Discarding unrecognized cache format for {filename}")
+
+    all_losses_reconstruction = _ensure_tensor(cache_data.get("loss_matrix"))
+    all_losses_channels = _ensure_tensor(cache_data.get("channel_loss_matrix"))
+    all_dt = _ensure_tensor(cache_data.get("dt_matrix"))
+    all_lt = _ensure_tensor(cache_data.get("lt_matrix"))
+    recon_channel_pref = _ensure_tensor(cache_data.get("recon_channel_pref"))
+
+    if all_losses_reconstruction is not None:
+        all_losses_reconstruction = all_losses_reconstruction.cpu()
+    if all_losses_channels is not None:
+        all_losses_channels = all_losses_channels.cpu()
+    if all_dt is not None:
+        all_dt = all_dt.cpu()
+    if all_lt is not None:
+        all_lt = all_lt.cpu()
+    if recon_channel_pref is not None:
+        recon_channel_pref = recon_channel_pref.cpu()
+
+    if all_losses_reconstruction is None or all_losses_channels is None or all_dt is None or all_lt is None:
+        all_losses_reconstruction, all_losses_channels, all_dt, all_lt = compute_losses(x, x_i, N, x_dt, x_lt)
+        all_losses_reconstruction = all_losses_reconstruction.detach().cpu()
+        all_losses_channels = all_losses_channels.detach().cpu()
+        all_dt = all_dt.detach().cpu()
+        all_lt = all_lt.detach().cpu()
+        cache_data["loss_matrix"] = all_losses_reconstruction
+        cache_data["channel_loss_matrix"] = all_losses_channels
+        cache_data["dt_matrix"] = all_dt
+        cache_data["lt_matrix"] = all_lt
+        cache_dirty = True
+
+    dataset_mean = float(dataset.mean)
+    dataset_std = float(dataset.std)
+
+    if recon_channel_pref is None:
+        recon_pref_np = compute_reconstructed_channel_preference(
+            model,
+            x,
+            x_i,
+            N,
+            x_dt,
+            x_lt,
+            all_losses_reconstruction,
+            dataset_mean,
+            dataset_std,
         )
-        save_to_cache(filename, (all_losses_reconstruction, all_losses_channels, all_dt, all_lt))
+        recon_channel_pref = torch.from_numpy(recon_pref_np)
+        cache_data["recon_channel_pref"] = recon_channel_pref
+        cache_dirty = True
+
+    if cache_dirty:
+        # Always persist cache on CPU tensors
+        cache_to_store = {
+            "loss_matrix": all_losses_reconstruction.cpu(),
+            "channel_loss_matrix": all_losses_channels.cpu(),
+            "dt_matrix": all_dt.cpu(),
+            "lt_matrix": all_lt.cpu(),
+            "recon_channel_pref": recon_channel_pref.cpu(),
+        }
+        save_to_cache(filename, cache_to_store)
 
     return (
         all_losses_reconstruction,
@@ -492,6 +676,7 @@ def process_file(model, dataset, index, device):
         x_l_mean,
         x_dt,
         x_lt,
+        recon_channel_pref,
     )
 
 
@@ -959,6 +1144,7 @@ def main():
             x_l_mean,
             x_dt,
             x_lt,
+            recon_channel_pref,
         ) = process_file(model, dataset, i, device)
 
         recon_np = all_losses_reconstruction.detach().cpu().numpy()
@@ -967,6 +1153,11 @@ def main():
         lt_np = all_lt.detach().cpu().numpy()
 
         labels_true_np = x_l_mean.detach().cpu().numpy().astype(float).reshape(-1)
+        labels_pred_np = (
+            recon_channel_pref.detach().cpu().numpy().astype(float).reshape(-1)
+            if recon_channel_pref is not None
+            else None
+        )
         x_dt_np = x_dt.detach().cpu().numpy()
         x_lt_np = x_lt.detach().cpu().numpy()
 
@@ -1002,6 +1193,7 @@ def main():
             top_curve: np.ndarray | None = None,
             top_curve_label: str | None = None,
             row_label: str | None = None,
+            labels_pred_np: np.ndarray | None = None,
         ):
             fig_hm, ax_hm = plt.subplots(figsize=(12, 8))
             data_ma = np.ma.masked_invalid(mat_np)
@@ -1059,21 +1251,38 @@ def main():
             if note:
                 ax_hm.annotate(note, xy=(0.99, 0.01), xycoords='axes fraction', fontsize=9, ha='right', va='bottom')
 
-            # === Actual-label strips (0→1 mapped to green→red) ===
+            # === Channel-preference strips (ground truth vs prediction) ===
             Hh, Wh = mat_np.shape
-            lbl = np.asarray(labels_true_np, dtype=float)
-            lbl = np.clip(lbl, 0.0, 1.0)
-            lbl_x = lbl[:Wh]
-            lbl_y = lbl[:Hh]
+            lbl_true = np.asarray(labels_true_np, dtype=float)
+            lbl_true = np.clip(lbl_true, 0.0, 1.0)
+            lbl_true = np.nan_to_num(lbl_true, nan=0.5, posinf=1.0, neginf=0.0)
+            lbl_true_x = lbl_true[:Wh]
+            lbl_true_y = lbl_true[:Hh]
+
+            if labels_pred_np is not None:
+                lbl_pred = np.asarray(labels_pred_np, dtype=float)
+                lbl_pred = np.clip(lbl_pred, 0.0, 1.0)
+                lbl_pred = np.nan_to_num(lbl_pred, nan=0.5, posinf=1.0, neginf=0.0)
+                lbl_pred_x = lbl_pred[:Wh]
+                lbl_pred_y = lbl_pred[:Hh]
+            else:
+                lbl_pred = None
+                lbl_pred_x = None
+                lbl_pred_y = None
 
             from mpl_toolkits.axes_grid1 import make_axes_locatable
 
             divider = make_axes_locatable(ax_hm)
             cmap_lbl = plt.get_cmap('RdYlGn_r').copy()
 
-            ax_strip_x = divider.append_axes("bottom", size="3%", pad=0.3, sharex=ax_hm)
-            ax_strip_x.imshow(
-                lbl_x[np.newaxis, :],
+            pad_x_true = 0.3
+            pad_x_pred = pad_x_true + 0.08
+            pad_y_true = 0.45
+            pad_y_pred = pad_y_true + 0.12
+
+            ax_strip_x_true = divider.append_axes("bottom", size="3%", pad=pad_x_true, sharex=ax_hm)
+            ax_strip_x_true.imshow(
+                lbl_true_x[np.newaxis, :],
                 aspect='auto',
                 cmap=cmap_lbl,
                 interpolation='nearest',
@@ -1081,15 +1290,26 @@ def main():
                 vmin=0.0,
                 vmax=1.0,
             )
-            ax_strip_x.set_xlim(ax_hm.get_xlim())
-            ax_strip_x.set_ylabel("channel", fontsize=8)
-            ax_strip_x.set_xlabel("Green=L, Red=R", fontsize=8)
-            ax_strip_x.set_yticks([])
-            ax_strip_x.set_xticks([])
+            ax_strip_x_true.set_ylabel("GT channel", fontsize=8)
+            ax_strip_x_true.set_xlabel("Green=L, Red=R", fontsize=8)
 
-            ax_strip_y = divider.append_axes("left", size="3%", pad=0.45, sharey=ax_hm)
-            ax_strip_y.imshow(
-                lbl_y[:, np.newaxis],
+            ax_strip_x_pred = None
+            if lbl_pred_x is not None:
+                ax_strip_x_pred = divider.append_axes("bottom", size="3%", pad=pad_x_pred, sharex=ax_hm)
+                ax_strip_x_pred.imshow(
+                    lbl_pred_x[np.newaxis, :],
+                    aspect='auto',
+                    cmap=cmap_lbl,
+                    interpolation='nearest',
+                    origin='lower',
+                    vmin=0.0,
+                    vmax=1.0,
+                )
+                ax_strip_x_pred.set_ylabel("Pred channel", fontsize=8)
+
+            ax_strip_y_true = divider.append_axes("left", size="3%", pad=pad_y_true, sharey=ax_hm)
+            ax_strip_y_true.imshow(
+                lbl_true_y[:, np.newaxis],
                 aspect='auto',
                 cmap=cmap_lbl,
                 interpolation='nearest',
@@ -1097,18 +1317,37 @@ def main():
                 vmin=0.0,
                 vmax=1.0,
             )
-            ax_strip_y.set_ylim(ax_hm.get_ylim())
-            ax_strip_y.set_ylabel("channel (G=L, R=R)", fontsize=8, rotation=90, labelpad=18)
-            ax_strip_y.set_xticks([])
-            ax_strip_y.set_yticks([])
+            ax_strip_y_true.set_ylabel("GT (G=L, R=R)", fontsize=8, rotation=90, labelpad=18)
 
-            # --- after creating ax_strip_x and ax_strip_y ---
+            ax_strip_y_pred = None
+            if lbl_pred_y is not None:
+                ax_strip_y_pred = divider.append_axes("left", size="3%", pad=pad_y_pred, sharey=ax_hm)
+                ax_strip_y_pred.imshow(
+                    lbl_pred_y[:, np.newaxis],
+                    aspect='auto',
+                    cmap=cmap_lbl,
+                    interpolation='nearest',
+                    origin='lower',
+                    vmin=0.0,
+                    vmax=1.0,
+                )
+                ax_strip_y_pred.set_ylabel("Pred (G=L, R=R)", fontsize=8, rotation=90, labelpad=18)
 
-            # 1) Turn OFF ticks/labels on the strips (they're just color bands)
-            ax_strip_x.tick_params(axis='x', which='both', bottom=False, labelbottom=False)
-            ax_strip_x.tick_params(axis='y', which='both', left=False, labelleft=False)
-            ax_strip_y.tick_params(axis='x', which='both', bottom=False, labelbottom=False)
-            ax_strip_y.tick_params(axis='y', which='both', left=False, labelleft=False)
+            bottom_axes = [ax_strip_x_true]
+            if ax_strip_x_pred is not None:
+                bottom_axes.append(ax_strip_x_pred)
+            for ax_strip in bottom_axes:
+                ax_strip.set_xlim(ax_hm.get_xlim())
+                ax_strip.tick_params(axis='x', which='both', bottom=False, labelbottom=False)
+                ax_strip.tick_params(axis='y', which='both', left=False, labelleft=False)
+
+            left_axes = [ax_strip_y_true]
+            if ax_strip_y_pred is not None:
+                left_axes.append(ax_strip_y_pred)
+            for ax_strip in left_axes:
+                ax_strip.set_ylim(ax_hm.get_ylim())
+                ax_strip.tick_params(axis='x', which='both', bottom=False, labelbottom=False)
+                ax_strip.tick_params(axis='y', which='both', left=False, labelleft=False)
 
             # 2) Turn ON ticks on the main heatmap (they got auto-disabled by sharex/sharey)
             ax_hm.tick_params(axis='x', which='both', bottom=True, labelbottom=True)
@@ -1196,6 +1435,7 @@ def main():
             top_curve=None,
             top_curve_label=None,
             row_label=None,
+            labels_pred=None,
         ):
             return plot_heatmap(
                 mat,
@@ -1209,6 +1449,7 @@ def main():
                 top_curve=top_curve,
                 top_curve_label=top_curve_label,
                 row_label=row_label,
+                labels_pred_np=labels_pred,
             )
 
         add_heatmap(
@@ -1216,8 +1457,9 @@ def main():
             'Loss (MSE) Heatmap – Reconstruction',
             'Loss (MSE)',
             'loss_recon',
-            'NaN = black; low = green; high = red. Pink dots mark the start_block giving the lowest loss for each last_block.',
+            'NaN = black; low = green; high = red.',
             cmap_name='coolwarm',
+            labels_pred=labels_pred_np,
         )
         for ch_idx in range(recon_ch_np.shape[0]):
             add_heatmap(
@@ -1229,6 +1471,7 @@ def main():
                 cmap_name='coolwarm',
                 per_channel=True,
                 ch_idx=ch_idx,
+                labels_pred=labels_pred_np,
             )
 
         gain_means = {}
@@ -1243,6 +1486,7 @@ def main():
             top_curve=best_loss_all,
             top_curve_label="Lowest loss per last_block",
             row_label="Σ Δ vs expected per start_block",
+            labels_pred=labels_pred_np,
         )
         for ch_idx in range(context_gain_channels.shape[0]):
             gain_means[f"ch{ch_idx}"] = add_heatmap(
@@ -1258,6 +1502,7 @@ def main():
                 top_curve=best_loss_channels[ch_idx],
                 top_curve_label="Lowest loss per last_block",
                 row_label="Σ Δ vs expected per start_block",
+                labels_pred=labels_pred_np,
             )
 
         highlights_all = select_highlight_profiles(recon_np, expected_curve, expected_std)
@@ -1302,6 +1547,7 @@ def main():
             cbar_label='Time between blocks',
             tag='dt',
             labels_true_np=labels_true_np,
+            labels_pred_np=labels_pred_np,
             note='Rows=start_block, Cols=last_block.',
             cmap_name='viridis',
         )
@@ -1311,6 +1557,7 @@ def main():
             cbar_label='Time within blocks',
             tag='lt',
             labels_true_np=labels_true_np,
+            labels_pred_np=labels_pred_np,
             note='Rows=start_block, Cols=last_block.',
             cmap_name='viridis',
         )
