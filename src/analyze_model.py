@@ -681,26 +681,26 @@ def plot_block_lift_summary(benefit_matrix, filename, index, images_dir, title_p
     """
     if benefit_matrix.size == 0:
         return None
-    mean_start = np.nanmean(benefit_matrix, axis=1)
-    valid_mask = np.isfinite(mean_start)
+    row_sum = np.nansum(benefit_matrix, axis=1)
+    valid_mask = np.isfinite(row_sum)
     if not valid_mask.any():
         return None
-    mean_start = np.where(valid_mask, mean_start, np.nan)
+    row_sum = np.where(valid_mask, row_sum, np.nan)
     fig, ax = plt.subplots(figsize=(12, 4))
-    x = np.arange(mean_start.shape[0])
-    ax.plot(x, mean_start, linewidth=2, marker='o', markersize=3)
+    x = np.arange(row_sum.shape[0])
+    ax.plot(x, row_sum, linewidth=2, marker='o', markersize=3)
     ax.set_xlabel("Block index (start_block)")
-    ax.set_ylabel("Average Δ advantage vs expected (start vs start+1)")
+    ax.set_ylabel("Σ Δ advantage vs expected (start vs start+1)")
     ax.set_title(f"{title_prefix} Context Benefit – Index {index}, File: {filename}")
     ax.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
-    finite_vals = mean_start[valid_mask]
+    finite_vals = row_sum[valid_mask]
     if finite_vals.size:
         limit = np.nanmax(np.abs(finite_vals))
         if np.isfinite(limit) and limit > 0:
             ax.set_ylim(-limit, limit)
     ax.axhline(0.0, color='black', linewidth=1.0, linestyle='--', alpha=0.7)
-    if mean_start.shape[0] > 0:
-        xticks = np.arange(0, mean_start.shape[0], 10) if mean_start.shape[0] > 10 else np.array([0])
+    if row_sum.shape[0] > 0:
+        xticks = np.arange(0, row_sum.shape[0], 10) if row_sum.shape[0] > 10 else np.array([0])
         ax.set_xticks(np.unique(xticks))
     out_path = os.path.join(images_dir, f"block_lift_{title_prefix.lower()}_{index}_{filename}.png")
     fig.savefig(out_path, dpi=300, bbox_inches="tight")
@@ -709,16 +709,16 @@ def plot_block_lift_summary(benefit_matrix, filename, index, images_dir, title_p
 
     # Log top/bottom performers for quick reference
     with np.errstate(invalid="ignore"):
-        order = np.argsort(mean_start[valid_mask])
+        order = np.argsort(row_sum[valid_mask])
     # Map sorted order back to actual indices
     valid_indices = np.where(valid_mask)[0]
-    sorted_blocks = valid_indices[np.argsort(mean_start[valid_mask])]
+    sorted_blocks = valid_indices[np.argsort(row_sum[valid_mask])]
     best = sorted_blocks[::-1][:5]
     worst = sorted_blocks[:5]
     highlight_indices = np.unique(np.concatenate([best, worst]))
-    ax.scatter(highlight_indices, mean_start[highlight_indices], color='black', s=40, zorder=5)
+    ax.scatter(highlight_indices, row_sum[highlight_indices], color='black', s=40, zorder=5)
     for idx in highlight_indices:
-        val = mean_start[idx]
+        val = row_sum[idx]
         ax.text(
             idx,
             val,
@@ -728,8 +728,8 @@ def plot_block_lift_summary(benefit_matrix, filename, index, images_dir, title_p
             ha='center',
             va='bottom' if val >= 0 else 'top',
         )
-    print("Top benefit blocks:", [(int(idx), float(mean_start[idx])) for idx in best])
-    print("Lowest benefit blocks:", [(int(idx), float(mean_start[idx])) for idx in worst])
+    print("Top benefit blocks:", [(int(idx), float(row_sum[idx])) for idx in best])
+    print("Lowest benefit blocks:", [(int(idx), float(row_sum[idx])) for idx in worst])
     return out_path
 
 
@@ -773,7 +773,7 @@ def plot_mean_scatter(row_mean, best_loss_curve, filename, index, images_dir, ta
     ax.axhline(y_mean, color='gray', linewidth=1.0, linestyle='--', alpha=0.8, label='_nolegend_')
     ax.axhline(0, color='gray', linewidth=0.8, linestyle='--')
     ax.axvline(0, color='gray', linewidth=0.8, linestyle='--')
-    ax.set_xlabel('Avg Δ vs expected per start_block (context benefit)')
+    ax.set_xlabel('Σ Δ vs expected per start_block (context benefit)')
     ax.set_ylabel('Lowest loss per last_block (best context)')
     ax.set_title(
         "Context benefit vs difficulty\n"
@@ -1092,7 +1092,7 @@ def main():
             ax_hm.tick_params(axis='both', direction='in')
 
             # Column/row summary plots
-            row_mean = np.nanmean(mat_np, axis=1)
+            row_mean = np.nansum(mat_np, axis=1)
             width = mat_np.shape[1]
 
             def align_curve(curve):
@@ -1120,7 +1120,7 @@ def main():
             ax_col_mean.grid(True, alpha=0.2)
             ax_row_mean = divider.append_axes("right", size="8%", pad=0.55, sharey=ax_hm)
             ax_row_mean.plot(row_mean, np.arange(mat_np.shape[0]), color="black", linewidth=1.5)
-            row_label_final = row_label or "Mean loss per start_block"
+            row_label_final = row_label or "Σ Δ vs expected per start_block"
             ax_row_mean.set_xlabel(row_label_final, fontsize=8)
             for label in ax_row_mean.get_xticklabels():
                 label.set_rotation(90)
@@ -1196,7 +1196,7 @@ def main():
             center_zero=True,
             top_curve=best_loss_all,
             top_curve_label="Lowest loss per last_block",
-            row_label="Avg Δ vs expected per start_block",
+            row_label="Σ Δ vs expected per start_block",
         )
         for ch_idx in range(context_gain_channels.shape[0]):
             gain_means[f"ch{ch_idx}"] = add_heatmap(
@@ -1211,7 +1211,7 @@ def main():
                 ch_idx=ch_idx,
                 top_curve=best_loss_channels[ch_idx],
                 top_curve_label="Lowest loss per last_block",
-                row_label="Avg Δ vs expected per start_block",
+                row_label="Σ Δ vs expected per start_block",
             )
 
         highlights_all = select_highlight_profiles(recon_np, expected_curve, expected_std)
