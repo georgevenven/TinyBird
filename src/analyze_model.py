@@ -547,37 +547,64 @@ def compute_best_loss_curve(loss_matrix: np.ndarray) -> np.ndarray:
     return best_loss
 
 
-def compute_context_gain_matrix(loss_matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def compute_context_gain_matrix(loss_matrix: np.ndarray, expected_curve: np.ndarray | None) -> np.ndarray:
     """
     Measures the incremental change in loss obtained by extending the context one block earlier.
     For each start_block row, compares the loss at start_block vs start_block+1 (i.e., dropping the earliest block).
     Positive values indicate the added block hurts performance; negative values mean the added block lowers loss.
-    Returns both the per-(start,last) benefit relative to the per-column mean and the column-wise mean itself.
+    We subtract the expected improvement for the corresponding context length so values reflect
+    "better/worse than average" benefit. Near-zero raw deltas are clamped to zero to avoid noise.
     """
     if loss_matrix.ndim != 2:
         raise ValueError("Expected a 2D loss matrix (start_block x last_block).")
     rows, cols = loss_matrix.shape
-    gain = np.full((rows, cols), np.nan, dtype=np.float64)
+    delta = np.full((rows, cols), np.nan, dtype=np.float64)
     if rows == 0 or cols == 0:
-        return gain, np.full(cols, np.nan, dtype=np.float64)
+        return delta
     for start in range(rows):
         next_start = (start + 1) % rows
         for last in range(cols):
             cur = loss_matrix[start, last]
             next_val = loss_matrix[next_start, last]
             if np.isfinite(cur) and np.isfinite(next_val):
-                gain[start, last] = cur - next_val
+                delta[start, last] = cur - next_val
 
-    finite_mask = np.isfinite(gain)
+    finite_mask = np.isfinite(delta)
     if finite_mask.any():
-        finite_vals = np.abs(gain[finite_mask])
+        finite_vals = np.abs(delta[finite_mask])
         scale = float(np.nanpercentile(finite_vals, 90)) if finite_vals.size else 0.0
         zero_tol = max(1e-8, scale * 1e-3)
-        gain[np.abs(gain) < zero_tol] = 0.0
+        small_mask = np.abs(delta) < zero_tol
+        delta[small_mask] = 0.0
 
-    mean_delta = np.nanmean(gain, axis=0, keepdims=True)
-    benefit = gain - mean_delta
-    return benefit, mean_delta.squeeze(0)
+    benefit = np.full_like(delta, np.nan)
+    row_idx = np.arange(rows)[:, None]
+    col_idx = np.arange(cols)[None, :]
+    context_len = (col_idx - row_idx) % rows
+
+    expected_curve = np.asarray(expected_curve, dtype=float).flatten() if expected_curve is not None else None
+    expected_delta = None
+    if expected_curve is not None and expected_curve.size:
+        expected_delta = np.full_like(expected_curve, np.nan)
+        expected_delta[0] = 0.0
+        expected_delta[1:] = expected_curve[1:] - expected_curve[:-1]
+
+    for start in range(rows):
+        for last in range(cols):
+            val = delta[start, last]
+            if not np.isfinite(val):
+                continue
+            if val == 0.0:
+                benefit[start, last] = 0.0
+                continue
+            ctx_len = int(context_len[start, last])
+            exp = 0.0
+            if expected_delta is not None and 0 <= ctx_len < expected_delta.shape[0]:
+                exp = expected_delta[ctx_len]
+                if not np.isfinite(exp):
+                    exp = 0.0
+            benefit[start, last] = val - exp
+    return benefit
 
 
 def select_highlight_profiles(
@@ -663,7 +690,7 @@ def plot_block_lift_summary(benefit_matrix, filename, index, images_dir, title_p
     x = np.arange(mean_start.shape[0])
     ax.plot(x, mean_start, linewidth=2, marker='o', markersize=3)
     ax.set_xlabel("Block index (start_block)")
-    ax.set_ylabel("Average Δ loss advantage (start vs start+1)")
+    ax.set_ylabel("Average Δ advantage vs expected (start vs start+1)")
     ax.set_title(f"{title_prefix} Context Benefit – Index {index}, File: {filename}")
     ax.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
     finite_vals = mean_start[valid_mask]
@@ -746,7 +773,7 @@ def plot_mean_scatter(row_mean, best_loss_curve, filename, index, images_dir, ta
     ax.axhline(y_mean, color='gray', linewidth=1.0, linestyle='--', alpha=0.8, label='_nolegend_')
     ax.axhline(0, color='gray', linewidth=0.8, linestyle='--')
     ax.axvline(0, color='gray', linewidth=0.8, linestyle='--')
-    ax.set_xlabel('Avg Δ vs mean per start_block (context benefit)')
+    ax.set_xlabel('Avg Δ vs expected per start_block (context benefit)')
     ax.set_ylabel('Lowest loss per last_block (best context)')
     ax.set_title(
         "Context benefit vs difficulty\n"
@@ -906,11 +933,11 @@ def main():
             if recon_ch_np.size
             else np.empty((0, recon_np.shape[1]))
         )
-        context_gain_all, _ = compute_context_gain_matrix(recon_np)
+        context_gain_all = compute_context_gain_matrix(recon_np, expected_curve)
         context_gain_channels = []
         if recon_ch_np.size:
             for ch_idx in range(recon_ch_np.shape[0]):
-                gain_ch, _ = compute_context_gain_matrix(recon_ch_np[ch_idx])
+                gain_ch = compute_context_gain_matrix(recon_ch_np[ch_idx], expected_curve_ch[ch_idx])
                 context_gain_channels.append(gain_ch)
             context_gain_channels = np.stack(context_gain_channels, axis=0)
         else:
@@ -977,23 +1004,6 @@ def main():
 
             if note:
                 ax_hm.annotate(note, xy=(0.99, 0.01), xycoords='axes fraction', fontsize=9, ha='right', va='bottom')
-
-            # mark argmin row per column (optional visual cue)
-            arr = np.array(mat_np, dtype=float)
-            finite_mask = np.isfinite(arr)
-            cols = np.where(finite_mask.any(axis=0))[0]
-            if cols.size > 0:
-                arr_inf = arr.copy()
-                arr_inf[~finite_mask] = np.inf
-                ys = np.argmin(arr_inf[:, cols], axis=0)
-                fig = ax_hm.figure
-                bbox = ax_hm.get_window_extent().transformed(fig.dpi_scale_trans.inverted())
-                cell_w_in = (bbox.width) / max(1, arr.shape[1])
-                cell_h_in = (bbox.height) / max(1, arr.shape[0])
-                diam_in = 2.0 * min(cell_w_in, cell_h_in)
-                diam_pt = diam_in * 72.0
-                s = diam_pt**2
-                ax_hm.scatter(cols, ys, s=s, c="#ff1493", marker='o', edgecolors='white', linewidths=0.4, zorder=7)
 
             # === Actual-label strips (0→1 mapped to green→red) ===
             Hh, Wh = mat_np.shape
@@ -1171,20 +1181,20 @@ def main():
         gain_means["all"] = add_heatmap(
             context_gain_all,
             'Context Benefit Heatmap – Reconstruction (all channels)',
-            'Δ loss vs per-last mean (start vs start+1)',
+            'Δ loss advantage vs expected (start vs start+1)',
             'lift_all',
             'Blue = this block reduces loss more than an average added block (better-than-mean benefit). Red = worse than mean.',
             cmap_name='coolwarm',
             center_zero=True,
             top_curve=best_loss_all,
             top_curve_label="Lowest loss per last_block",
-            row_label="Avg Δ vs mean per start_block",
+            row_label="Avg Δ vs expected per start_block",
         )
         for ch_idx in range(context_gain_channels.shape[0]):
             gain_means[f"ch{ch_idx}"] = add_heatmap(
                 context_gain_channels[ch_idx],
                 'Context Benefit Heatmap – Reconstruction',
-                'Δ loss vs per-last mean (start vs start+1)',
+                'Δ loss advantage vs expected (start vs start+1)',
                 'lift',
                 'Blue = this block reduces loss more than an average added block (better-than-mean benefit). Red = worse than mean.',
                 cmap_name='coolwarm',
@@ -1193,7 +1203,7 @@ def main():
                 ch_idx=ch_idx,
                 top_curve=best_loss_channels[ch_idx],
                 top_curve_label="Lowest loss per last_block",
-                row_label="Avg Δ vs mean per start_block",
+                row_label="Avg Δ vs expected per start_block",
             )
 
         highlights_all = select_highlight_profiles(recon_np, expected_curve, expected_std)
