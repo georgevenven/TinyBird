@@ -131,6 +131,7 @@ def main(args):
     latent_list = []
     patch_list = []
     label_list = []
+    spec_list = []
 
     while i < len(embedding_dataset) and total_timebins < args["num_timebins"]:
         spec, file_name = embedding_dataset[i]
@@ -209,6 +210,7 @@ def main(args):
                 latent_list.append(h_grid)
                 patch_list.append(z_grid)
                 label_list.append(labels)
+                spec_list.append(batched_spec_detected)
                 total_timebins+=batched_spec_detected.shape[0] * batched_spec_detected.shape[-1] # add the number of timebins 
         i += 1
 
@@ -235,6 +237,15 @@ def main(args):
     # we want to pool the labels to the same dimensionality as patches, so if patches are 2 timebins wide it would be a downsample of 2x 
     downsample_factor = patch_width
     syllable_labels = F.max_pool1d(syllable_labels.unsqueeze(0).unsqueeze(0).float(), kernel_size=downsample_factor, stride=downsample_factor).squeeze(0).squeeze(0).long()
+    
+    # Process spectrograms
+    spectrograms = torch.cat(spec_list, dim=0)  # shape is batch, channel, mel, time
+    # Reshape to 2D: (timebins, mels)
+    # Remove channel dimension and concatenate time dimension
+    spectrograms = spectrograms.squeeze(1)  # shape: (batch, mel, time)
+    spectrograms = spectrograms.permute(0, 2, 1)  # shape: (batch, time, mel)
+    spectrograms = spectrograms.reshape(-1, spectrograms.shape[-1])  # shape: (total_timebins, mel)
+    spectrograms_np = spectrograms.cpu().numpy()
     
     # positional subtraction indexes 
     pos_ids = torch.arange(0, 1024).repeat(batches)
@@ -269,6 +280,8 @@ def main(args):
     # we need audio params, patch stuff, checkpoint, spec, labels original, labels_downsampled, embedding before and after pos removal 
     np.savez(
         args["npz_dir"],
+        # Spectrograms
+        spectrograms=spectrograms_np,                           # shape: (total_timebins, mels) - 2D spectrogram array
         # Labels
         labels_original=labels_original,                        # shape: (total_timebins,) - original labels before downsampling
         labels_downsampled=syllable_labels_downsampled,         # shape: (N_patches,) - labels downsampled to patch resolution

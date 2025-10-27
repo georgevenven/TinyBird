@@ -11,6 +11,22 @@ from model import TinyBird
 from plotting_utils import plot_loss_curves, save_reconstruction_plot
 from utils import load_training_state
 
+SRC_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SRC_DIR)
+RUNS_ROOT = os.path.join(PROJECT_ROOT, "runs")
+
+
+def resolve_run_path(path_fragment):
+    """Return absolute path to run directory under project root."""
+    if os.path.isabs(path_fragment):
+        return path_fragment
+
+    project_relative = os.path.abspath(os.path.join(PROJECT_ROOT, path_fragment))
+    if os.path.exists(project_relative):
+        return project_relative
+
+    return os.path.abspath(os.path.join(RUNS_ROOT, path_fragment))
+
 class Trainer():
     def __init__(self, config, pretrained_model=None):
         self.config = config
@@ -19,11 +35,7 @@ class Trainer():
         if config.get('is_continuing', False):
             # Continue training mode - use existing run directory
             continue_from = config['continue_from']
-            if os.path.isabs(continue_from):
-                self.run_path = continue_from
-            else:
-                runs_base = os.path.join("..", "runs")
-                self.run_path = os.path.join(runs_base, continue_from)
+            self.run_path = resolve_run_path(continue_from)
             
             if not os.path.exists(self.run_path):
                 raise FileNotFoundError(f"Continue directory not found: {self.run_path}")
@@ -32,12 +44,11 @@ class Trainer():
             
         else:
             # New training mode - setup run directory
-            runs_base = os.path.join("..", "runs")
-            os.makedirs(runs_base, exist_ok=True)
+            os.makedirs(RUNS_ROOT, exist_ok=True)
             
-            self.run_path = os.path.join(runs_base, config["run_name"])
+            self.run_path = os.path.join(RUNS_ROOT, config["run_name"])
             if os.path.exists(self.run_path):
-                archive_dir = os.path.join(runs_base, "archive")
+                archive_dir = os.path.join(RUNS_ROOT, "archive")
                 os.makedirs(archive_dir, exist_ok=True)
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 archived_path = os.path.join(archive_dir, f"{config['run_name']}_{timestamp}")
@@ -367,9 +378,10 @@ if __name__ == "__main__":
         from utils import load_model_from_checkpoint
         
         # Load existing config and model
-        model, config = load_model_from_checkpoint(args.continue_from, fallback_to_random=False)
+        resolved_continue = resolve_run_path(args.continue_from)
+        model, config = load_model_from_checkpoint(resolved_continue, fallback_to_random=False)
         
-        config['continue_from'] = args.continue_from
+        config['continue_from'] = resolved_continue
         config['is_continuing'] = True
         config.setdefault("mask_c", args.mask_c)
 

@@ -147,7 +147,7 @@ class TinyBird(nn.Module):
         z_seq = z.flatten(2).transpose(1, 2)        # (B, T, D_enc)
 
         h = self.encoder(z_seq)
-        return h, z_seq
+        return h, z_seq # z seq is encoded patches + pos enc 
 
     def forward_decoder(self, h, idx_restore, T):
         """
