@@ -943,7 +943,7 @@ def plot_block_lift_summary(benefit_matrix, filename, index, images_dir, title_p
     return out_path
 
 
-def plot_mean_scatter(row_mean, best_loss_curve, filename, index, images_dir, tag="scatter"):
+def plot_mean_scatter(row_mean, best_loss_curve, filename, index, images_dir, tag="scatter", removal_indices=None):
     valid = np.isfinite(row_mean) & np.isfinite(best_loss_curve)
     if not valid.any():
         return None
@@ -1000,6 +1000,22 @@ def plot_mean_scatter(row_mean, best_loss_curve, filename, index, images_dir, ta
         norm_val = (blk - indices.min()) / max(1, (indices.max() - indices.min()))
         legend_handles.append(Line2D([0], [0], marker='o', color='none', markerfacecolor=cmap(norm_val), markersize=6))
         legend_labels.append(f"last={blk}")
+    if removal_indices is not None and len(removal_indices):
+        removal_indices = set(int(r) for r in np.atleast_1d(removal_indices))
+        removal_mask = np.array([blk in removal_indices for blk in indices], dtype=bool)
+        if removal_mask.any():
+            ax.scatter(
+                xs[removal_mask],
+                ys[removal_mask],
+                marker='x',
+                color='red',
+                s=70,
+                linewidths=1.2,
+                label='Removed blocks',
+                zorder=5,
+            )
+            legend_handles.append(Line2D([0], [0], marker='x', color='red'))
+            legend_labels.append("Removed blocks")
     ax.legend(legend_handles, legend_labels, title="Block index", loc="upper left", fontsize=7)
     out_path = os.path.join(images_dir, f"mean_scatter_{tag}_{index}_{filename}.png")
     fig.tight_layout()
@@ -1529,10 +1545,43 @@ def main():
                 tag=f"ch{ch_idx}",
             )
 
-        col_curve_all, row_mean_all = gain_means.get("all", (None, None))
-        if row_mean_all is not None:
+        col_curve_all, row_sum_all = gain_means.get("all", (None, None))
+        if row_sum_all is None:
+            row_sum_all = np.full(recon_np.shape[0], np.nan, dtype=float)
+        row_sum_all = np.asarray(row_sum_all, dtype=float)
+        best_loss_all = np.asarray(best_loss_all, dtype=float)
+
+        valid_mask_scatter = np.isfinite(row_sum_all) & np.isfinite(best_loss_all)
+        if valid_mask_scatter.any():
+            mean_best_loss = float(np.nanmean(best_loss_all[valid_mask_scatter]))
+        else:
+            mean_best_loss = 0.0
+        removal_mask = valid_mask_scatter & (row_sum_all > 0.0) & (best_loss_all > mean_best_loss)
+        removal_indices = np.where(removal_mask)[0]
+        keep_indices = np.array(
+            [idx for idx in range(recon_np.shape[0]) if idx not in set(removal_indices)], dtype=int
+        )
+        filtered_losses_np = None
+        best_loss_filtered_aligned = np.full(recon_np.shape[0], np.nan, dtype=float)
+        mean_loss_after = np.nan
+        if keep_indices.size > 0:
+            filtered_losses_np = recon_np[np.ix_(keep_indices, keep_indices)]
+            best_loss_filtered = compute_best_loss_curve(filtered_losses_np)
+            for new_idx, orig_idx in enumerate(keep_indices):
+                best_loss_filtered_aligned[orig_idx] = best_loss_filtered[new_idx]
+            mean_loss_after = float(np.nanmean(best_loss_filtered))
+        mean_loss_before = (
+            float(np.nanmean(best_loss_all[valid_mask_scatter])) if valid_mask_scatter.any() else np.nan
+        )
+        print(
+            f"Removal set size: {len(removal_indices)}; mean best loss {mean_loss_before:.6f} → {mean_loss_after:.6f}"
+        )
+
+        if row_sum_all is not None:
             plot_block_lift_summary(context_gain_all, filename, i, images_dir, title_prefix="All")
-            plot_mean_scatter(row_mean_all, best_loss_all, filename, i, images_dir, tag="lift_all")
+            plot_mean_scatter(
+                row_sum_all, best_loss_all, filename, i, images_dir, tag="lift_all", removal_indices=removal_indices
+            )
         for ch_idx in range(context_gain_channels.shape[0]):
             means = gain_means.get(f"ch{ch_idx}")
             if means is None:
@@ -1540,7 +1589,15 @@ def main():
             _, row_mean_ch = means
             best_loss_ch = best_loss_channels[ch_idx] if ch_idx < best_loss_channels.shape[0] else None
             if best_loss_ch is not None:
-                plot_mean_scatter(row_mean_ch, best_loss_ch, filename, i, images_dir, tag=f"lift_ch{ch_idx}")
+                plot_mean_scatter(
+                    row_mean_ch,
+                    best_loss_ch,
+                    filename,
+                    i,
+                    images_dir,
+                    tag=f"lift_ch{ch_idx}",
+                    removal_indices=removal_indices,
+                )
         plot_heatmap(
             dt_np,
             title='Δt Heatmap – gap between blocks',
@@ -1563,7 +1620,15 @@ def main():
         )
 
         def plot_line_summaries(
-            all_np, x_dt_vec, x_lt_vec, filename: str, index: int, images_dir: str = "images", title_prefix: str = ""
+            all_np,
+            x_dt_vec,
+            x_lt_vec,
+            filename: str,
+            index: int,
+            images_dir: str = "images",
+            title_prefix: str = "",
+            best_loss_filtered=None,
+            removal_indices=None,
         ):
             from matplotlib.gridspec import GridSpec
 
@@ -1629,6 +1694,19 @@ def main():
                 markersize=3,
                 linewidth=1.4,
             )
+            if best_loss_filtered is not None:
+                best_loss_filtered = np.asarray(best_loss_filtered, dtype=float)
+                ax_top.plot(
+                    x,
+                    np.ma.masked_invalid(best_loss_filtered),
+                    label="Best loss after removal",
+                    color='tab:blue',
+                    linestyle='--',
+                    linewidth=2.0,
+                )
+            if removal_indices is not None and len(removal_indices):
+                for blk in removal_indices:
+                    ax_top.axvspan(blk - 0.5, blk + 0.5, color='red', alpha=0.08)
             ax_top.set_xlabel("last_block (end index)")
             ax_top.set_ylabel("Loss (MSE)")
             ax_top.set_title(
@@ -1669,7 +1747,74 @@ def main():
             plt.close(fig)
             print(f"Saved: {out_path}")
 
-        plot_line_summaries(recon_np, x_dt_np, x_lt_np, filename, i, images_dir, title_prefix="Recon ")
+        plot_line_summaries(
+            recon_np,
+            x_dt_np,
+            x_lt_np,
+            filename,
+            i,
+            images_dir,
+            title_prefix="Recon ",
+            best_loss_filtered=best_loss_filtered_aligned,
+            removal_indices=removal_indices,
+        )
+
+        def plot_loss_improvement(
+            best_loss_before,
+            best_loss_after,
+            removal_indices,
+            filename,
+            index,
+            images_dir,
+            mean_before,
+            mean_after,
+        ):
+            if best_loss_before is None or best_loss_after is None:
+                return
+            best_loss_before = np.asarray(best_loss_before, dtype=float)
+            best_loss_after = np.asarray(best_loss_after, dtype=float)
+            x = np.arange(best_loss_before.shape[0])
+            fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=(12, 6), gridspec_kw={'height_ratios': [3, 1]})
+            ax_top.plot(x, np.ma.masked_invalid(best_loss_before), label='Best loss (original)', color='black', linewidth=2.0)
+            ax_top.plot(
+                x,
+                np.ma.masked_invalid(best_loss_after),
+                label='Best loss (after removal)',
+                color='tab:blue',
+                linestyle='--',
+                linewidth=2.0,
+            )
+            if removal_indices is not None and len(removal_indices):
+                for blk in removal_indices:
+                    ax_top.axvspan(blk - 0.5, blk + 0.5, color='red', alpha=0.1)
+            ax_top.set_title('Best-context loss comparison (removed blocks highlighted in red)')
+            ax_top.set_xlabel('Block index (last_block)')
+            ax_top.set_ylabel('Best loss (MSE)')
+            ax_top.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+            ax_top.legend(loc='best')
+
+            ax_bot.bar(['Original', 'After removal'], [mean_before, mean_after], color=['gray', 'tab:blue'])
+            ax_bot.set_ylabel('Mean best loss (MSE)')
+            ax_bot.set_title('Mean of best-context loss across blocks')
+            for idx_bar, value in enumerate([mean_before, mean_after]):
+                if np.isfinite(value):
+                    ax_bot.text(idx_bar, value, f"{value:.4f}", ha='center', va='bottom')
+            fig.tight_layout()
+            out_path = os.path.join(images_dir, f"best_loss_comparison_{index}_{filename}.png")
+            fig.savefig(out_path, dpi=300, bbox_inches='tight')
+            plt.close(fig)
+            print(f"Saved: {out_path}")
+
+        plot_loss_improvement(
+            best_loss_all,
+            best_loss_filtered_aligned,
+            removal_indices,
+            filename,
+            i,
+            images_dir,
+            mean_loss_before,
+            mean_loss_after,
+        )
 
     # If a single index is specified, only process that file; otherwise process all
     if args.index >= 0:
