@@ -186,8 +186,8 @@ def compute_loss(model, x, x_i, N, start_block, last_block, x_dt, x_lt):
 
 def save_reconstruction(model, x, x_i, N, last_block, x_dt, x_lt, *, filename, index, images_dir='images'):
     """
-    Save a side-by-side reconstruction visualization for a given block configuration.
-    Returns: (output_path, loss)
+    Save reconstruction visualizations for a given block configuration.
+    Returns: (list_of_paths, total_loss, per_channel_losses)
     """
     # Choose start_block using cached losses (best per-column), fallback to last_block+1
     default_start = last_block + 1
@@ -200,204 +200,218 @@ def save_reconstruction(model, x, x_i, N, last_block, x_dt, x_lt, *, filename, i
                 col = cached_losses.detach().cpu().numpy()[:, last_block]
             else:
                 col = np.array(cached_losses)[:, last_block]
-            # Pick the row index (start_block) with the lowest finite loss for this column
             finite_mask = np.isfinite(col)
             if finite_mask.any():
                 best_start = int(np.nanargmin(np.where(finite_mask, col, np.nan)))
-    except Exception as e:
-        # If anything goes wrong with cache logic, silently fall back
+    except Exception:
         best_start = default_start
 
-        loss, _, dt, lt, xs, x_is, bool_mask, pred, mblock, indices = compute_loss(
-            model, x, x_i, N, start_block=best_start, last_block=last_block, x_dt=x_dt, x_lt=x_lt
-        )
+    loss, channel_losses, dt, lt, xs, x_is, bool_mask, pred, mblock, indices = compute_loss(
+        model, x, x_i, N, start_block=best_start, last_block=last_block, x_dt=x_dt, x_lt=x_lt
+    )
+
+    if torch.is_tensor(channel_losses):
+        channel_losses_np = channel_losses.detach().cpu().numpy().reshape(-1)
+    elif channel_losses is None:
+        channel_losses_np = None
+    else:
+        channel_losses_np = np.array(channel_losses, dtype=float).reshape(-1)
 
     if xs is None or pred is None or bool_mask is None:
-        return None, loss
+        return [], loss, channel_losses_np
 
     def _reconstruct(xs, pred, bool_mask, patch_size):
         """
-        xs:   (B, 1, H, W) input spectrogram window
+        xs:   (B, C, H, W) input spectrogram window
         pred: (B, T, P) decoder output in the same normalized space as loss
         bool_mask: (B, T) which tokens were masked
-        Returns: (B, 1, H, W) image where masked patches are replaced with **denormalized** predictions.
+        Returns: (B, C, H, W) image where masked patches are replaced with denormalized predictions.
         """
         B, C, H, W = xs.shape
         unfold = torch.nn.Unfold(kernel_size=patch_size, stride=patch_size)
         fold = torch.nn.Fold(output_size=(H, W), kernel_size=patch_size, stride=patch_size)
 
-        # Convert input into patches to compute per-token moments for denormalization
         x_patches = unfold(xs).transpose(1, 2)  # (B, T, P)
-
-        # Per-token mean/std of target patches (match pretrain.py logic)
         target_mean = x_patches.mean(dim=-1, keepdim=True)
         target_std = x_patches.std(dim=-1, keepdim=True)
 
-        # Denormalize predictions: pred_denorm = pred * std + mean
         pred_denorm = pred * (target_std + 1e-6) + target_mean
 
-        # Replace only masked tokens with denormalized predictions
         out_patches = x_patches.clone()
         out_patches[bool_mask] = pred_denorm[bool_mask]
-
-        # Fold back to image
         out_patches = out_patches.transpose(1, 2)  # (B, P, T)
-        x_rec = fold(out_patches)  # (B, 1, H, W)
+        x_rec = fold(out_patches)  # (B, C, H, W)
         return x_rec
 
     def _column_mask_2d(bool_mask, H, W, patch_size):
         """
         Convert a token-level mask (B, T) into a per-column mask (B, W) in pixel space.
         T = H' * W', where H' = H // patch_height, W' = W // patch_width.
-        We reduce across token rows (H') to find columns masked anywhere in that column.
         """
         ph, pw = patch_size
         Htok = max(1, H // ph)
         Wtok = max(1, W // pw)
-        # bool_mask is (B, T) where T == Htok * Wtok; reshape accordingly
         return bool_mask.view(-1, Htok, Wtok).any(dim=1)
 
     def _draw_separators(ax, x_is_b):
-        # x_is_b: (K, 2)
         K = x_is_b.shape[0]
         for k in range(K - 1):
             pos = int(x_is_b[k, 1])
             ax.axvline(pos - 0.5, linewidth=0.8, alpha=0.8, color='cyan')
 
-    # Assume batch size 1
-    xs_cpu = xs[0, 0].detach().cpu().numpy()
-    H, W = xs_cpu.shape
     x_rec = _reconstruct(xs, pred, bool_mask, model.patch_size)
-    x_rec_cpu = x_rec[0, 0].detach().cpu().numpy()
-    vmin = min(np.nanmin(xs_cpu), np.nanmin(x_rec_cpu))
-    vmax = max(np.nanmax(xs_cpu), np.nanmax(x_rec_cpu))
-    from matplotlib.gridspec import GridSpec
-
-    # Figure with right-hand zoom panes
-    fig = plt.figure(figsize=(14, 10))
-    gs = GridSpec(3, 2, width_ratios=[3.5, 1.4], height_ratios=[1, 1, 1], wspace=0.10, hspace=0.08)
-
-    ax_in_full = fig.add_subplot(gs[0, 0])
-    ax_rec_full = fig.add_subplot(gs[1, 0], sharex=ax_in_full, sharey=ax_in_full)
-    ax_err_full = fig.add_subplot(gs[2, 0], sharex=ax_in_full, sharey=ax_in_full)
-
-    ax_in_zoom = fig.add_subplot(gs[0, 1], sharey=ax_in_full)
-    ax_rec_zoom = fig.add_subplot(gs[1, 1], sharey=ax_in_full)
-    ax_err_zoom = fig.add_subplot(gs[2, 1], sharey=ax_in_full)
-
-    cmap = plt.get_cmap('magma')
-    im0 = ax_in_full.imshow(
-        xs_cpu, cmap=cmap, vmin=vmin, vmax=vmax, origin='lower', aspect='auto', interpolation='nearest'
-    )
-    ax_in_full.set_title('Input')
-    im1 = ax_rec_full.imshow(
-        x_rec_cpu, cmap=cmap, vmin=vmin, vmax=vmax, origin='lower', aspect='auto', interpolation='nearest'
-    )
-    ax_rec_full.set_title('Reconstruction')
-    # Overlay masked region on panel 0 only
-    col_mask = _column_mask_2d(bool_mask, H, W, model.patch_size)[0].cpu().numpy()
-    # Find contiguous True spans in col_mask and draw axvspan
-    in_span = False
-    start = 0
-    for i in range(len(col_mask)):
-        if col_mask[i] and not in_span:
-            start = i
-            in_span = True
-        elif not col_mask[i] and in_span:
-            ax_in_full.axvspan(start - 0.5, i - 0.5, alpha=0.25, color='yellow')
-            in_span = False
-    if in_span:
-        ax_in_full.axvspan(start - 0.5, len(col_mask) - 0.5, alpha=0.25, color='yellow')
-
-    # Determine the masked span (contiguous True region). If multiple spans, merge to min..max
+    B, C, H, W = xs.shape
+    col_mask = _column_mask_2d(bool_mask, H, W, model.patch_size)[0].detach().cpu().numpy()
     col_mask_bool = col_mask.astype(bool)
     true_idxs = np.where(col_mask_bool)[0]
     zoom_has_span = true_idxs.size > 0
     if zoom_has_span:
         span_start = int(true_idxs.min())
-        span_end = int(true_idxs.max() + 1)  # exclusive
+        span_end = int(true_idxs.max() + 1)
     else:
-        span_start, span_end = 0, 1  # harmless fallback to 1 column
-
-    # Difference heatmap (reconstruction error) only within masked region
-    diff = x_rec_cpu - xs_cpu
+        span_start, span_end = 0, 1
     mask_hw = ~np.broadcast_to(col_mask_bool, (H, W))
-    diff_ma = np.ma.masked_array(diff, mask=mask_hw)
-    # Symmetric color scale based on masked region
-    if col_mask_bool.any():
-        max_abs = np.nanmax(np.abs(diff[:, col_mask_bool]))
-        if not np.isfinite(max_abs) or max_abs == 0:
-            max_abs = 1e-6
-    else:
-        max_abs = np.nanmax(np.abs(diff)) if np.isfinite(np.nanmax(np.abs(diff))) else 1.0
-    cmap_diff = plt.get_cmap('coolwarm').copy()
-    cmap_diff.set_bad(color='black')  # outside masked region
-    im2 = ax_err_full.imshow(
-        diff_ma, cmap=cmap_diff, vmin=-max_abs, vmax=max_abs, origin='lower', aspect='auto', interpolation='nearest'
-    )
-    ax_err_full.set_title('Reconstruction Error (masked region only)')
 
-    # === Right-hand zoom panels: crop to the masked span, keep exact masked width ===
-    if zoom_has_span:
-        xs_crop = xs_cpu[:, span_start:span_end]
-        xrec_crop = x_rec_cpu[:, span_start:span_end]
-        diff_crop = diff[:, span_start:span_end]
+    total_loss_scalar = None
+    if loss is not None:
+        if torch.is_tensor(loss):
+            total_loss_scalar = float(loss.detach().cpu().item())
+        elif isinstance(loss, (np.ndarray, np.generic)):
+            total_loss_scalar = float(loss)
+        else:
+            try:
+                total_loss_scalar = float(loss)
+            except Exception:
+                total_loss_scalar = None
 
-        ax_in_zoom.imshow(
-            xs_crop, cmap=cmap, vmin=vmin, vmax=vmax, origin='lower', aspect='auto', interpolation='nearest'
-        )
-        ax_rec_zoom.imshow(
-            xrec_crop, cmap=cmap, vmin=vmin, vmax=vmax, origin='lower', aspect='auto', interpolation='nearest'
-        )
-        ax_err_zoom.imshow(
-            diff_crop,
-            cmap=cmap_diff,
-            vmin=-max_abs,
-            vmax=max_abs,
-            origin='lower',
-            aspect='auto',
-            interpolation='nearest',
-        )
+    from matplotlib.gridspec import GridSpec
 
-        ax_in_zoom.set_title('Masked span (Input)')
-        ax_rec_zoom.set_title('Masked span (Reconstruction)')
-        ax_err_zoom.set_title('Masked span (Error)')
-
-        # Tighten x-lims to show exact masked width without padding
-        ax_in_zoom.set_xlim(0, xs_crop.shape[1])
-        ax_rec_zoom.set_xlim(0, xrec_crop.shape[1])
-        ax_err_zoom.set_xlim(0, diff_crop.shape[1])
-
-        # Hide y tick labels on zoom panes; keep y shared with left for alignment
-        for axz in (ax_in_zoom, ax_rec_zoom, ax_err_zoom):
-            axz.tick_params(axis='y', which='both', left=False, labelleft=False)
-    else:
-        # No masked span; hide zoom axes content
-        for axz in (ax_in_zoom, ax_rec_zoom, ax_err_zoom):
-            axz.axis('off')
-
-    # Draw separators
-    _draw_separators(ax_in_full, x_is[0].detach().cpu().numpy())
-    _draw_separators(ax_rec_full, x_is[0].detach().cpu().numpy())
-    _draw_separators(ax_err_full, x_is[0].detach().cpu().numpy())
-    # Add colorbars for each panel
-    cbar0 = fig.colorbar(im0, ax=ax_in_full, fraction=0.025, pad=0.02)
-    cbar0.set_label('Amplitude', rotation=270, labelpad=12)
-    cbar1 = fig.colorbar(im1, ax=ax_rec_full, fraction=0.025, pad=0.02)
-    cbar1.set_label('Amplitude', rotation=270, labelpad=12)
-    cbar2 = fig.colorbar(im2, ax=ax_err_full, fraction=0.025, pad=0.02)
-    cbar2.set_label('Diff (recon - input)', rotation=270, labelpad=12)
-    # Detailed title
-    mblock_str = mblock[0] if mblock is not None and len(mblock) > 0 else 'N/A'
-    loss_str = f"{loss.item():.6f}" if loss is not None and torch.isfinite(loss) else "NaN"
-    title = f"{filename}, idx={index}, last={last_block}, mblock={mblock_str}, loss={loss_str}"
-    fig.suptitle(title, fontsize=11)
-    plt.tight_layout(rect=[0, 0.03, 1, 0.96])
+    paths = []
     os.makedirs(images_dir, exist_ok=True)
-    out_path = os.path.join(images_dir, f"reconstruction_idx{index}_last{last_block}.png")
-    fig.savefig(out_path, dpi=200, bbox_inches='tight')
-    plt.close(fig)
-    return out_path, loss
+    for ch in range(C):
+        xs_cpu = xs[0, ch].detach().cpu().numpy()
+        x_rec_cpu = x_rec[0, ch].detach().cpu().numpy()
+        vmin = min(np.nanmin(xs_cpu), np.nanmin(x_rec_cpu))
+        vmax = max(np.nanmax(xs_cpu), np.nanmax(x_rec_cpu))
+
+        fig = plt.figure(figsize=(14, 10))
+        gs = GridSpec(3, 2, width_ratios=[3.5, 1.4], height_ratios=[1, 1, 1], wspace=0.10, hspace=0.08)
+
+        ax_in_full = fig.add_subplot(gs[0, 0])
+        ax_rec_full = fig.add_subplot(gs[1, 0], sharex=ax_in_full, sharey=ax_in_full)
+        ax_err_full = fig.add_subplot(gs[2, 0], sharex=ax_in_full, sharey=ax_in_full)
+
+        ax_in_zoom = fig.add_subplot(gs[0, 1], sharey=ax_in_full)
+        ax_rec_zoom = fig.add_subplot(gs[1, 1], sharey=ax_in_full)
+        ax_err_zoom = fig.add_subplot(gs[2, 1], sharey=ax_in_full)
+
+        cmap = plt.get_cmap('magma')
+        im0 = ax_in_full.imshow(
+            xs_cpu, cmap=cmap, vmin=vmin, vmax=vmax, origin='lower', aspect='auto', interpolation='nearest'
+        )
+        ax_in_full.set_title(f'Input (channel {ch})')
+        im1 = ax_rec_full.imshow(
+            x_rec_cpu, cmap=cmap, vmin=vmin, vmax=vmax, origin='lower', aspect='auto', interpolation='nearest'
+        )
+        ax_rec_full.set_title(f'Reconstruction (channel {ch})')
+
+        # Overlay masked span on input
+        in_span = False
+        start_idx = 0
+        for i in range(len(col_mask_bool)):
+            if col_mask_bool[i] and not in_span:
+                start_idx = i
+                in_span = True
+            elif not col_mask_bool[i] and in_span:
+                ax_in_full.axvspan(start_idx - 0.5, i - 0.5, alpha=0.25, color='yellow')
+                in_span = False
+        if in_span:
+            ax_in_full.axvspan(start_idx - 0.5, len(col_mask_bool) - 0.5, alpha=0.25, color='yellow')
+
+        diff = x_rec_cpu - xs_cpu
+        diff_ma = np.ma.masked_array(diff, mask=mask_hw)
+        if col_mask_bool.any():
+            max_abs = np.nanmax(np.abs(diff[:, col_mask_bool]))
+            if not np.isfinite(max_abs) or max_abs == 0:
+                max_abs = 1e-6
+        else:
+            max_abs = np.nanmax(np.abs(diff)) if np.isfinite(np.nanmax(np.abs(diff))) else 1.0
+        cmap_diff = plt.get_cmap('coolwarm').copy()
+        cmap_diff.set_bad(color='black')
+        im2 = ax_err_full.imshow(
+            diff_ma, cmap=cmap_diff, vmin=-max_abs, vmax=max_abs, origin='lower', aspect='auto', interpolation='nearest'
+        )
+        ax_err_full.set_title(f'Error (channel {ch}, masked)')
+
+        if zoom_has_span:
+            xs_crop = xs_cpu[:, span_start:span_end]
+            xrec_crop = x_rec_cpu[:, span_start:span_end]
+            diff_crop = diff[:, span_start:span_end]
+
+            ax_in_zoom.imshow(
+                xs_crop, cmap=cmap, vmin=vmin, vmax=vmax, origin='lower', aspect='auto', interpolation='nearest'
+            )
+            ax_rec_zoom.imshow(
+                xrec_crop, cmap=cmap, vmin=vmin, vmax=vmax, origin='lower', aspect='auto', interpolation='nearest'
+            )
+            ax_err_zoom.imshow(
+                diff_crop,
+                cmap=cmap_diff,
+                vmin=-max_abs,
+                vmax=max_abs,
+                origin='lower',
+                aspect='auto',
+                interpolation='nearest',
+            )
+
+            ax_in_zoom.set_title('Masked span (Input)')
+            ax_rec_zoom.set_title('Masked span (Reconstruction)')
+            ax_err_zoom.set_title('Masked span (Error)')
+
+            ax_in_zoom.set_xlim(0, xs_crop.shape[1])
+            ax_rec_zoom.set_xlim(0, xrec_crop.shape[1])
+            ax_err_zoom.set_xlim(0, diff_crop.shape[1])
+
+            for axz in (ax_in_zoom, ax_rec_zoom, ax_err_zoom):
+                axz.tick_params(axis='y', which='both', left=False, labelleft=False)
+        else:
+            for axz in (ax_in_zoom, ax_rec_zoom, ax_err_zoom):
+                axz.axis('off')
+
+        separators = x_is[0].detach().cpu().numpy()
+        _draw_separators(ax_in_full, separators)
+        _draw_separators(ax_rec_full, separators)
+        _draw_separators(ax_err_full, separators)
+
+        cbar0 = fig.colorbar(im0, ax=ax_in_full, fraction=0.025, pad=0.02)
+        cbar0.set_label('Amplitude', rotation=270, labelpad=12)
+        cbar1 = fig.colorbar(im1, ax=ax_rec_full, fraction=0.025, pad=0.02)
+        cbar1.set_label('Amplitude', rotation=270, labelpad=12)
+        cbar2 = fig.colorbar(im2, ax=ax_err_full, fraction=0.025, pad=0.02)
+        cbar2.set_label('Diff (recon - input)', rotation=270, labelpad=12)
+
+        mblock_str = mblock[0] if mblock is not None and len(mblock) > 0 else 'N/A'
+        total_loss_str = f"{total_loss_scalar:.6f}" if total_loss_scalar is not None else "NaN"
+        channel_loss_val = None
+        if channel_losses_np is not None and ch < channel_losses_np.shape[0]:
+            channel_loss_val = channel_losses_np[ch]
+        channel_loss_str = (
+            f"{float(channel_loss_val):.6f}" if channel_loss_val is not None and np.isfinite(channel_loss_val) else "NaN"
+        )
+        title = (
+            f"{filename}, idx={index}, last={last_block}, channel={ch}, mblock={mblock_str}, "
+            f"loss_total={total_loss_str}, loss_ch={channel_loss_str}"
+        )
+        fig.suptitle(title, fontsize=11)
+        plt.tight_layout(rect=[0, 0.03, 1, 0.96])
+
+        suffix = f"_ch{ch}" if C > 1 else ""
+        out_path = os.path.join(images_dir, f"reconstruction_idx{index}_last{last_block}{suffix}.png")
+        fig.savefig(out_path, dpi=200, bbox_inches='tight')
+        plt.close(fig)
+        paths.append(out_path)
+
+    return paths, loss, channel_losses_np
 
 
 def process_file(model, dataset, index, device):
@@ -871,7 +885,7 @@ def main():
 
             for last_block in range(args.start_block, args.last_block + 1):
                 print(f"Generating reconstruction for last_block={last_block}")
-                out_path, loss = save_reconstruction(
+                paths, loss, channel_losses = save_reconstruction(
                     model,
                     x,
                     x_i,
@@ -883,8 +897,29 @@ def main():
                     index=i,
                     images_dir=images_dir,
                 )
-                if out_path is not None:
-                    print(f"Saved reconstruction → {out_path} (loss={loss})")
+                if paths:
+                    if torch.is_tensor(loss):
+                        loss_val = float(loss.detach().cpu().item())
+                    else:
+                        try:
+                            loss_val = float(loss)
+                        except (TypeError, ValueError):
+                            loss_val = None
+                    channel_vals = None
+                    if channel_losses is not None and len(channel_losses):
+                        channel_vals = []
+                        for val in channel_losses:
+                            try:
+                                channel_vals.append(float(val))
+                            except (TypeError, ValueError):
+                                channel_vals.append(float('nan'))
+                    for idx_path, path in enumerate(paths):
+                        extra = ""
+                        if channel_vals is not None and idx_path < len(channel_vals):
+                            ch_val = channel_vals[idx_path]
+                            extra = f", channel_loss={ch_val:.6f}" if np.isfinite(ch_val) else ", channel_loss=NaN"
+                        loss_text = f"{loss_val:.6f}" if loss_val is not None else "NaN"
+                        print(f"Saved reconstruction → {path} (total_loss={loss_text}{extra})")
                 else:
                     print(f"Skipped reconstruction for last_block={last_block} (NaN or error)")
 
