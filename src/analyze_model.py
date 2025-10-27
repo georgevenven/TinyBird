@@ -547,6 +547,28 @@ def compute_best_loss_curve(loss_matrix: np.ndarray) -> np.ndarray:
     return best_loss
 
 
+def compute_context_gain_matrix(loss_matrix: np.ndarray) -> np.ndarray:
+    """
+    Measures the incremental change in loss obtained by extending the context one block earlier.
+    For each start_block row, compares the loss at start_block vs start_block-1 (modulo N).
+    Positive values indicate loss reduction when including the additional block.
+    """
+    if loss_matrix.ndim != 2:
+        raise ValueError("Expected a 2D loss matrix (start_block x last_block).")
+    rows, cols = loss_matrix.shape
+    gain = np.full((rows, cols), np.nan, dtype=np.float64)
+    if rows == 0 or cols == 0:
+        return gain
+    for start in range(rows):
+        prev = (start - 1) % rows
+        for last in range(cols):
+            cur = loss_matrix[start, last]
+            prev_val = loss_matrix[prev, last]
+            if np.isfinite(cur) and np.isfinite(prev_val):
+                gain[start, last] = cur - prev_val
+    return gain
+
+
 def select_highlight_profiles(
     loss_matrix: np.ndarray, expected_curve: np.ndarray, expected_std: np.ndarray
 ) -> list[tuple[str, np.ndarray, str]]:
@@ -615,13 +637,13 @@ def plot_expected_curve(expected_curve, expected_std, highlight_profiles, title,
     return out_path
 
 
-def plot_block_lift_summary(lift_matrix, filename, index, images_dir, title_prefix="All"):
+def plot_block_lift_summary(benefit_matrix, filename, index, images_dir, title_prefix="All"):
     """
-    Summarize which blocks (by start index) provide the most lift relative to expectation.
+    Summarize which blocks (by start index) provide the biggest benefit when added to the context.
     """
-    if lift_matrix.size == 0:
+    if benefit_matrix.size == 0:
         return None
-    mean_start = np.nanmean(lift_matrix, axis=1)
+    mean_start = np.nanmean(benefit_matrix, axis=1)
     valid_mask = np.isfinite(mean_start)
     if not valid_mask.any():
         return None
@@ -630,8 +652,8 @@ def plot_block_lift_summary(lift_matrix, filename, index, images_dir, title_pref
     x = np.arange(mean_start.shape[0])
     ax.plot(x, mean_start, linewidth=2, marker='o', markersize=3)
     ax.set_xlabel("Block index (start_block)")
-    ax.set_ylabel("Average lift (actual - expected)")
-    ax.set_title(f"{title_prefix} Block Lift – Index {index}, File: {filename}")
+    ax.set_ylabel("Average Δ loss (start_block vs start_block-1)")
+    ax.set_title(f"{title_prefix} Context Benefit – Index {index}, File: {filename}")
     ax.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
     finite_vals = mean_start[valid_mask]
     if finite_vals.size:
@@ -639,9 +661,9 @@ def plot_block_lift_summary(lift_matrix, filename, index, images_dir, title_pref
         if np.isfinite(limit) and limit > 0:
             ax.set_ylim(-limit, limit)
     ax.axhline(0.0, color='black', linewidth=1.0, linestyle='--', alpha=0.7)
-    if mean_start.shape[0] > 1:
-        step = max(1, mean_start.shape[0] // 12)
-        ax.set_xticks(np.arange(0, mean_start.shape[0], step))
+    if mean_start.shape[0] > 0:
+        xticks = np.arange(0, mean_start.shape[0], 10) if mean_start.shape[0] > 10 else np.array([0])
+        ax.set_xticks(np.unique(xticks))
     out_path = os.path.join(images_dir, f"block_lift_{title_prefix.lower()}_{index}_{filename}.png")
     fig.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -668,8 +690,8 @@ def plot_block_lift_summary(lift_matrix, filename, index, images_dir, title_pref
             ha='center',
             va='bottom' if val >= 0 else 'top',
         )
-    print("Top lift blocks:", [(int(idx), float(mean_start[idx])) for idx in best])
-    print("Lowest lift blocks:", [(int(idx), float(mean_start[idx])) for idx in worst])
+    print("Top benefit blocks:", [(int(idx), float(mean_start[idx])) for idx in best])
+    print("Lowest benefit blocks:", [(int(idx), float(mean_start[idx])) for idx in worst])
     return out_path
 
 
@@ -713,11 +735,11 @@ def plot_mean_scatter(row_mean, best_loss_curve, filename, index, images_dir, ta
     ax.axhline(y_mean, color='gray', linewidth=1.0, linestyle='--', alpha=0.8, label='_nolegend_')
     ax.axhline(0, color='gray', linewidth=0.8, linestyle='--')
     ax.axvline(0, color='gray', linewidth=0.8, linestyle='--')
-    ax.set_xlabel('Mean loss per start_block (context provider)')
+    ax.set_xlabel('Avg Δ loss per start_block (context benefit)')
     ax.set_ylabel('Lowest loss per last_block (best context)')
     ax.set_title(
-        "Block influence vs difficulty\n"
-        "Left side: blocks that reduce others' loss. Bottom: blocks that are easy to predict."
+        "Context benefit vs difficulty\n"
+        "Left side: blocks whose inclusion helps later predictions. Bottom: blocks that are easy to predict."
     )
     legend_elements, legend_labels = scatter.legend_elements(num=6)
     sample_blocks = np.linspace(indices.min(), indices.max(), num=min(8, len(indices)), dtype=int)
@@ -873,6 +895,12 @@ def main():
             if recon_ch_np.size
             else np.empty((0, recon_np.shape[1]))
         )
+        context_gain_all = compute_context_gain_matrix(recon_np)
+        context_gain_channels = (
+            np.stack([compute_context_gain_matrix(recon_ch_np[ch_idx]) for ch_idx in range(recon_ch_np.shape[0])], axis=0)
+            if recon_ch_np.size
+            else np.empty((0, recon_np.shape[0], recon_np.shape[1]))
+        )
 
         def plot_heatmap(
             mat_np,
@@ -884,7 +912,10 @@ def main():
             note: str | None = None,
             cmap_name: str | None = None,
             center_zero: bool = False,
-            ):
+            top_curve: np.ndarray | None = None,
+            top_curve_label: str | None = None,
+            row_label: str | None = None,
+        ):
             fig_hm, ax_hm = plt.subplots(figsize=(12, 8))
             data_ma = np.ma.masked_invalid(mat_np)
 
@@ -1028,17 +1059,37 @@ def main():
             # (optional) keep ticks inside to avoid overlap with strips
             ax_hm.tick_params(axis='both', direction='in')
 
-            # Column/row mean plots
+            # Column/row summary plots
             row_mean = np.nanmean(mat_np, axis=1)
-            col_min = np.nanmin(mat_np, axis=0)
+            width = mat_np.shape[1]
+
+            def align_curve(curve):
+                if curve is None or width == 0:
+                    return curve
+                arr_curve = np.asarray(curve, dtype=float)
+                if arr_curve.shape[0] == width:
+                    return arr_curve
+                aligned = np.full(width, np.nan, dtype=float)
+                take = min(width, arr_curve.shape[0])
+                aligned[:take] = arr_curve[:take]
+                return aligned
+
+            if width == 0:
+                col_curve = np.array([])
+            else:
+                with np.errstate(all="ignore"):
+                    col_curve = align_curve(top_curve) if top_curve is not None else np.nanmin(mat_np, axis=0)
+
             ax_col_mean = divider.append_axes("top", size="8%", pad=0.7, sharex=ax_hm)
-            ax_col_mean.plot(np.arange(mat_np.shape[1]), col_min, color="black", linewidth=1.5)
-            ax_col_mean.set_ylabel("Lowest loss per last_block", fontsize=8, rotation=0, labelpad=25)
+            ax_col_mean.plot(np.arange(width), col_curve, color="black", linewidth=1.5)
+            label_top = top_curve_label or ("Lowest loss per last_block" if top_curve is None else "Metric per last_block")
+            ax_col_mean.set_ylabel(label_top, fontsize=8, rotation=0, labelpad=25)
             ax_col_mean.tick_params(axis='x', labelbottom=False)
             ax_col_mean.grid(True, alpha=0.2)
             ax_row_mean = divider.append_axes("right", size="8%", pad=0.55, sharey=ax_hm)
             ax_row_mean.plot(row_mean, np.arange(mat_np.shape[0]), color="black", linewidth=1.5)
-            ax_row_mean.set_xlabel("Mean loss per start_block", fontsize=8)
+            row_label_final = row_label or "Mean loss per start_block"
+            ax_row_mean.set_xlabel(row_label_final, fontsize=8)
             for label in ax_row_mean.get_xticklabels():
                 label.set_rotation(90)
             ax_row_mean.tick_params(axis='y', labelleft=False)
@@ -1052,9 +1103,22 @@ def main():
             plt.close(fig_hm)
 
             print(f"Saved: {out_path}")
-            return col_min, row_mean
+            return col_curve, row_mean
 
-        def add_heatmap(mat, title, cbar_label, tag, note, cmap_name='RdYlGn_r', center_zero=False, per_channel=False, ch_idx=None):
+        def add_heatmap(
+            mat,
+            title,
+            cbar_label,
+            tag,
+            note,
+            cmap_name='RdYlGn_r',
+            center_zero=False,
+            per_channel=False,
+            ch_idx=None,
+            top_curve=None,
+            top_curve_label=None,
+            row_label=None,
+        ):
             return plot_heatmap(
                 mat,
                 title=title if not per_channel else f"{title} (channel {ch_idx})",
@@ -1064,6 +1128,9 @@ def main():
                 note=note,
                 cmap_name=cmap_name,
                 center_zero=center_zero,
+                top_curve=top_curve,
+                top_curve_label=top_curve_label,
+                row_label=row_label,
             )
 
         add_heatmap(
@@ -1086,27 +1153,33 @@ def main():
                 ch_idx=ch_idx,
             )
 
-        lift_means = {}
-        lift_means["all"] = add_heatmap(
-            lift_np,
-            'Lift Heatmap – Reconstruction (all channels)',
-            'Lift (actual - expected)',
+        gain_means = {}
+        gain_means["all"] = add_heatmap(
+            context_gain_all,
+            'Context Benefit Heatmap – Reconstruction (all channels)',
+            'Δ loss when extending context by one block',
             'lift_all',
-            'Negative lift (blue) = actual loss lower than expected (good). Positive lift (red) = worse than expected.',
+            'Positive values = larger loss before adding the previous block (benefit). Negative = new block hurts predictions.',
             cmap_name='coolwarm',
             center_zero=True,
+            top_curve=best_loss_all,
+            top_curve_label="Lowest loss per last_block",
+            row_label="Avg Δ loss per start_block",
         )
-        for ch_idx in range(lift_ch_np.shape[0]):
-            lift_means[f"ch{ch_idx}"] = add_heatmap(
-                lift_ch_np[ch_idx],
-                'Lift Heatmap – Reconstruction',
-                'Lift (actual - expected)',
+        for ch_idx in range(context_gain_channels.shape[0]):
+            gain_means[f"ch{ch_idx}"] = add_heatmap(
+                context_gain_channels[ch_idx],
+                'Context Benefit Heatmap – Reconstruction',
+                'Δ loss when extending context by one block',
                 'lift',
-                'Negative lift (blue) = actual loss lower than expected (good). Positive lift (red) = worse than expected.',
+                'Positive values = larger loss before adding the previous block (benefit). Negative = new block hurts predictions.',
                 cmap_name='coolwarm',
                 center_zero=True,
                 per_channel=True,
                 ch_idx=ch_idx,
+                top_curve=best_loss_channels[ch_idx],
+                top_curve_label="Lowest loss per last_block",
+                row_label="Avg Δ loss per start_block",
             )
 
         highlights_all = select_highlight_profiles(recon_np, expected_curve, expected_std)
@@ -1133,15 +1206,15 @@ def main():
                 tag=f"ch{ch_idx}",
             )
 
-        col_min_all, row_mean_all = lift_means.get("all", (None, None))
+        col_curve_all, row_mean_all = gain_means.get("all", (None, None))
         if row_mean_all is not None:
-            plot_block_lift_summary(lift_np, filename, i, images_dir, title_prefix="All")
+            plot_block_lift_summary(context_gain_all, filename, i, images_dir, title_prefix="All")
             plot_mean_scatter(row_mean_all, best_loss_all, filename, i, images_dir, tag="lift_all")
-        for ch_idx in range(lift_ch_np.shape[0]):
-            means = lift_means.get(f"ch{ch_idx}")
+        for ch_idx in range(context_gain_channels.shape[0]):
+            means = gain_means.get(f"ch{ch_idx}")
             if means is None:
                 continue
-            col_min_ch, row_mean_ch = means
+            _, row_mean_ch = means
             best_loss_ch = best_loss_channels[ch_idx] if ch_idx < best_loss_channels.shape[0] else None
             if best_loss_ch is not None:
                 plot_mean_scatter(row_mean_ch, best_loss_ch, filename, i, images_dir, tag=f"lift_ch{ch_idx}")
@@ -1238,11 +1311,14 @@ def main():
                 "Each curve shows how loss changes as more context is added before predicting `last_block` "
                 "(min: best start; start=last+1: entire circle; start=last-10: fixed-length context)."
             )
-            xtick_step = max(1, cols // 12) if cols > 0 else 1
-            xticks = np.arange(0, cols, xtick_step)
-            if cols > 0 and (cols - 1) not in xticks:
-                xticks = np.append(xticks, cols - 1)
-            ax_top.set_xticks(xticks)
+            if cols > 0:
+                if cols <= 10:
+                    xticks = np.array([0])
+                else:
+                    xticks = np.arange(0, cols, 10)
+                    if xticks.size == 0:
+                        xticks = np.array([0])
+                ax_top.set_xticks(xticks)
             ax_top.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
             ax_top.legend(loc="best")
 
