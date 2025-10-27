@@ -978,8 +978,16 @@ def main():
             from matplotlib.colors import TwoSlopeNorm
             norm = None
             if center_zero and not is_binary:
-                vmax = max(vmax, 1e-6)
-                vmin = min(vmin, -1e-6)
+                data_vals = mat_np[np.isfinite(mat_np) & (mat_np != 0.0)]
+                if data_vals.size:
+                    std = float(np.std(data_vals))
+                    clip = 2.5 * std if std > 0 else max(abs(vmax), abs(vmin), 1e-6)
+                    clip = max(clip, 1e-6)
+                    vmax = clip
+                    vmin = -clip
+                else:
+                    vmax = max(vmax, 1e-6)
+                    vmin = min(vmin, -1e-6)
                 norm = TwoSlopeNorm(vmin=vmin, vcenter=0.0, vmax=vmax)
 
             im_hm = ax_hm.imshow(
