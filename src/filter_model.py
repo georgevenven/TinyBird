@@ -9,6 +9,7 @@ and make neighbouring predictions worse.
 """
 
 import argparse
+import csv
 import math
 from pathlib import Path
 
@@ -291,6 +292,38 @@ def save_filter_state(
     torch.save(payload, path)
 
 
+def update_summary_file(summary_path: Path, entry: dict):
+    fieldnames = ["filename", "num_blocks", "num_filtered", "mean_loss_before", "mean_loss_after"]
+    rows = []
+    if summary_path.exists():
+        with summary_path.open("r", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                rows.append(row)
+
+    def _fmt(val):
+        if isinstance(val, float):
+            if math.isnan(val):
+                return "nan"
+            return f"{val:.6f}"
+        return str(val)
+
+    updated = False
+    for row in rows:
+        if row.get("filename") == entry["filename"]:
+            for key in fieldnames[1:]:
+                row[key] = _fmt(entry[key])
+            updated = True
+            break
+    if not updated:
+        rows.append({key: _fmt(entry[key]) for key in fieldnames})
+    rows.sort(key=lambda r: r.get("filename", ""))
+    with summary_path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def compute_loss_matrix(
     model,
     x,
@@ -548,6 +581,12 @@ def process_file(model, dataset, index, device, args, output_dir: Path):
 
     iteration = 1
     max_iterations = max(1, args.iterations)
+    before_mean_initial = float("nan")
+    final_after_loss = float("nan")
+
+    if effective_context == 0:
+        print("  No valid contexts available; skipping iterative filtering.")
+
     while iteration <= max_iterations:
         print(f"\n  Iteration {iteration}/{max_iterations}")
 
@@ -586,9 +625,6 @@ def process_file(model, dataset, index, device, args, output_dir: Path):
         penalty_condition = (impacts > 0.0) & (~filtered_mask)
         filtered_this_iter = loss_condition & penalty_condition
 
-        print(f"    Expected loss (first 5 contexts): {np.round(expected_loss[:5], 4).tolist()}")
-        print(f"    Expected diff (first 5 contexts): {np.round(expected_diff[:5], 4).tolist()}")
-        print(f"    Expected diff std (first 5): {np.round(expected_diff_std[:5], 4).tolist()}")
         print(f"    Blocks above expected loss @ctx={target_idx + 1}: {np.where(loss_condition)[0].tolist()}")
         print(f"    Blocks with positive penalty: {np.where(penalty_condition)[0].tolist()}")
         print(f"    Newly filtered blocks: {np.where(filtered_this_iter)[0].tolist()}")
@@ -597,6 +633,8 @@ def process_file(model, dataset, index, device, args, output_dir: Path):
         before_mean = float(np.nan) if target_idx < 0 or not np.any(valid_before) else float(
             np.nanmean(loss_at_target[valid_before])
         )
+        if iteration == 1:
+            before_mean_initial = before_mean
         print(
             f"    Mean loss @ max context before filtering: {before_mean:.4f}"
             if np.isfinite(before_mean)
@@ -609,6 +647,7 @@ def process_file(model, dataset, index, device, args, output_dir: Path):
                 print(f"    Mean loss @ max context after filtering: {before_mean:.4f}")
             else:
                 print("    Mean loss @ max context after filtering: nan")
+            final_after_loss = before_mean
             break
 
         filtered_mask |= filtered_this_iter
@@ -638,12 +677,18 @@ def process_file(model, dataset, index, device, args, output_dir: Path):
             print(f"    Mean loss @ max context after filtering: {after_mean:.4f}")
         else:
             print("    Mean loss @ max context after filtering: nan")
+        final_after_loss = after_mean
 
         print(f"    Cumulative filtered blocks: {np.where(filtered_mask)[0].tolist()}")
 
         loss_matrix = loss_matrix_after
         effective_context = effective_context_after
         iteration += 1
+
+    if np.isnan(before_mean_initial):
+        before_mean_initial = float("nan")
+    if np.isnan(final_after_loss):
+        final_after_loss = before_mean_initial
 
     save_filter_state(
         output_path,
@@ -653,6 +698,14 @@ def process_file(model, dataset, index, device, args, output_dir: Path):
         initial_loss_matrix=initial_loss_matrix,
         n_blocks=n_blocks,
     )
+    summary_entry = {
+        "filename": filename,
+        "num_blocks": n_blocks,
+        "num_filtered": int(filtered_mask.sum()),
+        "mean_loss_before": before_mean_initial,
+        "mean_loss_after": final_after_loss,
+    }
+    update_summary_file(output_dir / "summary.csv", summary_entry)
     print(f"\n  Saved results ({output_path.name})")
 
 
