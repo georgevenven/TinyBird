@@ -4,6 +4,7 @@ import os
 import shutil
 import glob
 from collections import defaultdict
+from itertools import combinations
 from tqdm import tqdm
 
 def calculate_ms(detected_events):
@@ -36,20 +37,40 @@ def split_data(input_file, spec_dir, train_dir, test_dir, train_percent=80):
     # Sort birds by total_ms (helps with allocation)
     birds = sorted(bird_data.items(), key=lambda x: x[1]['total_ms'], reverse=True)
     
+    print(f"Total unique birds: {len(birds)}")
+    
     # Allocate birds to train/test
     total_ms = sum(b[1]['total_ms'] for b in birds)
     target_train_ms = total_ms * (train_percent / 100)
     
+    # Find best allocation by trying all possible combinations
+    best_train_birds = []
+    best_diff = float('inf')
+    
+    # Try all possible subsets of birds for train set
+    for r in range(len(birds) + 1):
+        for train_combo in combinations(range(len(birds)), r):
+            train_ms = sum(birds[i][1]['total_ms'] for i in train_combo)
+            diff = abs(train_ms - target_train_ms)
+            if diff < best_diff:
+                best_diff = diff
+                best_train_birds = list(train_combo)
+    
+    # Build train and test sets
     train_recordings = []
     test_recordings = []
     train_ms = 0
+    train_birds = []
+    test_birds = []
     
-    for bird_id, bird_info in birds:
-        if train_ms < target_train_ms:
+    for i, (bird_id, bird_info) in enumerate(birds):
+        if i in best_train_birds:
             train_recordings.extend(bird_info['recordings'])
             train_ms += bird_info['total_ms']
+            train_birds.append(bird_id)
         else:
             test_recordings.extend(bird_info['recordings'])
+            test_birds.append(bird_id)
     
     # Copy train spec files
     print("Copying train files...")
@@ -71,13 +92,22 @@ def split_data(input_file, spec_dir, train_dir, test_dir, train_percent=80):
             dst = os.path.join(test_dir, os.path.basename(src))
             shutil.copy2(src, dst)
     
+    # Copy audio_params.json to both directories
+    audio_params = os.path.join(spec_dir, "audio_params.json")
+    if os.path.exists(audio_params):
+        shutil.copy2(audio_params, os.path.join(train_dir, "audio_params.json"))
+        shutil.copy2(audio_params, os.path.join(test_dir, "audio_params.json"))
+    
     # Print stats
     test_ms = total_ms - train_ms
+    print(f"\n=== Split Statistics ===")
     print(f"Total MS: {total_ms:.2f}")
     print(f"Train MS: {train_ms:.2f} ({train_ms/total_ms*100:.1f}%)")
     print(f"Test MS: {test_ms:.2f} ({test_ms/total_ms*100:.1f}%)")
-    print(f"Train recordings: {len(train_recordings)}")
-    print(f"Test recordings: {len(test_recordings)}")
+    print(f"Train recordings: {len(train_recordings)} from {len(train_birds)} birds")
+    print(f"Test recordings: {len(test_recordings)} from {len(test_birds)} birds")
+    print(f"Train birds: {train_birds}")
+    print(f"Test birds: {test_birds}")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

@@ -4,6 +4,11 @@ import shutil
 import json
 from datetime import datetime
 import time
+
+# Set matplotlib backend BEFORE importing plotting_utils
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend for headless environments
+
 import torch
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
