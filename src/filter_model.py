@@ -26,7 +26,7 @@ def parse_args():
     parser.add_argument(
         "--model_path",
         type=str,
-        required=True,
+        required=False,  # will be True temporarily for testing
         help="Path to the model checkpoint directory (containing config.json and weights/)",  # fmt: skip
     )
     parser.add_argument(
@@ -65,6 +65,12 @@ def parse_args():
         type=float,
         default=0.0,
         help="Standard-deviation offset applied to the expected benefit when scoring block penalties",
+    )
+    parser.add_argument(
+        "--iterations",
+        type=int,
+        default=1,
+        help="Number of filter iterations to perform (each pass recomputes losses after masking blocks)",
     )
     parser.add_argument(
         "--test",
@@ -179,6 +185,33 @@ def _safe_float(value: float | torch.Tensor) -> float:
     return scalar
 
 
+def _prepare_mask(filtered_mask: np.ndarray | None, n_blocks: int) -> np.ndarray:
+    if filtered_mask is None:
+        return np.zeros(n_blocks, dtype=bool)
+    mask = np.asarray(filtered_mask, dtype=bool)
+    if mask.shape[0] != n_blocks:
+        raise ValueError("filtered_mask must have length equal to number of blocks.")
+    return mask
+
+
+def _gather_context_indices(last_block: int, ctx_len: int, mask: np.ndarray) -> list[int] | None:
+    if ctx_len <= 0:
+        return []
+    n_blocks = mask.shape[0]
+    indices: list[int] = []
+    current = last_block
+    visited = 0
+    while len(indices) < ctx_len and visited < n_blocks:
+        if not mask[current]:
+            indices.append(current)
+        current = (current - 1) % n_blocks
+        visited += 1
+    if len(indices) < ctx_len:
+        return None
+    indices.reverse()
+    return indices
+
+
 def compute_loss_matrix(
     model,
     x,
@@ -186,27 +219,54 @@ def compute_loss_matrix(
     N,
     device,
     requested_context: int,
+    filtered_mask: np.ndarray | None = None,
+    iteration: int | None = None,
 ) -> tuple[np.ndarray, int]:
     n_blocks = int(N.max().item())
     if n_blocks <= 0:
         return np.empty((0, requested_context), dtype=np.float64), 0
 
     loss_matrix = np.full((n_blocks, requested_context), np.nan, dtype=np.float64)
-    effective_context = min(requested_context, max(n_blocks - 1, 0))
-    total_jobs = n_blocks * effective_context
+    mask = _prepare_mask(filtered_mask, n_blocks)
+    available_blocks = int(np.count_nonzero(~mask))
+    effective_context = min(requested_context, available_blocks) if available_blocks > 0 else 0
 
     if effective_context == 0:
+        return loss_matrix, 0
+
+    combos: list[tuple[int, int, int]] = []
+    for last_block in range(n_blocks):
+        if mask[last_block]:
+            continue
+        for ctx_idx in range(effective_context):
+            ctx_len = ctx_idx + 1
+            context = _gather_context_indices(last_block, ctx_len, mask)
+            if context is None:
+                continue
+            start_block = context[0]
+            combos.append((last_block, ctx_idx, start_block))
+
+    if not combos:
         return loss_matrix, effective_context
 
-    desc = "Computing loss matrix"
-    with torch.no_grad(), tqdm(total=total_jobs, desc=desc, leave=False) as pbar:
-        for last_block in range(n_blocks):
-            for ctx_idx in range(effective_context):
-                ctx_len = ctx_idx + 1
-                start_block = (last_block - ctx_len) % n_blocks
-                loss, *_ = compute_loss(model, x, x_i, N, start_block, last_block)
-                loss_matrix[last_block, ctx_idx] = _safe_float(loss)
-                pbar.update(1)
+    exclude_blocks = np.where(mask)[0].tolist()
+    iter_label = f" (iteration {iteration})" if iteration is not None else ""
+    desc = f"Computing losses{iter_label}"
+
+    with torch.no_grad(), tqdm(total=len(combos), desc=desc, leave=False) as pbar:
+        for last_block, ctx_idx, start_block in combos:
+            loss, *_ = compute_loss(
+                model,
+                x,
+                x_i,
+                N,
+                start_block,
+                last_block,
+                exclude_blocks=exclude_blocks if exclude_blocks else None,
+            )
+            loss_matrix[last_block, ctx_idx] = _safe_float(loss)
+            pbar.update(1)
+
     return loss_matrix, effective_context
 
 
@@ -216,6 +276,10 @@ def compute_expected_metrics(loss_matrix: np.ndarray, effective_context: int):
     actual_benefit = np.full((rows, cols), np.nan, dtype=np.float64)
     expected_diff = np.full(cols, np.nan, dtype=np.float64)
     expected_diff_std = np.full(cols, np.nan, dtype=np.float64)
+
+    if cols > 0:
+        first_col = loss_matrix[:, 0]
+        actual_benefit[:, 0] = first_col - 1.0
 
     for ctx_idx in range(effective_context):
         column = loss_matrix[:, ctx_idx]
@@ -247,19 +311,25 @@ def compute_block_impacts(
     expected_diff_std: np.ndarray,
     effective_context: int,
     threshold: float,
+    filtered_mask: np.ndarray | None = None,
 ) -> np.ndarray:
     n_blocks, _ = actual_benefit.shape
+    mask = _prepare_mask(filtered_mask, n_blocks)
     impact = np.zeros(n_blocks, dtype=np.float64)
 
     for block in range(n_blocks):
+        if mask[block]:
+            continue
         for ctx_idx in range(1, effective_context):
             ctx_len = ctx_idx + 1
             last_block = (block + ctx_len) % n_blocks
+            if mask[last_block]:
+                continue
             benefit = actual_benefit[last_block, ctx_idx]
             if not np.isfinite(benefit):
                 continue
-            exp = expected_diff[ctx_len] if np.isfinite(expected_diff[ctx_len]) else 0.0
-            std = expected_diff_std[ctx_len] if np.isfinite(expected_diff_std[ctx_len]) else 0.0
+            exp = expected_diff[ctx_idx] if np.isfinite(expected_diff[ctx_idx]) else 0.0
+            std = expected_diff_std[ctx_idx] if np.isfinite(expected_diff_std[ctx_idx]) else 0.0
             adjusted = exp + threshold * std
             diff = benefit - adjusted
             impact[block] += diff
@@ -269,26 +339,41 @@ def compute_block_impacts(
 
 def run_test_mode(threshold: float):
     print("\n=== Demo: compute_block_impacts ===")
-    effective_context = 3  # columns correspond to context lengths 1, 2, 3
-    n_blocks = 4
-
-    actual_benefit = np.array(
+    effective_context = 6  # columns correspond to context lengths 1→6
+    loss_matrix = np.array(
         [
-            [np.nan, 0.20, -0.15],
-            [np.nan, -0.05, 0.10],
-            [np.nan, 0.30, -0.25],
-            [np.nan, -0.10, 0.05],
+            [1.0, 0.9, 0.8, 0.7, 0.6, 0.5],
+            [1.1, 0.9, 0.7, 0.5, 0.3, 0.1],
+            [1.0, 0.9, 0.7, 0.5, 0.3, 0.1],
+            [1.0, 0.8, 0.7, 0.5, 0.3, 0.1],
+            [1.0, 0.8, 0.6, 0.5, 0.3, 0.1],
+            [1.0, 0.8, 0.6, 0.4, 0.3, 0.1],
         ],
         dtype=np.float64,
     )
-    expected_diff = np.array([0.0, 0.12, -0.06], dtype=np.float64)
-    expected_diff_std = np.array([0.0, 0.03, 0.08], dtype=np.float64)
+    n_blocks = loss_matrix.shape[0]
 
-    print("actual_benefit (rows=predicted block, cols=ctx length-1):")
+    print(f"loss_matrix (rows=predicted block, cols=context length 1→{effective_context}):")
+    print(loss_matrix)
+
+    expected_loss, expected_diff, expected_diff_std, actual_benefit = compute_expected_metrics(
+        loss_matrix, effective_context
+    )
+
+    print("\nexpected_loss by context length:", expected_loss.tolist())
+    print("expected_diff (mean delta when adding a block):", expected_diff.tolist())
+    print("expected_diff_std (std of that delta):", expected_diff_std.tolist())
+    print("\nactual_benefit (per predicted block, per delta context):")
     print(actual_benefit)
-    print("\nexpected_diff:", expected_diff.tolist())
-    print("expected_diff_std:", expected_diff_std.tolist())
     print(f"\nUsing threshold = {threshold}\n")
+
+    target_idx = effective_context - 1
+    loss_at_target = loss_matrix[:, target_idx]
+    threshold_loss = expected_loss[target_idx]
+    loss_condition = np.isfinite(loss_at_target) & (loss_at_target > threshold_loss)
+    print(f"Loss at target context (len={target_idx + 1}): {loss_at_target.tolist()}")
+    print(f"Expected loss threshold @context {target_idx + 1}: {threshold_loss}")
+    print("Blocks above threshold:", np.where(loss_condition)[0].tolist(), "\n")
 
     manual = np.zeros(n_blocks, dtype=np.float64)
     for block in range(n_blocks):
@@ -323,6 +408,10 @@ def run_test_mode(threshold: float):
     print("Manual accumulation:", manual.tolist())
     print("Function result   :", computed.tolist())
     print("Match?", np.allclose(manual, computed))
+    penalty_condition = manual > 0.0
+    filtered = loss_condition & penalty_condition
+    print("Blocks with positive penalty:", np.where(penalty_condition)[0].tolist())
+    print("=> Blocks to filter (loss condition ∧ penalty):", np.where(filtered)[0].tolist())
     print("=== End Demo ===\n")
 
 
@@ -331,6 +420,15 @@ def process_file(model, dataset, index, device, args, output_dir: Path):
     n_blocks = int(N.item())
     print(f"\nProcessing file {index}: {filename} (blocks={n_blocks})")
 
+    if n_blocks == 0:
+        print("  No blocks available in sample; emitting zero mask.")
+        mask_tensor = torch.zeros(0, dtype=torch.int64)
+        output_path = build_output_path(dataset, index, output_dir)
+        torch.save({"mask": mask_tensor}, output_path)
+        print(f"  Saved mask ({output_path.name})")
+        return
+
+    filtered_mask = np.zeros(n_blocks, dtype=bool)
     loss_matrix, effective_context = compute_loss_matrix(
         model,
         x,
@@ -338,55 +436,113 @@ def process_file(model, dataset, index, device, args, output_dir: Path):
         N,
         device,
         args.context_length,
+        filtered_mask=filtered_mask,
+        iteration=1,
     )
 
-    if effective_context < args.context_length:
-        print(
-            f"  Requested context_length {args.context_length} truncated to {effective_context} "
-            f"because only {n_blocks} blocks are available."
+    iteration = 1
+    max_iterations = max(1, args.iterations)
+    while iteration <= max_iterations:
+        print(f"\n  Iteration {iteration}/{max_iterations}")
+
+        available_blocks = int(np.count_nonzero(~filtered_mask))
+        if effective_context < args.context_length:
+            print(
+                f"    Context truncated to {effective_context} (available unfiltered blocks: {available_blocks})"
+            )
+
+        if effective_context == 0:
+            print("    Insufficient unfiltered blocks to compute losses; stopping.")
+            break
+
+        expected_loss, expected_diff, expected_diff_std, actual_benefit = compute_expected_metrics(
+            loss_matrix, effective_context
         )
 
-    if effective_context == 0:
-        print("  Not enough blocks to compute contextual losses; emitting zero mask.")
-        mask = np.zeros(n_blocks, dtype=np.int64)
-        output_path = build_output_path(dataset, index, output_dir)
-        torch.save({"mask": torch.as_tensor(mask, dtype=torch.int64)}, output_path)
-        print(f"  Saved mask ({output_path.name})")
-        return
+        impacts = compute_block_impacts(
+            actual_benefit,
+            expected_diff,
+            expected_diff_std,
+            effective_context,
+            args.threshold,
+            filtered_mask=filtered_mask,
+        )
 
-    expected_loss, expected_diff, expected_diff_std, actual_benefit = compute_expected_metrics(
-        loss_matrix, effective_context
-    )
-    impacts = compute_block_impacts(
-        actual_benefit,
-        expected_diff,
-        expected_diff_std,
-        effective_context,
-        args.threshold,
-    )
+        target_idx = effective_context - 1
+        threshold_loss = expected_loss[target_idx] if target_idx >= 0 else float("nan")
+        loss_at_target = loss_matrix[:, target_idx] if target_idx >= 0 else np.full(n_blocks, np.nan)
 
-    target_idx = effective_context - 1
-    threshold_loss = expected_loss[target_idx]
-    loss_at_target = loss_matrix[:, target_idx]
+        loss_condition = np.zeros(n_blocks, dtype=bool)
+        if np.isfinite(threshold_loss):
+            candidate = np.isfinite(loss_at_target) & (loss_at_target > threshold_loss)
+            loss_condition = candidate & (~filtered_mask)
 
-    loss_condition = np.zeros(n_blocks, dtype=bool)
-    if np.isfinite(threshold_loss):
-        loss_condition = np.isfinite(loss_at_target) & (loss_at_target > threshold_loss)
+        penalty_condition = (impacts > 0.0) & (~filtered_mask)
+        filtered_this_iter = loss_condition & penalty_condition
 
-    penalty_condition = impacts > 0.0
-    filtered_mask = loss_condition & penalty_condition
+        print(f"    Expected loss (first 5 contexts): {np.round(expected_loss[:5], 4).tolist()}")
+        print(f"    Expected diff (first 5 contexts): {np.round(expected_diff[:5], 4).tolist()}")
+        print(f"    Expected diff std (first 5): {np.round(expected_diff_std[:5], 4).tolist()}")
+        print(f"    Blocks above expected loss @ctx={target_idx + 1}: {np.where(loss_condition)[0].tolist()}")
+        print(f"    Blocks with positive penalty: {np.where(penalty_condition)[0].tolist()}")
+        print(f"    Newly filtered blocks: {np.where(filtered_this_iter)[0].tolist()}")
 
-    print(f"  Expected loss (first 5 contexts): {np.round(expected_loss[:5], 4).tolist()}")
-    print(f"  Expected diff (first 5 contexts): {np.round(expected_diff[:5], 4).tolist()}")
-    print(f"  Expected diff std (first 5): {np.round(expected_diff_std[:5], 4).tolist()}")
-    print(f"  Blocks above expected loss @ctx={target_idx + 1}: {np.where(loss_condition)[0].tolist()}")
-    print(f"  Blocks with positive penalty: {np.where(penalty_condition)[0].tolist()}")
-    print(f"  Filtered blocks: {np.where(filtered_mask)[0].tolist()}")
+        valid_before = (~filtered_mask) & np.isfinite(loss_at_target)
+        before_mean = float(np.nan) if target_idx < 0 or not np.any(valid_before) else float(
+            np.nanmean(loss_at_target[valid_before])
+        )
+        print(
+            f"    Mean loss @ max context before filtering: {before_mean:.4f}"
+            if np.isfinite(before_mean)
+            else "    Mean loss @ max context before filtering: nan"
+        )
+
+        if not filtered_this_iter.any():
+            print("    No new blocks met filtering criteria; stopping iterations.")
+            if np.isfinite(before_mean):
+                print(f"    Mean loss @ max context after filtering: {before_mean:.4f}")
+            else:
+                print("    Mean loss @ max context after filtering: nan")
+            break
+
+        filtered_mask |= filtered_this_iter
+
+        loss_matrix_after, effective_context_after = compute_loss_matrix(
+            model,
+            x,
+            x_i,
+            N,
+            device,
+            args.context_length,
+            filtered_mask=filtered_mask,
+            iteration=iteration + 1,
+        )
+
+        if effective_context_after > 0:
+            loss_after_target_idx = effective_context_after - 1
+            loss_after = loss_matrix_after[:, loss_after_target_idx]
+            valid_after = (~filtered_mask) & np.isfinite(loss_after)
+            after_mean = (
+                float(np.nanmean(loss_after[valid_after])) if np.any(valid_after) else float("nan")
+            )
+        else:
+            after_mean = float("nan")
+
+        if np.isfinite(after_mean):
+            print(f"    Mean loss @ max context after filtering: {after_mean:.4f}")
+        else:
+            print("    Mean loss @ max context after filtering: nan")
+
+        print(f"    Cumulative filtered blocks: {np.where(filtered_mask)[0].tolist()}")
+
+        loss_matrix = loss_matrix_after
+        effective_context = effective_context_after
+        iteration += 1
 
     mask_tensor = torch.as_tensor(filtered_mask.astype(np.int64))
     output_path = build_output_path(dataset, index, output_dir)
     torch.save({"mask": mask_tensor}, output_path)
-    print(f"  Saved mask ({output_path.name})")
+    print(f"\n  Saved mask ({output_path.name})")
 
 
 def build_output_path(dataset, index: int, output_dir: Path) -> Path:
@@ -405,9 +561,7 @@ def main():
         raise ValueError("context_length must be a positive integer.")
 
     model, config = load_model_from_checkpoint(
-        run_dir=args.model_path,
-        checkpoint_file=args.checkpoint,
-        fallback_to_random=False,
+        run_dir=args.model_path, checkpoint_file=args.checkpoint, fallback_to_random=False
     )
 
     device = torch.device(args.device)
@@ -419,15 +573,10 @@ def main():
     else:
         data_dir = config.get("val_dir")
         if data_dir is None:
-            raise ValueError(
-                "No data directory specified. Provide --data_dir or configure 'val_dir' in config.json."
-            )
+            raise ValueError("No data directory specified. Provide --data_dir or configure 'val_dir' in config.json.")
 
     dataset = SpectogramDataset(
-        dir=data_dir,
-        n_mels=config.get("mels", 128),
-        n_timebins=config.get("num_timebins", 1024),
-        pad_crop=True,
+        dir=data_dir, n_mels=config.get("mels", 128), n_timebins=config.get("num_timebins", 1024), pad_crop=True
     )
 
     output_dir = Path(data_dir) / "filter"
