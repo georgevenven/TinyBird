@@ -212,6 +212,85 @@ def _gather_context_indices(last_block: int, ctx_len: int, mask: np.ndarray) -> 
     return indices
 
 
+def _build_impact_lookup(n_blocks: int, effective_context: int, mask: np.ndarray) -> list[list[tuple[int, int]]]:
+    lookup: list[list[tuple[int, int]]] = [[] for _ in range(n_blocks)]
+    if effective_context <= 1:
+        return lookup
+    for last_block in range(n_blocks):
+        if mask[last_block]:
+            continue
+        for ctx_idx in range(1, effective_context):
+            ctx_len = ctx_idx + 1
+            context = _gather_context_indices(last_block, ctx_len, mask)
+            if context is None:
+                continue
+            block = context[0]
+            if mask[block]:
+                continue
+            lookup[block].append((last_block, ctx_idx))
+    return lookup
+
+
+def _to_numpy(array, dtype=None):
+    if array is None:
+        return None
+    if isinstance(array, torch.Tensor):
+        array = array.detach().cpu().numpy()
+    else:
+        array = np.asarray(array)
+    if dtype is not None and array is not None:
+        array = array.astype(dtype)
+    return array
+
+
+def load_saved_state(path: Path, n_blocks: int, context_length: int) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        data = torch.load(path, map_location="cpu", weights_only=False)
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    result: dict = {}
+    mask_arr = _to_numpy(data.get("mask"))
+    if mask_arr is not None and mask_arr.size == n_blocks:
+        result["mask"] = mask_arr.astype(bool)
+    saved_context = data.get("context_length")
+    saved_n_blocks = data.get("n_blocks", n_blocks)
+    if (
+        saved_context is not None
+        and int(saved_context) == int(context_length)
+        and int(saved_n_blocks) == int(n_blocks)
+    ):
+        loss_matrix = _to_numpy(data.get("loss_matrix"), dtype=np.float64)
+        if loss_matrix is not None and loss_matrix.shape[0] == n_blocks:
+            result["loss_matrix"] = loss_matrix
+            saved_eff = data.get("effective_context")
+            if saved_eff is not None:
+                result["effective_context"] = int(saved_eff)
+    return result
+
+
+def save_filter_state(
+    path: Path,
+    mask: np.ndarray,
+    context_length: int,
+    effective_context: int | None,
+    initial_loss_matrix: np.ndarray | None,
+    n_blocks: int,
+):
+    payload: dict = {
+        "mask": torch.as_tensor(mask.astype(np.int64)),
+        "context_length": int(context_length),
+        "effective_context": int(effective_context or 0),
+        "n_blocks": int(n_blocks),
+    }
+    if initial_loss_matrix is not None:
+        payload["loss_matrix"] = torch.as_tensor(initial_loss_matrix, dtype=torch.float32)
+    torch.save(payload, path)
+
+
 def compute_loss_matrix(
     model,
     x,
@@ -317,22 +396,22 @@ def compute_block_impacts(
     mask = _prepare_mask(filtered_mask, n_blocks)
     impact = np.zeros(n_blocks, dtype=np.float64)
 
-    for block in range(n_blocks):
-        if mask[block]:
+    if effective_context <= 1:
+        return impact
+
+    lookup = _build_impact_lookup(n_blocks, effective_context, mask)
+
+    for block, targets in enumerate(lookup):
+        if mask[block] or not targets:
             continue
-        for ctx_idx in range(1, effective_context):
-            ctx_len = ctx_idx + 1
-            last_block = (block + ctx_len) % n_blocks
-            if mask[last_block]:
-                continue
+        for last_block, ctx_idx in targets:
             benefit = actual_benefit[last_block, ctx_idx]
             if not np.isfinite(benefit):
                 continue
             exp = expected_diff[ctx_idx] if np.isfinite(expected_diff[ctx_idx]) else 0.0
             std = expected_diff_std[ctx_idx] if np.isfinite(expected_diff_std[ctx_idx]) else 0.0
             adjusted = exp + threshold * std
-            diff = benefit - adjusted
-            impact[block] += diff
+            impact[block] += benefit - adjusted
 
     return impact
 
@@ -376,14 +455,18 @@ def run_test_mode(threshold: float):
     print("Blocks above threshold:", np.where(loss_condition)[0].tolist(), "\n")
 
     manual = np.zeros(n_blocks, dtype=np.float64)
-    for block in range(n_blocks):
+    mask_demo = np.zeros(n_blocks, dtype=bool)
+    lookup_demo = _build_impact_lookup(n_blocks, effective_context, mask_demo)
+    for block, targets in enumerate(lookup_demo):
         print(f"Block {block}:")
-        for ctx_idx in range(1, effective_context):
-            ctx_len = ctx_idx + 1  # number of preceding blocks under evaluation
-            last_block = (block + ctx_len) % n_blocks
+        if not targets:
+            print("  no eligible contexts")
+        for last_block, ctx_idx in targets:
+            ctx_len = ctx_idx + 1
+            context = _gather_context_indices(last_block, ctx_len, mask_demo) or []
             benefit = actual_benefit[last_block, ctx_idx]
             if not np.isfinite(benefit):
-                print(f"  ctx_len={ctx_len}: skip (NaN benefit)")
+                print(f"  ctx_len={ctx_len}, last_block={last_block}, context={context}: skip (NaN benefit)")
                 continue
             exp = expected_diff[ctx_idx] if np.isfinite(expected_diff[ctx_idx]) else 0.0
             std = expected_diff_std[ctx_idx] if np.isfinite(expected_diff_std[ctx_idx]) else 0.0
@@ -391,9 +474,8 @@ def run_test_mode(threshold: float):
             contribution = benefit - adjusted
             manual[block] += contribution
             print(
-                f"  ctx_len={ctx_len}: predict block={last_block}, benefit={benefit:+.3f}, "
-                f"expected={exp:+.3f}, std={std:+.3f}, adjusted={adjusted:+.3f}, "
-                f"contribution={contribution:+.3f}"
+                f"  ctx_len={ctx_len}, last_block={last_block}, context={context}: benefit={benefit:+.3f}, "
+                f"expected={exp:+.3f}, std={std:+.3f}, adjusted={adjusted:+.3f}, contribution={contribution:+.3f}"
             )
         print(f"  => cumulative impact for block {block}: {manual[block]:+.3f}\n")
 
@@ -419,26 +501,50 @@ def process_file(model, dataset, index, device, args, output_dir: Path):
     x, x_i, _, N, filename = prepare_sample(model, dataset, index, device)
     n_blocks = int(N.item())
     print(f"\nProcessing file {index}: {filename} (blocks={n_blocks})")
+    output_path = build_output_path(dataset, index, output_dir)
 
     if n_blocks == 0:
         print("  No blocks available in sample; emitting zero mask.")
-        mask_tensor = torch.zeros(0, dtype=torch.int64)
-        output_path = build_output_path(dataset, index, output_dir)
-        torch.save({"mask": mask_tensor}, output_path)
-        print(f"  Saved mask ({output_path.name})")
+        empty_mask = np.zeros(0, dtype=bool)
+        save_filter_state(
+            output_path,
+            empty_mask,
+            args.context_length,
+            effective_context=0,
+            initial_loss_matrix=None,
+            n_blocks=0,
+        )
+        print(f"  Saved results ({output_path.name})")
         return
 
     filtered_mask = np.zeros(n_blocks, dtype=bool)
-    loss_matrix, effective_context = compute_loss_matrix(
-        model,
-        x,
-        x_i,
-        N,
-        device,
-        args.context_length,
-        filtered_mask=filtered_mask,
-        iteration=1,
-    )
+    initial_loss_matrix: np.ndarray | None = None
+    initial_effective_context: int | None = None
+
+    cached_state = load_saved_state(output_path, n_blocks, args.context_length)
+    cached_loss_matrix = cached_state.get("loss_matrix")
+    cached_effective_context = cached_state.get("effective_context")
+
+    if cached_loss_matrix is not None:
+        print("  Reusing cached loss matrix from previous run.")
+        loss_matrix = cached_loss_matrix.copy()
+        effective_context = int(cached_effective_context or args.context_length)
+        effective_context = max(0, min(effective_context, loss_matrix.shape[1]))
+        initial_loss_matrix = cached_loss_matrix.copy()
+        initial_effective_context = effective_context
+    else:
+        loss_matrix, effective_context = compute_loss_matrix(
+            model,
+            x,
+            x_i,
+            N,
+            device,
+            args.context_length,
+            filtered_mask=filtered_mask,
+            iteration=1,
+        )
+        initial_loss_matrix = loss_matrix.copy()
+        initial_effective_context = effective_context
 
     iteration = 1
     max_iterations = max(1, args.iterations)
@@ -539,10 +645,15 @@ def process_file(model, dataset, index, device, args, output_dir: Path):
         effective_context = effective_context_after
         iteration += 1
 
-    mask_tensor = torch.as_tensor(filtered_mask.astype(np.int64))
-    output_path = build_output_path(dataset, index, output_dir)
-    torch.save({"mask": mask_tensor}, output_path)
-    print(f"\n  Saved mask ({output_path.name})")
+    save_filter_state(
+        output_path,
+        filtered_mask,
+        args.context_length,
+        effective_context=initial_effective_context,
+        initial_loss_matrix=initial_loss_matrix,
+        n_blocks=n_blocks,
+    )
+    print(f"\n  Saved results ({output_path.name})")
 
 
 def build_output_path(dataset, index: int, output_dir: Path) -> Path:
