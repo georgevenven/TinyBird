@@ -1,6 +1,9 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # audio2spec.py  ‑  simple .wav /.mp3/.ogg ➜ spectrogram (.npz / .pt) converter
 # ──────────────────────────────────────────────────────────────────────────────
+import torch
+import stumpy
+
 import os
 import json
 import argparse
@@ -20,12 +23,7 @@ from tqdm import tqdm
 
 from scipy import ndimage
 import scipy.signal as ss
-
-import torch
-import stumpy
-
 torch.save({"test": torch.from_numpy(np.zeros((10, 10)))}, "./test.pt")
-
 
 class SingleChannelProcessor:
     __slots__ = (
@@ -352,27 +350,98 @@ class SingleChannelProcessor:
                 window_matches = 0
                 seed_count = 0
 
-                if window < 2 or series.shape[1] < window:
+                if window < 2:
                     if window_progress:
                         window_progress.update(1)
                     logging.info(
-                        "Channel %s: window %d skipped (series shorter than window)",
+                        "Channel %s: window %d skipped (window too small)",
                         getattr(self.args, "channel_index", -1),
                         window,
                     )
                     continue
-                candidate_starts = self._candidate_window_starts(window)
-                if candidate_starts.size == 0:
+
+                segments: list[np.ndarray] = []
+                block_map_list: list[int] = []
+                orig_map_list: list[int] = []
+                block_offsets: dict[int, dict[str, int]] = {}
+                cursor = 0
+                for block_id, (start, end) in enumerate(self.chirp_intervals):
+                    if self.block_covered[block_id]:
+                        continue
+                    length = int(end - start)
+                    if length < window:
+                        continue
+                    segment = series[:, start:end]
+                    segments.append(segment)
+                    block_map_list.extend([block_id] * length)
+                    orig_map_list.extend(range(start, end))
+                    block_offsets[block_id] = {"compressed_start": cursor, "length": length, "orig_start": int(start)}
+                    cursor += length
+                    segments.append(np.full((series.shape[0], 1), np.nan, dtype=np.float64))
+                    block_map_list.append(-1)
+                    orig_map_list.append(-1)
+                    cursor += 1
+
+                if not block_offsets:
                     if window_progress:
                         window_progress.update(1)
                     logging.info(
-                        "Channel %s: window %d skipped (no candidate starts)",
+                        "Channel %s: window %d skipped (no eligible blocks)",
                         getattr(self.args, "channel_index", -1),
                         window,
                     )
                     continue
+
+                if block_map_list and block_map_list[-1] == -1:
+                    segments = segments[:-1]
+                    block_map_list.pop()
+                    orig_map_list.pop()
+
+                compressed_series = (
+                    np.hstack(segments) if segments else np.empty((series.shape[0], 0), dtype=np.float64)
+                )
+                if compressed_series.size == 0:
+                    if window_progress:
+                        window_progress.update(1)
+                    logging.info(
+                        "Channel %s: window %d skipped (empty compressed series)",
+                        getattr(self.args, "channel_index", -1),
+                        window,
+                    )
+                    continue
+
+                block_map_arr = np.asarray(block_map_list, dtype=np.int32)
+                orig_map_arr = np.asarray(orig_map_list, dtype=np.int32)
+
+                aggregated_series = np.linalg.norm(np.nan_to_num(compressed_series, nan=0.0), axis=0)
+                if aggregated_series.size == 0:
+                    if window_progress:
+                        window_progress.update(1)
+                    logging.info(
+                        "Channel %s: window %d skipped (empty aggregated series)",
+                        getattr(self.args, "channel_index", -1),
+                        window,
+                    )
+                    continue
+
+                candidate_starts: list[int] = []
+                for info in block_offsets.values():
+                    comp_start = info["compressed_start"]
+                    length = info["length"]
+                    candidate_starts.extend(range(comp_start, comp_start + length - window + 1))
+                if not candidate_starts:
+                    if window_progress:
+                        window_progress.update(1)
+                    logging.info(
+                        "Channel %s: window %d skipped (no candidate starts after compression)",
+                        getattr(self.args, "channel_index", -1),
+                        window,
+                    )
+                    continue
+                candidate_starts_arr = np.asarray(candidate_starts, dtype=np.int32)
+
                 try:
-                    P, I = stumpy.mstump(series, window)
+                    P, I = stumpy.mstump(compressed_series, window)
                 except Exception:
                     if window_progress:
                         window_progress.update(1)
@@ -382,12 +451,16 @@ class SingleChannelProcessor:
                     continue
 
                 self.profile[window] = P
-                self.profile_indices[window] = I
+                I_mapped = np.full_like(I, -1, dtype=np.int64)
+                valid = (I >= 0) & (I < orig_map_arr.size)
+                I_mapped[valid] = orig_map_arr[I[valid]]
+                self.profile_indices[window] = I_mapped
                 finite_profile = np.where(np.isfinite(P), P, np.nan)
-                joint_profile = np.nanmean(finite_profile, axis=0)
+                with np.errstate(all="ignore"):
+                    joint_profile = np.nanmean(finite_profile, axis=0)
                 self.joint_profile[window] = joint_profile
 
-                seeds = self._select_seeds(joint_profile, candidate_starts, window, max_seeds)
+                seeds = self._select_seeds(joint_profile, candidate_starts_arr, window, max_seeds, block_map_arr)
                 seed_count = len(seeds)
                 seed_progress = None
                 if seeds and getattr(self.args, "progress", True):
@@ -395,13 +468,18 @@ class SingleChannelProcessor:
 
                 try:
                     for seed_start in seeds:
-                        block_id = self._block_for_window(seed_start, window)
+                        block_id = int(block_map_arr[seed_start]) if seed_start < block_map_arr.size else -1
                         if block_id < 0 or self.block_covered[block_id]:
                             if seed_progress:
                                 seed_progress.update(1)
                             continue
 
-                        seed_features = series[:, seed_start : seed_start + window]
+                        seed_features = compressed_series[:, seed_start : seed_start + window]
+                        seed_orig_start = int(orig_map_arr[seed_start]) if seed_start < orig_map_arr.size else -1
+                        if seed_orig_start < 0:
+                            if seed_progress:
+                                seed_progress.update(1)
+                            continue
                         cluster_id = self._match_existing_cluster(seed_features, window, cluster_threshold)
                         if cluster_id is None:
                             cluster_id = next_cluster_id
@@ -412,27 +490,34 @@ class SingleChannelProcessor:
 
                         record = cluster_records.setdefault(
                             cluster_id,
-                            {"cluster_id": cluster_id, "window": window, "exemplar_start": seed_start, "matches": []},
+                            {
+                                "cluster_id": cluster_id,
+                                "window": window,
+                                "exemplar_start": seed_orig_start,
+                                "matches": [],
+                            },
                         )
 
-                        matches = self._collect_matches_with_mass(seed_start, window, mass_threshold, aggregated_series)
+                        matches = self._collect_matches_with_mass(
+                            seed_start, window, mass_threshold, aggregated_series, block_map_arr, orig_map_arr
+                        )
                         if not matches:
                             if block_id >= 0 and not self.block_covered[block_id]:
                                 self.block_cluster_ids[block_id] = cluster_id
                                 self.block_covered[block_id] = True
-                                record["matches"].append({"start": seed_start, "block": block_id, "distance": 0.0})
+                                record["matches"].append({"start": seed_orig_start, "block": block_id, "distance": 0.0})
                                 window_matches += 1
                             if seed_progress:
                                 seed_progress.update(1)
                             continue
 
-                        for start_idx, block_idx, distance in matches:
+                        for _comp_idx, block_idx, orig_start, distance in matches:
                             if self.block_covered[block_idx]:
                                 continue
                             self.block_cluster_ids[block_idx] = cluster_id
                             self.block_covered[block_idx] = True
                             record["matches"].append(
-                                {"start": start_idx, "block": block_idx, "distance": float(distance)}
+                                {"start": orig_start, "block": block_idx, "distance": float(distance)}
                             )
                             window_matches += 1
                         if seed_progress:
@@ -520,7 +605,12 @@ class SingleChannelProcessor:
         return np.concatenate(candidates)
 
     def _select_seeds(
-        self, joint_profile: np.ndarray, candidates: np.ndarray, window: int, max_seeds: int
+        self,
+        joint_profile: np.ndarray,
+        candidates: np.ndarray,
+        window: int,
+        max_seeds: int,
+        block_map: np.ndarray | None = None,
     ) -> list[int]:
         if joint_profile.size == 0 or candidates.size == 0:
             return []
@@ -538,7 +628,16 @@ class SingleChannelProcessor:
         ranked.sort(key=lambda item: item[0])
         seeds: list[int] = []
         for _, start in ranked:
-            block_id = self._block_for_window(start, window)
+            if block_map is not None:
+                if start + window > block_map.size:
+                    continue
+                block_id = int(block_map[start])
+                if block_id < 0:
+                    continue
+                if np.any(block_map[start : start + window] != block_id):
+                    continue
+            else:
+                block_id = self._block_for_window(start, window)
             if block_id < 0 or self.block_covered[block_id]:
                 continue
             seeds.append(start)
@@ -581,8 +680,14 @@ class SingleChannelProcessor:
         return float(np.sqrt(np.mean(diff * diff)))
 
     def _collect_matches_with_mass(
-        self, seed_start: int, window: int, threshold: float, aggregated_series: np.ndarray
-    ) -> list[tuple[int, int, float]]:
+        self,
+        seed_start: int,
+        window: int,
+        threshold: float,
+        aggregated_series: np.ndarray,
+        block_map: np.ndarray,
+        orig_map: np.ndarray,
+    ) -> list[tuple[int, int, int, float]]:
         if aggregated_series.size < window or seed_start + window > aggregated_series.size:
             return []
 
@@ -596,16 +701,24 @@ class SingleChannelProcessor:
             return []
 
         order = np.argsort(profile)
-        matches: list[tuple[int, int, float]] = []
+        matches: list[tuple[int, int, int, float]] = []
         seen_blocks: set[int] = set()
         for idx in order:
             dist = profile[idx]
             if not np.isfinite(dist) or dist > threshold:
                 break
-            block_id = self._block_for_window(int(idx), window)
+            if idx + window > block_map.size:
+                continue
+            block_slice = block_map[idx : idx + window]
+            block_id = int(block_slice[0])
             if block_id < 0 or block_id in seen_blocks or self.block_covered[block_id]:
                 continue
-            matches.append((int(idx), block_id, float(dist)))
+            if np.any(block_slice != block_id):
+                continue
+            orig_start = int(orig_map[idx])
+            if orig_start < 0:
+                continue
+            matches.append((int(idx), block_id, orig_start, float(dist)))
             seen_blocks.add(block_id)
         return matches
 
