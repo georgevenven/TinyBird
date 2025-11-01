@@ -200,7 +200,7 @@ def create_overview_plot(
     plt.close(fig)
 
     colors = build_color_map(cluster_ids if cluster_ids.size else [0])
-    time_extent = [0.0, total_duration, 0, spectrogram.shape[0]]
+    time_extent = [0.0, max_time, 0, spectrogram.shape[0]]
 
     fig, (ax_spec, ax_blocks) = plt.subplots(
         2,
@@ -256,7 +256,7 @@ def create_overview_plot(
             edgecolor="black",
         )
 
-    ax_blocks.set_xlim(0, max(total_duration, 1e-6))
+    ax_blocks.set_xlim(0, max(max_time, 1e-6))
     ax_blocks.set_xlabel("Time (s)")
     ax_blocks.set_yticks([])
     ax_blocks.set_title("Block assignments")
@@ -269,8 +269,8 @@ def create_overview_plot(
             fontsize=8,
         )
 
-    ax_spec.set_xlim(0, max(total_duration, 1e-6))
-    ax_spec.set_xticks(np.linspace(0, total_duration, num=6))
+    ax_spec.set_xlim(0, max(max_time, 1e-6))
+    ax_spec.set_xticks(np.linspace(0, max_time, num=6))
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=200)

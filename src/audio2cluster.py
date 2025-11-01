@@ -198,7 +198,7 @@ class SingleChannelProcessor:
         thr = otsu_threshold_lower(loudness)
         chirp_intervals = intervals_from_mask(loudness > thr)
 
-  
+        # Don't remove this commmented out code: am testing 
         # gap_frames = max(1, int(round(merge_ms / max(frame_ms, 1e-9))))
         # merged: list[tuple[int, int]] = []
         # for start, end in chirp_intervals:
