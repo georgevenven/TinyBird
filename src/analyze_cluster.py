@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import math
 import os
 import pickle
 import sys
@@ -131,21 +130,74 @@ def create_overview_plot(
     out_path: Path,
     stem: str,
     channel_id: int,
+    frame_step: float,
 ) -> None:
     spectrogram = np.asarray(payload.get("S_db"))
     intervals = np.asarray(payload.get("chirp_intervals")).reshape(-1, 2)
     cluster_ids = np.asarray(payload.get("block_cluster_ids", []), dtype=int)
 
-    meta = payload.get("meta", {})
-    sr = meta.get("sr") or 0
-    hop_length = meta.get("hop_length") or 0
-    frame_step = (hop_length / sr) if (sr and hop_length) else 1.0
-
     if spectrogram.size == 0 or intervals.size == 0:
         return
 
-    n_frames = spectrogram.shape[1]
-    total_duration = n_frames * frame_step
+    block_order = np.argsort(intervals[:, 0])
+    sorted_intervals = intervals[block_order]
+    sorted_clusters = cluster_ids[block_order] if cluster_ids.size else np.full(block_order.shape, -1, dtype=int)
+
+    durations = (sorted_intervals[:, 1] - sorted_intervals[:, 0]) * frame_step
+    if durations.size == 0:
+        return
+
+    max_time = np.max((sorted_intervals[:, 1]) * frame_step)
+    colors = build_color_map(sorted_clusters if sorted_clusters.size else [0])
+
+    fig_width = max(8.0, min(20.0, max_time / 5.0))
+    fig_height = max(3.0, min(25.0, 0.35 * len(sorted_intervals) + 2.0))
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+
+    legend_handles: list[Patch] = []
+    for row, (interval, cluster_id) in enumerate(zip(sorted_intervals, sorted_clusters, strict=False)):
+        start_time, end_time = block_time(tuple(map(int, interval)), frame_step)
+        width = max(end_time - start_time, frame_step)
+        color = colors.get(int(cluster_id), (0.7, 0.7, 0.7, 0.4))
+        alpha = 0.65 if cluster_id >= 0 else 0.25
+        ax.barh(
+            y=row,
+            width=width,
+            left=start_time,
+            height=0.8,
+            color=color,
+            alpha=alpha,
+            edgecolor="black",
+            linewidth=0.6,
+        )
+        ax.text(
+            start_time + width / 2.0,
+            row,
+            f"{cluster_id}",
+            ha="center",
+            va="center",
+            fontsize=8,
+            color="white",
+            bbox=dict(facecolor=color, alpha=0.8, boxstyle="round,pad=0.2"),
+        )
+        label_text = f"cluster {cluster_id}" if cluster_id >= 0 else "noise"
+        handle = Patch(color=color, alpha=alpha, label=label_text, edgecolor="black")
+        if not any(h.get_label() == handle.get_label() for h in legend_handles):
+            legend_handles.append(handle)
+
+    ax.set_xlim(0.0, max_time if max_time > 0 else 1.0)
+    ax.set_ylim(-0.5, len(sorted_intervals) - 0.5)
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Blocks (sorted by start)")
+    ax.set_title(f"{stem} | channel {channel_id} | block overview")
+    ax.set_yticks([])
+
+    if legend_handles:
+        ax.legend(handles=legend_handles, loc="upper right", fontsize=8)
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
 
     colors = build_color_map(cluster_ids if cluster_ids.size else [0])
     time_extent = [0.0, total_duration, 0, spectrogram.shape[0]]
@@ -257,40 +309,42 @@ def plot_cluster_snippets(
             continue
 
         n_blocks = len(trimmed_blocks)
-        cols = min(4, n_blocks)
-        rows = math.ceil(n_blocks / cols)
+        durations = [max((end - start) * frame_step, frame_step) for (start, end, _snippet) in trimmed_blocks]
+        max_duration = max(durations)
+
+        fig_width = max(6.0, min(18.0, max_duration * 2.0))
+        fig_height = max(2.5, min(20.0, n_blocks * 2.0))
 
         fig, axes = plt.subplots(
-            rows,
-            cols,
-            figsize=(cols * 4, rows * 3),
+            n_blocks,
+            1,
+            figsize=(fig_width, fig_height),
+            sharex=True,
             squeeze=False,
         )
 
-        for ax in axes.flat:
-            ax.axis("off")
-
-        for idx, (block) in enumerate(trimmed_blocks):
+        for ax_idx, (block, duration) in enumerate(zip(trimmed_blocks, durations, strict=False)):
             start, end, snippet = block
-            row = idx // cols
-            col = idx % cols
-            ax = axes[row][col]
-            ax.axis("on")
+            ax = axes[ax_idx][0]
+            ax.set_facecolor("white")
             if snippet.size == 0:
-                ax.set_title(f"Block {idx} (empty)")
-                continue
-            duration = max((end - start) * frame_step, frame_step)
-            extent = [0.0, duration, 0, snippet.shape[0]]
-            ax.imshow(
-                snippet,
-                aspect="auto",
-                origin="lower",
-                cmap="magma",
-                extent=extent,
-            )
-            ax.set_title(f"Frames {start}-{end}", fontsize=9)
-            ax.set_xlabel("Time (s)")
-            ax.set_ylabel("Mel bin")
+                ax.text(0.5, 0.5, "(empty)", transform=ax.transAxes, ha="center", va="center")
+            else:
+                extent = [0.0, duration, 0, snippet.shape[0]]
+                ax.imshow(
+                    snippet,
+                    aspect="auto",
+                    origin="lower",
+                    cmap="magma",
+                    extent=extent,
+                )
+            ax.set_ylabel("Mel")
+            ax.set_title(f"Frames {start}-{end}", fontsize=9, loc="left")
+            ax.set_xlim(0.0, max_duration)
+            ax.tick_params(axis="y", labelleft=False)
+            ax.tick_params(axis="x", labelbottom=ax_idx == n_blocks - 1)
+
+        axes[-1][0].set_xlabel("Time (s)")
 
         fig.suptitle(f"Channel {channel_id} | {label} | {n_blocks} block(s)", fontsize=14)
         fig.tight_layout(rect=[0, 0, 1, 0.97])
@@ -314,7 +368,7 @@ def process_channel_file(
     sr = meta.get("sr") or 0
     hop_length = meta.get("hop_length") or 0
     frame_step = (hop_length / sr) if (sr and hop_length) else 1.0
-    create_overview_plot(payload, overview_path, stem, channel_id)
+    create_overview_plot(payload, overview_path, stem, channel_id, frame_step)
 
     clusters = compute_cluster_blocks(payload)
     plot_cluster_snippets(payload, clusters, out_dir, channel_id, frame_step, max_blocks_per_cluster)
