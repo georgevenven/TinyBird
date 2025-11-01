@@ -947,7 +947,22 @@ class WavToSpec:
 
     def _gather_files(self) -> list[Path]:
         if self.args.file_list:
-            files = [Path(line.strip()) for line in self.args.file_list.read_text().splitlines() if line.strip()]
+            file_list_path = self.args.file_list
+            audio_exts = {".wav", ".mp3", ".ogg", ".flac"}
+            suffix = file_list_path.suffix.lower()
+            if suffix in audio_exts and file_list_path.exists():
+                files = [file_list_path]
+            else:
+                try:
+                    text = file_list_path.read_text()
+                except UnicodeDecodeError:
+                    # If we fail to decode as text, assume the path itself points to an audio file.
+                    if file_list_path.exists():
+                        files = [file_list_path]
+                    else:
+                        raise
+                else:
+                    files = [Path(line.strip()) for line in text.splitlines() if line.strip()]
         elif self.args.src_dir is not None:
             exts = (".wav", ".mp3", ".ogg", ".flac")
             files = [
