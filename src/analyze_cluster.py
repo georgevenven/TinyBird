@@ -152,7 +152,13 @@ def create_overview_plot(
 
     fig_width = max(8.0, min(20.0, max_time / 5.0))
     fig_height = max(3.0, min(25.0, 0.35 * len(sorted_intervals) + 2.0))
-    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+    fig, (ax_stack, ax_spec, ax_blocks) = plt.subplots(
+        3,
+        1,
+        figsize=(fig_width, fig_height + 4),
+        gridspec_kw={"height_ratios": [len(sorted_intervals) * 0.35 + 1.0, 4, 1]},
+        sharex=True,
+    )
 
     legend_handles: list[Patch] = []
     for row, (interval, cluster_id) in enumerate(zip(sorted_intervals, sorted_clusters, strict=False)):
@@ -160,7 +166,7 @@ def create_overview_plot(
         width = max(end_time - start_time, frame_step)
         color = colors.get(int(cluster_id), (0.7, 0.7, 0.7, 0.4))
         alpha = 0.65 if cluster_id >= 0 else 0.25
-        ax.barh(
+        ax_stack.barh(
             y=row,
             width=width,
             left=start_time,
@@ -170,7 +176,7 @@ def create_overview_plot(
             edgecolor="black",
             linewidth=0.6,
         )
-        ax.text(
+        ax_stack.text(
             start_time + width / 2.0,
             row,
             f"{cluster_id}",
@@ -185,30 +191,16 @@ def create_overview_plot(
         if not any(h.get_label() == handle.get_label() for h in legend_handles):
             legend_handles.append(handle)
 
-    ax.set_xlim(0.0, max_time if max_time > 0 else 1.0)
-    ax.set_ylim(-0.5, len(sorted_intervals) - 0.5)
-    ax.set_xlabel("Time (s)")
-    ax.set_ylabel("Blocks (sorted by start)")
-    ax.set_title(f"{stem} | channel {channel_id} | block overview")
-    ax.set_yticks([])
+    ax_stack.set_xlim(0.0, max_time if max_time > 0 else 1.0)
+    ax_stack.set_ylim(-0.5, len(sorted_intervals) - 0.5)
+    ax_stack.set_ylabel("Blocks (sorted)")
+    ax_stack.set_title(f"{stem} | channel {channel_id} | block overview")
+    ax_stack.set_yticks([])
 
     if legend_handles:
         ax.legend(handles=legend_handles, loc="upper right", fontsize=8)
 
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=200)
-    plt.close(fig)
-
-    colors = build_color_map(cluster_ids if cluster_ids.size else [0])
     time_extent = [0.0, max_time, 0, spectrogram.shape[0]]
-
-    fig, (ax_spec, ax_blocks) = plt.subplots(
-        2,
-        1,
-        figsize=(14, 8),
-        sharex=True,
-        gridspec_kw={"height_ratios": [4, 1]},
-    )
 
     im = ax_spec.imshow(
         spectrogram,
@@ -218,8 +210,8 @@ def create_overview_plot(
         extent=time_extent,
     )
     ax_spec.set_ylabel("Mel bin")
-    ax_spec.set_title(f"{stem} | channel {channel_id} | full spectrogram")
-    fig.colorbar(im, ax=ax_spec, orientation="vertical", fraction=0.045, pad=0.01, label="dB")
+    ax_spec.set_title(f"{stem} | channel {channel_id} | spectrogram (blocks only)")
+    fig.colorbar(im, ax=ax_spec, orientation="vertical", fraction=0.035, pad=0.01, label="dB")
 
     legend_handles: list[Patch] = []
     if cluster_ids.size == 0:
@@ -270,7 +262,13 @@ def create_overview_plot(
         )
 
     ax_spec.set_xlim(0, max(max_time, 1e-6))
+    ax_blocks.set_xlim(0, max(max_time, 1e-6))
+    ax_blocks.set_xlabel("Time (s)")
+    ax_blocks.set_yticks([])
+    ax_blocks.set_title("Block assignments")
     ax_spec.set_xticks(np.linspace(0, max_time, num=6))
+
+    ax_blocks.set_position([ax_blocks.get_position().x0, ax_blocks.get_position().y0, ax_blocks.get_position().width, ax_blocks.get_position().height])
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=200)
