@@ -24,6 +24,9 @@ import scipy.signal as ss
 import torch
 import stumpy
 
+torch.save({"test": torch.from_numpy(np.zeros((10, 10)))}, "./test.pt")
+
+
 class SingleChannelProcessor:
     __slots__ = (
         "args",
@@ -78,11 +81,7 @@ class SingleChannelProcessor:
 
         stage = time.perf_counter()
         self._classify_loudness()
-        self._record_stage(
-            "classify_loudness",
-            stage,
-            extra=f"blocks={self.chirp_intervals.shape[0]}",
-        )
+        self._record_stage("classify_loudness", stage, extra=f"blocks={self.chirp_intervals.shape[0]}")
 
         stage = time.perf_counter()
         self._prepare_features()
@@ -102,13 +101,7 @@ class SingleChannelProcessor:
         channel = getattr(self.args, "channel_index", -1)
         extras = f" ({extra})" if extra else ""
         if logging.getLogger().isEnabledFor(logging.INFO):
-            logging.info(
-                "Channel %s: %s completed in %.3fs%s",
-                channel,
-                name,
-                duration,
-                extras,
-            )
+            logging.info("Channel %s: %s completed in %.3fs%s", channel, name, duration, extras)
 
     def _compute_spectrogram(self) -> None:
         S = librosa.feature.melspectrogram(
@@ -350,11 +343,7 @@ class SingleChannelProcessor:
 
         window_progress = None
         if len(self.window_grid) > 1 and getattr(self.args, "progress", True):
-            window_progress = tqdm(
-                total=len(self.window_grid),
-                desc="mstump windows",
-                leave=False,
-            )
+            window_progress = tqdm(total=len(self.window_grid), desc="mstump windows", leave=False)
 
         try:
             for window in self.window_grid:
@@ -388,9 +377,7 @@ class SingleChannelProcessor:
                     if window_progress:
                         window_progress.update(1)
                     logging.exception(
-                        "Channel %s: mstump failed for window %d",
-                        getattr(self.args, "channel_index", -1),
-                        window,
+                        "Channel %s: mstump failed for window %d", getattr(self.args, "channel_index", -1), window
                     )
                     continue
 
@@ -404,11 +391,7 @@ class SingleChannelProcessor:
                 seed_count = len(seeds)
                 seed_progress = None
                 if seeds and getattr(self.args, "progress", True):
-                    seed_progress = tqdm(
-                        total=len(seeds),
-                        desc=f"window {window}",
-                        leave=False,
-                    )
+                    seed_progress = tqdm(total=len(seeds), desc=f"window {window}", leave=False)
 
                 try:
                     for seed_start in seeds:
@@ -424,21 +407,12 @@ class SingleChannelProcessor:
                             cluster_id = next_cluster_id
                             next_cluster_id += 1
                             self.cluster_exemplars.append(
-                                {
-                                    "id": cluster_id,
-                                    "window": window,
-                                    "features": seed_features.copy(),
-                                }
+                                {"id": cluster_id, "window": window, "features": seed_features.copy()}
                             )
 
                         record = cluster_records.setdefault(
                             cluster_id,
-                            {
-                                "cluster_id": cluster_id,
-                                "window": window,
-                                "exemplar_start": seed_start,
-                                "matches": [],
-                            },
+                            {"cluster_id": cluster_id, "window": window, "exemplar_start": seed_start, "matches": []},
                         )
 
                         matches = self._collect_matches_with_mass(seed_start, window, mass_threshold, aggregated_series)
@@ -446,9 +420,7 @@ class SingleChannelProcessor:
                             if block_id >= 0 and not self.block_covered[block_id]:
                                 self.block_cluster_ids[block_id] = cluster_id
                                 self.block_covered[block_id] = True
-                                record["matches"].append(
-                                    {"start": seed_start, "block": block_id, "distance": 0.0}
-                                )
+                                record["matches"].append({"start": seed_start, "block": block_id, "distance": 0.0})
                                 window_matches += 1
                             if seed_progress:
                                 seed_progress.update(1)
@@ -497,10 +469,7 @@ class SingleChannelProcessor:
         )
 
         self.motif_sets = [
-            {
-                **record,
-                "matches": sorted(record["matches"], key=lambda item: (item["block"], item["start"]))
-            }
+            {**record, "matches": sorted(record["matches"], key=lambda item: (item["block"], item["start"]))}
             for record in sorted(cluster_records.values(), key=lambda r: r["cluster_id"])
         ]
         self._finalize_block_labels()
@@ -525,11 +494,7 @@ class SingleChannelProcessor:
         min_window = int(getattr(self.args, "mstump_min_window", 2))
         candidate = {int(max(min_window, value)) for value in candidate}
         windows = sorted(
-            {
-                value
-                for value in candidate
-                if value <= self.features.shape[1] and np.any(valid_lengths >= value)
-            },
+            {value for value in candidate if value <= self.features.shape[1] and np.any(valid_lengths >= value)},
             reverse=True,
         )
         return windows
@@ -598,9 +563,7 @@ class SingleChannelProcessor:
         block_end = int(self.chirp_intervals[block_id, 1])
         return block_start <= start and (start + window) <= block_end
 
-    def _match_existing_cluster(
-        self, seed_features: np.ndarray, window: int, threshold: float
-    ) -> int | None:
+    def _match_existing_cluster(self, seed_features: np.ndarray, window: int, threshold: float) -> int | None:
         for cluster in self.cluster_exemplars:
             if cluster["window"] != window:
                 continue
@@ -821,16 +784,9 @@ class TwoChannelFileProcessor:
 
             self.frame_ms = 1000.0 * self.args.hop_length / self.actual_sr
             stats = self._compute_chirp_stats()
-            file_stats = {
-                "file": self.args.fp.stem,
-                "path": str(self.args.fp),
-                "frame_ms": self.frame_ms,
-                **stats,
-            }
+            file_stats = {"file": self.args.fp.stem, "path": str(self.args.fp), "frame_ms": self.frame_ms, **stats}
             self._save_outputs()
-            logging.info(
-                "Finished processing %s in %.3fs", self.args.fp.name, time.perf_counter() - file_start
-            )
+            logging.info("Finished processing %s in %.3fs", self.args.fp.name, time.perf_counter() - file_start)
             return file_stats
         except Exception as exc:
             return {"error": f"{self.args.fp}: {exc}", "file": str(self.args.fp)}
@@ -877,12 +833,7 @@ class TwoChannelFileProcessor:
                 )
             )
             per_channel_duration = time.perf_counter() - per_channel_start
-            logging.info(
-                "File %s: channel %d processed in %.3fs",
-                self.args.fp.name,
-                idx,
-                per_channel_duration,
-            )
+            logging.info("File %s: channel %d processed in %.3fs", self.args.fp.name, idx, per_channel_duration)
             self.channel_processors.append(processor)
 
         logging.info(
@@ -1001,12 +952,8 @@ class TwoChannelFileProcessor:
         return stats
 
     def _save_outputs(self) -> None:
-
         torch.save(
-            {
-                "s": torch.from_numpy(self.S_stack),
-                "chirp_intervals": torch.from_numpy(self.chirp_intervals),
-            },
+            {"s": torch.from_numpy(self.S_stack), "chirp_intervals": torch.from_numpy(self.chirp_intervals)},
             self.out_path,
         )
         cluster_dir = self.args.dst_dir / "cluster"
@@ -1015,11 +962,7 @@ class TwoChannelFileProcessor:
             payload = processor.to_pickle_payload()
             payload_meta = payload.get("meta", {})
             payload_meta.update(
-                {
-                    "channel_index": idx,
-                    "file_stem": self.args.fp.stem,
-                    "source_path": str(self.args.fp),
-                }
+                {"channel_index": idx, "file_stem": self.args.fp.stem, "source_path": str(self.args.fp)}
             )
             payload["meta"] = payload_meta
             cluster_path = cluster_dir / f"{self.args.fp.stem}_ch{idx}.pkl"
@@ -1031,6 +974,8 @@ class TwoChannelFileProcessor:
         if reason:
             data["reason"] = reason
         return data
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # main worker class
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1076,28 +1021,19 @@ class WavToSpec:
         if not logger.handlers:
             console_handler = logging.StreamHandler(sys.stdout)
             console_handler.setLevel(logging.INFO)
-            console_handler.setFormatter(
-                logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", "%H:%M:%S")
-            )
+            console_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", "%H:%M:%S"))
             logger.addHandler(console_handler)
 
             error_handler = logging.FileHandler("error_log.log")
             error_handler.setLevel(logging.ERROR)
-            error_handler.setFormatter(
-                logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
-            )
+            error_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
             logger.addHandler(error_handler)
 
         logger.setLevel(logging.INFO)
 
     def _save_audio_params(self) -> None:
         """Save audio processing parameters to JSON file in destination directory."""
-        params = {
-            "sr": self.args.sr,
-            "mels": self.args.n_mels,
-            "hop_size": self.args.step,
-            "fft": self.args.n_fft,
-        }
+        params = {"sr": self.args.sr, "mels": self.args.n_mels, "hop_size": self.args.step, "fft": self.args.n_fft}
 
         params_file = self.args.dst_dir / "audio_params.json"
         with open(params_file, 'w') as f:
@@ -1169,10 +1105,7 @@ class WavToSpec:
         elif self.args.src_dir is not None:
             exts = (".wav", ".mp3", ".ogg", ".flac")
             files = [
-                Path(root) / f
-                for root, _, fs in os.walk(self.args.src_dir)
-                for f in fs
-                if f.lower().endswith(exts)
+                Path(root) / f for root, _, fs in os.walk(self.args.src_dir) for f in fs if f.lower().endswith(exts)
             ]
         else:
             files = []
@@ -1244,6 +1177,7 @@ class WavToSpec:
         # The actual cleanup will be handled in the run() method
         raise KeyboardInterrupt()
 
+
 # ══════════════════════════════════════════════════════════════════════════════
 # CLI
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1267,11 +1201,7 @@ def cli() -> None:
         default="mel_mfcc",
         help="Feature stack to use for clustering (default: mel_mfcc).",
     )
-    p.add_argument(
-        "--no_progress",
-        action="store_true",
-        help="Disable tqdm progress bars during clustering.",
-    )
+    p.add_argument("--no_progress", action="store_true", help="Disable tqdm progress bars during clustering.")
     p.add_argument(
         "--cluster_threshold",
         type=float,
