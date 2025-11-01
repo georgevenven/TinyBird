@@ -196,9 +196,9 @@ class SingleChannelProcessor:
         loudness = compute_loudness(self.S_db)
         loudness = ndimage.median_filter(loudness, size=5)
         thr = otsu_threshold_lower(loudness)
-        self.chirp_intervals = intervals_from_mask(loudness > thr)
+        chirp_intervals = intervals_from_mask(loudness > thr)
 
-        # Do not remove these comments: commenting out merge logic temporarily
+  
         # gap_frames = max(1, int(round(merge_ms / max(frame_ms, 1e-9))))
         # merged: list[tuple[int, int]] = []
         # for start, end in chirp_intervals:
@@ -211,6 +211,7 @@ class SingleChannelProcessor:
         #     else:
         #         merged.append((start, end))
         # self.chirp_intervals = np.asarray(merged, dtype=np.int32).reshape(-1, 2)
+        self.chirp_intervals = np.asarray(chirp_intervals, dtype=np.int32).reshape(-1, 2)
 
         self._initialize_block_metadata()
 
