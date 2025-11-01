@@ -68,11 +68,20 @@ def gather_audio_files(args: argparse.Namespace) -> list[Path]:
         if not file_list_path.exists():
             print(f"[WARN] file list not found: {file_list_path}", file=sys.stderr)
             return []
-        files = [
-            Path(line.strip())
-            for line in file_list_path.read_text().splitlines()
-            if line.strip()
-        ]
+        audio_exts = {".wav", ".mp3", ".ogg", ".flac"}
+        suffix = file_list_path.suffix.lower()
+        if suffix in audio_exts and file_list_path.exists():
+            files = [file_list_path]
+        else:
+            try:
+                text = file_list_path.read_text()
+            except UnicodeDecodeError:
+                if file_list_path.exists():
+                    files = [file_list_path]
+                else:
+                    raise
+            else:
+                files = [Path(line.strip()) for line in text.splitlines() if line.strip()]
     elif args.src_dir:
         src_path = Path(args.src_dir)
         if not src_path.exists():
