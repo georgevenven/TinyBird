@@ -21,11 +21,8 @@ from tqdm import tqdm
 from scipy import ndimage
 import scipy.signal as ss
 
-try:
-    import stumpy
-except ImportError:
-    stumpy = None
-
+import torch
+import stumpy
 
 class SingleChannelProcessor:
     __slots__ = (
@@ -1004,7 +1001,7 @@ class TwoChannelFileProcessor:
         return stats
 
     def _save_outputs(self) -> None:
-        import torch
+
         torch.save(
             {
                 "s": torch.from_numpy(self.S_stack),
