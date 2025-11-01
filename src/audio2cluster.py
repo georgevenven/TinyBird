@@ -291,70 +291,109 @@ class SingleChannelProcessor:
         cluster_records: dict[int, dict[str, Any]] = {}
         next_cluster_id = 0
 
-        for window in self.window_grid:
-            if window < 2 or series.shape[1] < window:
-                continue
-            candidate_starts = self._candidate_window_starts(window)
-            if candidate_starts.size == 0:
-                continue
-            try:
-                P, I = stumpy.mstump(series, window)
-            except Exception:
-                continue
+        window_progress = None
+        if len(self.window_grid) > 1 and getattr(self.args, "progress", True):
+            window_progress = tqdm(
+                total=len(self.window_grid),
+                desc="mstump windows",
+                leave=False,
+            )
 
-            self.profile[window] = P
-            self.profile_indices[window] = I
-            finite_profile = np.where(np.isfinite(P), P, np.nan)
-            joint_profile = np.nanmean(finite_profile, axis=0)
-            self.joint_profile[window] = joint_profile
-
-            seeds = self._select_seeds(joint_profile, candidate_starts, window, max_seeds)
-            for seed_start in seeds:
-                block_id = self._block_for_window(seed_start, window)
-                if block_id < 0 or self.block_covered[block_id]:
+        try:
+            for window in self.window_grid:
+                if window < 2 or series.shape[1] < window:
+                    if window_progress:
+                        window_progress.update(1)
+                    continue
+                candidate_starts = self._candidate_window_starts(window)
+                if candidate_starts.size == 0:
+                    if window_progress:
+                        window_progress.update(1)
+                    continue
+                try:
+                    P, I = stumpy.mstump(series, window)
+                except Exception:
+                    if window_progress:
+                        window_progress.update(1)
                     continue
 
-                seed_features = series[:, seed_start : seed_start + window]
-                cluster_id = self._match_existing_cluster(seed_features, window, cluster_threshold)
-                if cluster_id is None:
-                    cluster_id = next_cluster_id
-                    next_cluster_id += 1
-                    self.cluster_exemplars.append(
-                        {
-                            "id": cluster_id,
-                            "window": window,
-                            "features": seed_features.copy(),
-                        }
+                self.profile[window] = P
+                self.profile_indices[window] = I
+                finite_profile = np.where(np.isfinite(P), P, np.nan)
+                joint_profile = np.nanmean(finite_profile, axis=0)
+                self.joint_profile[window] = joint_profile
+
+                seeds = self._select_seeds(joint_profile, candidate_starts, window, max_seeds)
+                seed_progress = None
+                if seeds and getattr(self.args, "progress", True):
+                    seed_progress = tqdm(
+                        total=len(seeds),
+                        desc=f"window {window}",
+                        leave=False,
                     )
 
-                record = cluster_records.setdefault(
-                    cluster_id,
-                    {
-                        "cluster_id": cluster_id,
-                        "window": window,
-                        "exemplar_start": seed_start,
-                        "matches": [],
-                    },
-                )
+                try:
+                    for seed_start in seeds:
+                        block_id = self._block_for_window(seed_start, window)
+                        if block_id < 0 or self.block_covered[block_id]:
+                            if seed_progress:
+                                seed_progress.update(1)
+                            continue
 
-                matches = self._collect_matches_with_mass(seed_start, window, mass_threshold, aggregated_series)
-                if not matches:
-                    if block_id >= 0 and not self.block_covered[block_id]:
-                        self.block_cluster_ids[block_id] = cluster_id
-                        self.block_covered[block_id] = True
-                        record["matches"].append(
-                            {"start": seed_start, "block": block_id, "distance": 0.0}
+                        seed_features = series[:, seed_start : seed_start + window]
+                        cluster_id = self._match_existing_cluster(seed_features, window, cluster_threshold)
+                        if cluster_id is None:
+                            cluster_id = next_cluster_id
+                            next_cluster_id += 1
+                            self.cluster_exemplars.append(
+                                {
+                                    "id": cluster_id,
+                                    "window": window,
+                                    "features": seed_features.copy(),
+                                }
+                            )
+
+                        record = cluster_records.setdefault(
+                            cluster_id,
+                            {
+                                "cluster_id": cluster_id,
+                                "window": window,
+                                "exemplar_start": seed_start,
+                                "matches": [],
+                            },
                         )
-                    continue
 
-                for start_idx, block_idx, distance in matches:
-                    if self.block_covered[block_idx]:
-                        continue
-                    self.block_cluster_ids[block_idx] = cluster_id
-                    self.block_covered[block_idx] = True
-                    record["matches"].append(
-                        {"start": start_idx, "block": block_idx, "distance": float(distance)}
-                    )
+                        matches = self._collect_matches_with_mass(seed_start, window, mass_threshold, aggregated_series)
+                        if not matches:
+                            if block_id >= 0 and not self.block_covered[block_id]:
+                                self.block_cluster_ids[block_id] = cluster_id
+                                self.block_covered[block_id] = True
+                                record["matches"].append(
+                                    {"start": seed_start, "block": block_id, "distance": 0.0}
+                                )
+                            if seed_progress:
+                                seed_progress.update(1)
+                            continue
+
+                        for start_idx, block_idx, distance in matches:
+                            if self.block_covered[block_idx]:
+                                continue
+                            self.block_cluster_ids[block_idx] = cluster_id
+                            self.block_covered[block_idx] = True
+                            record["matches"].append(
+                                {"start": start_idx, "block": block_idx, "distance": float(distance)}
+                            )
+                        if seed_progress:
+                            seed_progress.update(1)
+                finally:
+                    if seed_progress:
+                        seed_progress.close()
+
+                if window_progress:
+                    window_progress.update(1)
+        finally:
+            if window_progress:
+                window_progress.close()
 
         self.motif_sets = [
             {
