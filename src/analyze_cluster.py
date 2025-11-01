@@ -187,7 +187,7 @@ def create_overview_plot(
             bbox=dict(facecolor=color, alpha=0.8, boxstyle="round,pad=0.2"),
         )
         label_text = f"cluster {cluster_id}" if cluster_id >= 0 else "noise"
-        handle = Patch(color=color, alpha=alpha, label=label_text, edgecolor="black")
+        handle = Patch(facecolor=color, alpha=alpha, label=label_text, edgecolor="black")
         if not any(h.get_label() == handle.get_label() for h in legend_handles):
             legend_handles.append(handle)
 
@@ -198,7 +198,7 @@ def create_overview_plot(
     ax_stack.set_yticks([])
 
     if legend_handles:
-        ax.legend(handles=legend_handles, loc="upper right", fontsize=8)
+        ax_stack.legend(handles=legend_handles, loc="upper right", fontsize=8)
 
     time_extent = [0.0, max_time, 0, spectrogram.shape[0]]
 
@@ -235,7 +235,7 @@ def create_overview_plot(
                 bbox=dict(facecolor=color, alpha=0.6, boxstyle="round,pad=0.2"),
             )
         label_text = f"cluster {cluster_id}" if cluster_id >= 0 else "noise"
-        handle = Patch(color=color, alpha=0.6, label=label_text)
+        handle = Patch(facecolor=color, alpha=0.6, label=label_text)
         if not any(h.get_label() == handle.get_label() for h in legend_handles):
             legend_handles.append(handle)
 
