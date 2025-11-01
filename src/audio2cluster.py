@@ -12,6 +12,7 @@ from typing import Any, Optional
 from types import SimpleNamespace
 
 import pickle
+import time
 
 import numpy as np
 import librosa
@@ -46,6 +47,7 @@ class SingleChannelProcessor:
         "window_grid",
         "block_index_map",
         "block_labels",
+        "stage_timings",
     )
 
     def __init__(self, args: SimpleNamespace) -> None:
@@ -67,12 +69,49 @@ class SingleChannelProcessor:
         self.window_grid: list[int] = []
         self.block_index_map = np.empty((0,), dtype=np.int32)
         self.block_labels: dict[int, int] = {}
+        self.stage_timings: dict[str, float] = {}
 
+        stage = time.perf_counter()
         self._compute_spectrogram()
+        self._record_stage("spectrogram", stage, extra=f"shape={self.S_db.shape}")
+
+        stage = time.perf_counter()
         self._compute_mfcc()
+        self._record_stage("mfcc", stage, extra=f"shape={self.mfcc.shape}")
+
+        stage = time.perf_counter()
         self._classify_loudness()
+        self._record_stage(
+            "classify_loudness",
+            stage,
+            extra=f"blocks={self.chirp_intervals.shape[0]}",
+        )
+
+        stage = time.perf_counter()
         self._prepare_features()
+        self._record_stage("prepare_features", stage, extra=f"features_shape={self.features.shape}")
+
+        stage = time.perf_counter()
         self._run_mstump()
+        self._record_stage("mstump", stage, extra=f"clusters={len(self.motif_sets)}")
+
+        if logging.getLogger().isEnabledFor(logging.INFO):
+            summary = {k: round(v, 3) for k, v in self.stage_timings.items()}
+            logging.info("Channel %s: timing summary %s", getattr(self.args, "channel_index", -1), summary)
+
+    def _record_stage(self, name: str, start_time: float, *, extra: str = "") -> None:
+        duration = time.perf_counter() - start_time
+        self.stage_timings[name] = duration
+        channel = getattr(self.args, "channel_index", -1)
+        extras = f" ({extra})" if extra else ""
+        if logging.getLogger().isEnabledFor(logging.INFO):
+            logging.info(
+                "Channel %s: %s completed in %.3fs%s",
+                channel,
+                name,
+                duration,
+                extras,
+            )
 
     def _compute_spectrogram(self) -> None:
         S = librosa.feature.melspectrogram(
@@ -210,15 +249,27 @@ class SingleChannelProcessor:
             self.window_grid = []
             return
 
-        feature_blocks: list[np.ndarray] = [self.S_db.astype(np.float32, copy=True)]
+        mode = getattr(self.args, "features_mode", "mel_mfcc")
+        feature_blocks: list[np.ndarray] = []
+        if mode != "mfcc_only":
+            feature_blocks.append(self.S_db.astype(np.float32, copy=True))
         if self.mfcc.size:
             feature_blocks.append(self.mfcc.astype(np.float32, copy=False))
+
+        if not feature_blocks:
+            logging.warning(
+                "Channel %s: no feature blocks available (mode=%s); defaulting to mel spectrogram",
+                getattr(self.args, "channel_index", -1),
+                mode,
+            )
+            feature_blocks = [self.S_db.astype(np.float32, copy=True)]
 
         features = np.vstack(feature_blocks) if feature_blocks else np.empty((0, self.S_db.shape[1]), dtype=np.float32)
         if features.size == 0:
             self.features = features
             self.block_index_map = np.empty((0,), dtype=np.int32)
             self.window_grid = []
+            logging.warning("Channel %s: feature matrix is empty", getattr(self.args, "channel_index", -1))
             return
 
         time_bins = features.shape[1]
@@ -285,11 +336,20 @@ class SingleChannelProcessor:
             return
 
         cluster_threshold = float(getattr(self.args, "cluster_threshold", 1.0))
-        mass_threshold = float(getattr(self.args, "mass_threshold", cluster_threshold))
+        mass_threshold_arg = getattr(self.args, "mass_threshold", None)
+        mass_threshold = float(cluster_threshold if mass_threshold_arg is None else mass_threshold_arg)
         max_seeds = int(getattr(self.args, "max_motifs", 5))
 
         cluster_records: dict[int, dict[str, Any]] = {}
         next_cluster_id = 0
+
+        mode = getattr(self.args, "features_mode", "mel_mfcc")
+        logging.info(
+            "Channel %s: starting mstump across %d window sizes (mode=%s)",
+            getattr(self.args, "channel_index", -1),
+            len(self.window_grid),
+            mode,
+        )
 
         window_progress = None
         if len(self.window_grid) > 1 and getattr(self.args, "progress", True):
@@ -301,20 +361,40 @@ class SingleChannelProcessor:
 
         try:
             for window in self.window_grid:
+                loop_start = time.perf_counter()
+                clusters_before = next_cluster_id
+                window_matches = 0
+                seed_count = 0
+
                 if window < 2 or series.shape[1] < window:
                     if window_progress:
                         window_progress.update(1)
+                    logging.info(
+                        "Channel %s: window %d skipped (series shorter than window)",
+                        getattr(self.args, "channel_index", -1),
+                        window,
+                    )
                     continue
                 candidate_starts = self._candidate_window_starts(window)
                 if candidate_starts.size == 0:
                     if window_progress:
                         window_progress.update(1)
+                    logging.info(
+                        "Channel %s: window %d skipped (no candidate starts)",
+                        getattr(self.args, "channel_index", -1),
+                        window,
+                    )
                     continue
                 try:
                     P, I = stumpy.mstump(series, window)
                 except Exception:
                     if window_progress:
                         window_progress.update(1)
+                    logging.exception(
+                        "Channel %s: mstump failed for window %d",
+                        getattr(self.args, "channel_index", -1),
+                        window,
+                    )
                     continue
 
                 self.profile[window] = P
@@ -324,6 +404,7 @@ class SingleChannelProcessor:
                 self.joint_profile[window] = joint_profile
 
                 seeds = self._select_seeds(joint_profile, candidate_starts, window, max_seeds)
+                seed_count = len(seeds)
                 seed_progress = None
                 if seeds and getattr(self.args, "progress", True):
                     seed_progress = tqdm(
@@ -371,6 +452,7 @@ class SingleChannelProcessor:
                                 record["matches"].append(
                                     {"start": seed_start, "block": block_id, "distance": 0.0}
                                 )
+                                window_matches += 1
                             if seed_progress:
                                 seed_progress.update(1)
                             continue
@@ -383,6 +465,7 @@ class SingleChannelProcessor:
                             record["matches"].append(
                                 {"start": start_idx, "block": block_idx, "distance": float(distance)}
                             )
+                            window_matches += 1
                         if seed_progress:
                             seed_progress.update(1)
                 finally:
@@ -391,9 +474,30 @@ class SingleChannelProcessor:
 
                 if window_progress:
                     window_progress.update(1)
+
+                loop_duration = time.perf_counter() - loop_start
+                logging.info(
+                    "Channel %s: window %d processed in %.3fs (seeds=%d, matches=%d, new_clusters=%d)",
+                    getattr(self.args, "channel_index", -1),
+                    window,
+                    loop_duration,
+                    seed_count,
+                    window_matches,
+                    next_cluster_id - clusters_before,
+                )
         finally:
             if window_progress:
                 window_progress.close()
+
+        assigned = int(np.sum(self.block_cluster_ids >= 0)) if self.block_cluster_ids.size else 0
+        unassigned = int(np.sum(self.block_cluster_ids < 0)) if self.block_cluster_ids.size else 0
+        logging.info(
+            "Channel %s: mstump completed (clusters=%d, assigned_blocks=%d, noise_blocks=%d)",
+            getattr(self.args, "channel_index", -1),
+            next_cluster_id,
+            assigned,
+            unassigned,
+        )
 
         self.motif_sets = [
             {
@@ -614,6 +718,8 @@ class TwoChannelFileProcessor:
         base.dst_dir.mkdir(parents=True, exist_ok=True)
         base.hop_length = getattr(base, "hop_length", base.step)
         base.s_ref = getattr(base, "s_ref", None)
+        base.features_mode = getattr(base, "features_mode", "mel_mfcc")
+        base.progress = getattr(base, "progress", True)
         self.args = base
         self.out_path = base.dst_dir / (base.fp.stem + ".pt")
         self.actual_sr: int = base.sr
@@ -676,6 +782,15 @@ class TwoChannelFileProcessor:
 
     def process(self) -> Optional[dict]:
         try:
+            file_start = time.perf_counter()
+            logging.info("Starting processing for %s", self.args.fp)
+            logging.info(
+                "File %s configuration: features_mode=%s, cluster_threshold=%.3f, mass_threshold=%s",
+                self.args.fp.name,
+                self.args.features_mode,
+                float(self.args.cluster_threshold),
+                "auto" if self.args.mass_threshold is None else f"{float(self.args.mass_threshold):.3f}",
+            )
             skip = self._maybe_skip_existing()
             if skip:
                 return skip
@@ -684,8 +799,17 @@ class TwoChannelFileProcessor:
             if duration_skip:
                 return duration_skip
 
+            load_start = time.perf_counter()
             wav_multi, self.actual_sr, channel_count = self._detect_and_load_audio(
                 self.args.fp, self.args.sr, channel="all"
+            )
+            duration_sec = wav_multi.shape[-1] / self.actual_sr if wav_multi.size else 0.0
+            logging.info(
+                "Loaded audio %s: shape=%s, duration=%.2fs (%.2fs elapsed)",
+                self.args.fp.name,
+                wav_multi.shape,
+                duration_sec,
+                time.perf_counter() - load_start,
             )
             if channel_count < self.desired_channels:
                 return self._skip(reason="mono_audio")
@@ -707,6 +831,9 @@ class TwoChannelFileProcessor:
                 **stats,
             }
             self._save_outputs()
+            logging.info(
+                "Finished processing %s in %.3fs", self.args.fp.name, time.perf_counter() - file_start
+            )
             return file_stats
         except Exception as exc:
             return {"error": f"{self.args.fp}: {exc}", "file": str(self.args.fp)}
@@ -733,8 +860,10 @@ class TwoChannelFileProcessor:
             raise ValueError(f"{self.args.fp}: no audio channels detected")
 
         self.channel_processors.clear()
+        channel_start = time.perf_counter()
         for idx in range(min(self.desired_channels, available)):
             wav_ch = np.ascontiguousarray(wav_multi[idx])
+            per_channel_start = time.perf_counter()
             processor = SingleChannelProcessor(
                 SimpleNamespace(
                     wav=wav_ch,
@@ -742,9 +871,29 @@ class TwoChannelFileProcessor:
                     n_fft=self.args.n_fft,
                     hop_length=self.args.hop_length,
                     n_mels=self.args.n_mels,
+                    features_mode=self.args.features_mode,
+                    progress=self.args.progress,
+                    channel_index=idx,
+                    file_stem=self.args.fp.stem,
+                    cluster_threshold=getattr(self.args, "cluster_threshold", 1.0),
+                    mass_threshold=getattr(self.args, "mass_threshold", None),
                 )
             )
+            per_channel_duration = time.perf_counter() - per_channel_start
+            logging.info(
+                "File %s: channel %d processed in %.3fs",
+                self.args.fp.name,
+                idx,
+                per_channel_duration,
+            )
             self.channel_processors.append(processor)
+
+        logging.info(
+            "File %s: processed %d channel(s) in %.3fs",
+            self.args.fp.name,
+            len(self.channel_processors),
+            time.perf_counter() - channel_start,
+        )
 
         if not self.channel_processors:
             raise ValueError(f"{self.args.fp}: unable to initialize channel processors")
@@ -913,6 +1062,10 @@ class WavToSpec:
             min_timebins=getattr(raw, "min_timebins", 25),
             n_mels=getattr(raw, "n_mels", 128),
             remake=getattr(raw, "remake", False),
+            features_mode=getattr(raw, "features_mode", "mel_mfcc"),
+            progress=not getattr(raw, "no_progress", False),
+            cluster_threshold=getattr(raw, "cluster_threshold", 1.0),
+            mass_threshold=getattr(raw, "mass_threshold", None),
         )
         self._setup_logging()
         self.audio_files = self._gather_files()
@@ -922,9 +1075,23 @@ class WavToSpec:
     # misc
     # ──────────────────────────────────────────────────────────────────────
     def _setup_logging(self) -> None:
-        logging.basicConfig(
-            filename="error_log.log", level=logging.ERROR, format="%(asctime)s - %(levelname)s - %(message)s"
-        )
+        logger = logging.getLogger()
+        if not logger.handlers:
+            console_handler = logging.StreamHandler(sys.stdout)
+            console_handler.setLevel(logging.INFO)
+            console_handler.setFormatter(
+                logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", "%H:%M:%S")
+            )
+            logger.addHandler(console_handler)
+
+            error_handler = logging.FileHandler("error_log.log")
+            error_handler.setLevel(logging.ERROR)
+            error_handler.setFormatter(
+                logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+            )
+            logger.addHandler(error_handler)
+
+        logger.setLevel(logging.INFO)
 
     def _save_audio_params(self) -> None:
         """Save audio processing parameters to JSON file in destination directory."""
@@ -1096,6 +1263,30 @@ def cli() -> None:
     p.add_argument("--n_mels", type=int, default=128, help="Number of mel bands (default: 128)")
     p.add_argument("--min_len_ms", type=int, default=25, help="Minimum clip length in milliseconds.")
     p.add_argument("--min_timebins", type=int, default=25, help="Minimum number of spectrogram time bins.")
+    p.add_argument(
+        "--features_mode",
+        type=str,
+        choices=["mel_mfcc", "mfcc_only"],
+        default="mel_mfcc",
+        help="Feature stack to use for clustering (default: mel_mfcc).",
+    )
+    p.add_argument(
+        "--no_progress",
+        action="store_true",
+        help="Disable tqdm progress bars during clustering.",
+    )
+    p.add_argument(
+        "--cluster_threshold",
+        type=float,
+        default=1.0,
+        help="Distance threshold for assigning motifs to existing clusters (default: 1.0)",
+    )
+    p.add_argument(
+        "--mass_threshold",
+        type=float,
+        default=None,
+        help="Override MASS distance threshold (defaults to cluster_threshold).",
+    )
     args = p.parse_args()
 
     converter = WavToSpec(args)
