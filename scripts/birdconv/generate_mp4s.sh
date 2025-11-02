@@ -7,7 +7,7 @@ set -euo pipefail
 
 readonly WAV_DIRS=("/mnt/birdconv/tb_conv_data" "/mnt/birdconv/tb_conv_data_val")
 readonly MP4_DIRS=("/mnt/birdconv/tb_conv_video_data" "/mnt/birdconv/tb_conv_video_data_val")
-readonly SOURCE_VIDEO_ROOT="/mnt/data"
+readonly SOURCE_VIDEO_ROOT="/mnt/birdconv/data"
 
 declare -A MP4_CACHE
 
