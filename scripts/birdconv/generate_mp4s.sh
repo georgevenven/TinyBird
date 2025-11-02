@@ -3,7 +3,7 @@
 # Generate per-segment MP4 clips aligned with clustered WAV files.
 # Usage: run from anywhere; paths are hard-coded to the project layout.
 
-set -euo pipefail
+set -uo pipefail
 
 readonly WAV_DIRS=("/mnt/birdconv/tb_conv_data" "/mnt/birdconv/tb_conv_data_val")
 readonly MP4_DIRS=("/mnt/birdconv/tb_conv_video_data" "/mnt/birdconv/tb_conv_video_data_val")
