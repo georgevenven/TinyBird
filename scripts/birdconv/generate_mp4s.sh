@@ -114,16 +114,16 @@ main() {
             echo "  [WARN] directory not found: $wav_dir"
             continue
         fi
-        mapfile -t wav_files < <(find "$wav_dir" -type f -name "*.wav" | sort)
-        local count="${#wav_files[@]}"
+        local count
+        count=$(find "$wav_dir" -type f -name "*.wav" | wc -l | awk '{print $1}')
         if (( count == 0 )); then
             echo "  [INFO] no WAV files found in $wav_dir"
             continue
         fi
-
-        for ((i=0; i<count; i++)); do
-            local wav="${wav_files[$i]}"
-            printf "[%d/%d] %s\n" $((i + 1)) "$count" "$(basename "$wav")"
+        local idx=0
+        while IFS= read -r -d '' wav; do
+            idx=$((idx + 1))
+            printf "[%d/%d] %s\n" "$idx" "$count" "$(basename "$wav")"
             if process_wav "$wav" "$out_dir"; then
                 ((total_processed++))
             else
@@ -135,7 +135,7 @@ main() {
                     *) ;;
                 esac
             fi
-        done
+        done < <(find "$wav_dir" -type f -name "*.wav" -print0 | sort -z)
     done
 
     echo "Summary:"
