@@ -331,6 +331,21 @@ def command_sync(args: argparse.Namespace) -> None:
             continue
 
         payload = _load_pickle(pickle_path)
+        meta = dict(payload.get("meta", {}))
+        stem = pickle_path.stem
+        if "_ch" in stem:
+            try:
+                channel_index = int(stem.split("_ch")[-1])
+            except ValueError:
+                channel_index = int(meta.get("channel_index", 0))
+        else:
+            channel_index = int(meta.get("channel_index", 0))
+        meta.setdefault("channel_index", channel_index)
+        meta.setdefault("file_stem", stem.split("_ch")[0] if "_ch" in stem else stem)
+        meta.setdefault("file_path", meta.get("source_path", str(pickle_path)))
+        meta.setdefault("features_mode", meta.get("features_mode", "mel_mfcc"))
+        payload["meta"] = meta
+
         local_clusters = _gather_local_clusters(pickle_path, payload, args.split)
         if not local_clusters:
             continue
