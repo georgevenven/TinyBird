@@ -59,13 +59,14 @@ process_wav() {
     filename="$(basename "$wav")"
     local base="${filename%.wav}"
 
-    local pattern='^([^_]+)_([^_.]+)_([^._]+)\.([0-9.]+)_([0-9.]+)$'
+    local pattern='^([^_]+)_([^_]+)_([^_.]+)\.([0-9]+(?:\.[0-9]+)?)_([0-9]+(?:\.[0-9]+)?)$'
+    local timestamp bird0 bird1 start length
     if [[ "$base" =~ $pattern ]]; then
-        local timestamp="${BASH_REMATCH[1]}"
-        local bird0="${BASH_REMATCH[2]}"
-        local bird1="${BASH_REMATCH[3]}"
-        local start="${BASH_REMATCH[4]}"
-        local length="${BASH_REMATCH[5]}"
+        timestamp="${BASH_REMATCH[1]}"
+        bird0="${BASH_REMATCH[2]}"
+        bird1="${BASH_REMATCH[3]}"
+        start="${BASH_REMATCH[4]}"
+        length="${BASH_REMATCH[5]}"
     else
         echo "  [WARN] unable to parse filename: $filename"
         return 1
