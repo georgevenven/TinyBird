@@ -9,7 +9,7 @@ readonly TRAIN_WAV_DIR=${TRAIN_WAV_DIR:-/mnt/birdconv/tb_conv_data}
 readonly VAL_WAV_DIR=${VAL_WAV_DIR:-/mnt/birdconv/tb_conv_data_val}
 readonly TRAIN_OUT_DIR=${TRAIN_OUT_DIR:-/mnt/birdconv/tb_conv_video_data}
 readonly VAL_OUT_DIR=${VAL_OUT_DIR:-/mnt/birdconv/tb_conv_video_data_val}
-readonly SOURCE_VIDEO_ROOT=${SOURCE_VIDEO_ROOT:-/mnt/data}
+readonly SOURCE_VIDEO_ROOT=${SOURCE_VIDEO_ROOT:-/mnt/birdconv/data}
 readonly FFMPEG_BIN=${FFMPEG_BIN:-$(command -v ffmpeg)}
 
 readonly WAV_DIRS=(${TRAIN_WAV_DIR} ${VAL_WAV_DIR})
