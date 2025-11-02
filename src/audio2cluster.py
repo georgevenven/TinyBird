@@ -46,6 +46,7 @@ class SingleChannelProcessor:
         "block_index_map",
         "block_labels",
         "stage_timings",
+        "_available_dims",
     )
 
     def __init__(self, args: SimpleNamespace) -> None:
@@ -68,6 +69,7 @@ class SingleChannelProcessor:
         self.block_index_map = np.empty((0,), dtype=np.int32)
         self.block_labels: dict[int, int] = {}
         self.stage_timings: dict[str, float] = {}
+        self._available_dims = np.arange(0)
 
         stage = time.perf_counter()
         self._compute_spectrogram()
@@ -237,6 +239,7 @@ class SingleChannelProcessor:
             self.features = np.empty((0, 0), dtype=np.float32)
             self.block_index_map = np.empty((0,), dtype=np.int32)
             self.window_grid = []
+            self._available_dims = np.arange(0, dtype=int)
             return
 
         mode = getattr(self.args, "features_mode", "mel_mfcc")
@@ -260,6 +263,7 @@ class SingleChannelProcessor:
             self.block_index_map = np.empty((0,), dtype=np.int32)
             self.window_grid = []
             logging.warning("Channel %s: feature matrix is empty", getattr(self.args, "channel_index", -1))
+            self._available_dims = np.arange(0, dtype=int)
             return
 
         time_bins = features.shape[1]
@@ -294,6 +298,7 @@ class SingleChannelProcessor:
             self.block_index_map = np.empty((0,), dtype=np.int32)
 
         self.window_grid = self._determine_window_grid()
+        self._available_dims = np.arange(features.shape[0], dtype=int)
 
     def _run_mstump(self) -> None:
         self.profile = {}
@@ -477,17 +482,31 @@ class SingleChannelProcessor:
                             continue
 
                         seed_features = compressed_series[:, seed_start : seed_start + window]
+                        profile_column = P[:, seed_start] if seed_start < P.shape[1] else None
+                        if profile_column is None:
+                            dims = self._available_dims
+                        else:
+                            dims = self._select_mdl_subspace(profile_column)
+                        if dims.size == 0:
+                            dims = self._available_dims
+                        dims = np.asarray(dims, dtype=int)
+                        seed_subspace = seed_features[dims, :]
                         seed_orig_start = int(orig_map_arr[seed_start]) if seed_start < orig_map_arr.size else -1
                         if seed_orig_start < 0:
                             if seed_progress:
                                 seed_progress.update(1)
                             continue
-                        cluster_id = self._match_existing_cluster(seed_features, window, cluster_threshold)
+                        cluster_id = self._match_existing_cluster(seed_subspace, window, cluster_threshold, dims)
                         if cluster_id is None:
                             cluster_id = next_cluster_id
                             next_cluster_id += 1
                             self.cluster_exemplars.append(
-                                {"id": cluster_id, "window": window, "features": seed_features.copy()}
+                                {
+                                    "id": cluster_id,
+                                    "window": window,
+                                    "features": seed_subspace.copy(),
+                                    "dims": tuple(int(d) for d in dims),
+                                }
                             )
 
                         record = cluster_records.setdefault(
@@ -496,18 +515,32 @@ class SingleChannelProcessor:
                                 "cluster_id": cluster_id,
                                 "window": window,
                                 "exemplar_start": seed_orig_start,
+                                "dims": tuple(int(d) for d in dims),
                                 "matches": [],
                             },
                         )
 
                         matches = self._collect_matches_with_mass(
-                            seed_start, window, mass_threshold, aggregated_series, block_map_arr, orig_map_arr
+                            seed_start,
+                            window,
+                            mass_threshold,
+                            compressed_series,
+                            dims,
+                            block_map_arr,
+                            orig_map_arr,
                         )
                         if not matches:
                             if block_id >= 0 and not self.block_covered[block_id]:
                                 self.block_cluster_ids[block_id] = cluster_id
                                 self.block_covered[block_id] = True
-                                record["matches"].append({"start": seed_orig_start, "block": block_id, "distance": 0.0})
+                                record["matches"].append(
+                                    {
+                                        "start": seed_orig_start,
+                                        "block": block_id,
+                                        "distance": 0.0,
+                                        "dims": tuple(int(d) for d in dims),
+                                    }
+                                )
                                 window_matches += 1
                             if seed_progress:
                                 seed_progress.update(1)
@@ -519,7 +552,12 @@ class SingleChannelProcessor:
                             self.block_cluster_ids[block_idx] = cluster_id
                             self.block_covered[block_idx] = True
                             record["matches"].append(
-                                {"start": orig_start, "block": block_idx, "distance": float(distance)}
+                                {
+                                    "start": orig_start,
+                                    "block": block_idx,
+                                    "distance": float(distance),
+                                    "dims": tuple(int(d) for d in dims),
+                                }
                             )
                             window_matches += 1
                         if seed_progress:
@@ -647,6 +685,31 @@ class SingleChannelProcessor:
                 break
         return seeds
 
+    @staticmethod
+    def _select_mdl_subspace(profile_column: np.ndarray, *, min_dims: int = 1) -> np.ndarray:
+        column = np.asarray(profile_column, dtype=np.float64)
+        if column.ndim != 1 or column.size == 0:
+            return np.arange(column.size)
+
+        finite_mask = np.isfinite(column)
+        if not np.any(finite_mask):
+            return np.arange(column.size)
+
+        finite_indices = np.where(finite_mask)[0]
+        finite_values = column[finite_indices]
+        sort_order = np.argsort(finite_values)
+        sorted_indices = finite_indices[sort_order]
+        sorted_values = finite_values[sort_order]
+
+        cumulative = np.cumsum(sorted_values)
+        counts = np.arange(1, sorted_values.size + 1)
+        averages = cumulative / counts
+        mdl_scores = counts * np.log(averages + 1e-12)
+        best_idx = int(np.argmin(mdl_scores))
+        best_k = max(min_dims, best_idx + 1)
+        best_k = min(best_k, sorted_indices.size)
+        return np.sort(sorted_indices[:best_k])
+
     def _block_for_window(self, start: int, window: int) -> int:
         if self.block_index_map.size == 0 or start < 0 or (start + window) > self.block_index_map.size:
             return -1
@@ -664,13 +727,22 @@ class SingleChannelProcessor:
         block_end = int(self.chirp_intervals[block_id, 1])
         return block_start <= start and (start + window) <= block_end
 
-    def _match_existing_cluster(self, seed_features: np.ndarray, window: int, threshold: float) -> int | None:
+    def _match_existing_cluster(
+        self,
+        seed_features_subspace: np.ndarray,
+        window: int,
+        threshold: float,
+        dims: np.ndarray,
+    ) -> int | None:
+        dims_key = tuple(int(d) for d in np.asarray(dims, dtype=int))
         for cluster in self.cluster_exemplars:
             if cluster["window"] != window:
                 continue
-            dist = self._subsequence_distance(seed_features, cluster["features"])
+            if cluster.get("dims", None) != dims_key:
+                continue
+            dist = self._subsequence_distance(seed_features_subspace, cluster["features"])
             if dist <= threshold:
-                cluster["features"] = 0.5 * (cluster["features"] + seed_features)
+                cluster["features"] = 0.5 * (cluster["features"] + seed_features_subspace)
                 return int(cluster["id"])
         return None
 
@@ -686,10 +758,15 @@ class SingleChannelProcessor:
         seed_start: int,
         window: int,
         threshold: float,
-        aggregated_series: np.ndarray,
+        compressed_series: np.ndarray,
+        dims: np.ndarray,
         block_map: np.ndarray,
         orig_map: np.ndarray,
     ) -> list[tuple[int, int, int, float]]:
+        subspace_series = compressed_series[np.asarray(dims, dtype=int), :]
+        if subspace_series.size == 0:
+            return []
+        aggregated_series = np.linalg.norm(np.nan_to_num(subspace_series, nan=0.0), axis=0)
         if aggregated_series.size < window or seed_start + window > aggregated_series.size:
             return []
 
@@ -749,6 +826,10 @@ class SingleChannelProcessor:
             "n_fft": getattr(self.args, "n_fft", None),
             "n_mels": getattr(self.args, "n_mels", None),
             "n_mfcc": getattr(self.args, "n_mfcc", None),
+            "features_mode": getattr(self.args, "features_mode", None),
+            "channel_index": getattr(self.args, "channel_index", None),
+            "file_stem": getattr(self.args, "file_stem", None),
+            "file_path": getattr(self.args, "file_path", None),
         }
 
         profile = {int(window): np.array(values, copy=True) for window, values in self.profile.items()}
@@ -760,9 +841,27 @@ class SingleChannelProcessor:
                 "id": int(exemplar["id"]),
                 "window": int(exemplar["window"]),
                 "features": np.array(exemplar["features"], copy=True),
+                "dims": list(exemplar.get("dims", [])),
             }
             for exemplar in self.cluster_exemplars
         ]
+
+        motif_sets_serialized: list[dict[str, Any]] = []
+        for record in self.motif_sets:
+            rec = dict(record)
+            if "dims" in rec:
+                rec["dims"] = list(rec["dims"])
+            if "matches" in rec:
+                serialized_matches = []
+                for match in rec["matches"]:
+                    match_copy = dict(match)
+                    if "dims" in match_copy:
+                        match_copy["dims"] = list(match_copy["dims"])
+                    serialized_matches.append(match_copy)
+                rec["matches"] = serialized_matches
+            motif_sets_serialized.append(rec)
+
+        global_assignments = np.full(self.block_cluster_ids.shape, -1, dtype=np.int32)
 
         payload = {
             "meta": meta,
@@ -770,7 +869,7 @@ class SingleChannelProcessor:
             "block_lengths": np.array(self.block_lengths, copy=True),
             "block_cluster_ids": np.array(self.block_cluster_ids, copy=True),
             "block_labels": dict(self.block_labels),
-            "motif_sets": list(self.motif_sets),
+            "motif_sets": motif_sets_serialized,
             "window_grid": list(self.window_grid),
             "cluster_exemplars": exemplars,
             "profile": profile,
@@ -779,6 +878,7 @@ class SingleChannelProcessor:
             "features": np.array(self.features, copy=True),
             "mel_spectrogram": np.array(self.mel_spectrogram, copy=True),
             "S_db": np.array(self.S_db, copy=True),
+            "global_assignments": global_assignments,
         }
         return payload
 
@@ -943,6 +1043,7 @@ class TwoChannelFileProcessor:
                     progress=self.args.progress,
                     channel_index=idx,
                     file_stem=self.args.fp.stem,
+                    file_path=str(self.args.fp),
                     cluster_threshold=getattr(self.args, "cluster_threshold", 1.0),
                     mass_threshold=getattr(self.args, "mass_threshold", None),
                 )
@@ -1077,9 +1178,18 @@ class TwoChannelFileProcessor:
             payload = processor.to_pickle_payload()
             payload_meta = payload.get("meta", {})
             payload_meta.update(
-                {"channel_index": idx, "file_stem": self.args.fp.stem, "source_path": str(self.args.fp)}
+                {
+                    "channel_index": idx,
+                    "file_stem": self.args.fp.stem,
+                    "source_path": str(self.args.fp),
+                    "features_mode": self.args.features_mode,
+                }
             )
             payload["meta"] = payload_meta
+            if "global_assignments" not in payload or payload["global_assignments"].shape[0] != payload["block_cluster_ids"].shape[0]:
+                payload["global_assignments"] = np.full(
+                    payload["block_cluster_ids"].shape, -1, dtype=np.int32
+                )
             cluster_path = cluster_dir / f"{self.args.fp.stem}_ch{idx}.pkl"
             with cluster_path.open("wb") as fh:
                 pickle.dump(payload, fh)

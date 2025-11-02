@@ -141,35 +141,68 @@ def create_overview_plot(
 
     block_order = np.argsort(intervals[:, 0])
     sorted_intervals = intervals[block_order]
-    sorted_clusters = cluster_ids[block_order] if cluster_ids.size else np.full(block_order.shape, -1, dtype=int)
+    sorted_clusters = (
+        cluster_ids[block_order]
+        if cluster_ids.size
+        else np.full(block_order.shape, -1, dtype=int)
+    )
 
-    durations = (sorted_intervals[:, 1] - sorted_intervals[:, 0]) * frame_step
-    if durations.size == 0:
+    compressed_segments: list[np.ndarray] = []
+    block_entries: list[dict[str, Any]] = []
+    current_col = 0
+    for interval, cluster_id in zip(sorted_intervals, sorted_clusters, strict=False):
+        start = int(interval[0])
+        end = int(interval[1])
+        snippet = spectrogram[:, start:end]
+        length_cols = snippet.shape[1]
+        if length_cols <= 0:
+            continue
+        compressed_segments.append(snippet)
+        block_entries.append(
+            {
+                "cluster": int(cluster_id),
+                "orig_interval": (start, end),
+                "new_start_col": current_col,
+                "length_cols": length_cols,
+            }
+        )
+        current_col += length_cols
+
+    if not block_entries:
         return
 
-    max_time = np.max((sorted_intervals[:, 1]) * frame_step)
-    colors = build_color_map(sorted_clusters if sorted_clusters.size else [0])
+    compressed_spec = (
+        np.hstack(compressed_segments)
+        if compressed_segments
+        else np.empty((spectrogram.shape[0], 0), dtype=spectrogram.dtype)
+    )
+    max_time = compressed_spec.shape[1] * frame_step
+    if max_time <= 0:
+        return
+
+    colors = build_color_map([entry["cluster"] for entry in block_entries])
 
     fig_width = max(8.0, min(20.0, max_time / 5.0))
-    fig_height = max(3.0, min(25.0, 0.35 * len(sorted_intervals) + 2.0))
+    fig_height = max(3.0, min(25.0, 0.35 * len(block_entries) + 2.0))
     fig, (ax_stack, ax_spec, ax_blocks) = plt.subplots(
         3,
         1,
         figsize=(fig_width, fig_height + 4),
-        gridspec_kw={"height_ratios": [len(sorted_intervals) * 0.35 + 1.0, 4, 1]},
+        gridspec_kw={"height_ratios": [len(block_entries) * 0.35 + 1.0, 4, 1]},
         sharex=True,
     )
 
     legend_handles: list[Patch] = []
-    for row, (interval, cluster_id) in enumerate(zip(sorted_intervals, sorted_clusters, strict=False)):
-        start_time, end_time = block_time(tuple(map(int, interval)), frame_step)
-        width = max(end_time - start_time, frame_step)
-        color = colors.get(int(cluster_id), (0.7, 0.7, 0.7, 0.4))
+    for row, entry in enumerate(block_entries):
+        width = entry["length_cols"] * frame_step
+        left = entry["new_start_col"] * frame_step
+        cluster_id = entry["cluster"]
+        color = colors.get(cluster_id, (0.7, 0.7, 0.7, 0.4))
         alpha = 0.65 if cluster_id >= 0 else 0.25
         ax_stack.barh(
             y=row,
             width=width,
-            left=start_time,
+            left=left,
             height=0.8,
             color=color,
             alpha=alpha,
@@ -177,7 +210,7 @@ def create_overview_plot(
             linewidth=0.6,
         )
         ax_stack.text(
-            start_time + width / 2.0,
+            left + width / 2.0,
             row,
             f"{cluster_id}",
             ha="center",
@@ -191,8 +224,8 @@ def create_overview_plot(
         if not any(h.get_label() == handle.get_label() for h in legend_handles):
             legend_handles.append(handle)
 
-    ax_stack.set_xlim(0.0, max_time if max_time > 0 else 1.0)
-    ax_stack.set_ylim(-0.5, len(sorted_intervals) - 0.5)
+    ax_stack.set_xlim(0.0, max_time)
+    ax_stack.set_ylim(-0.5, len(block_entries) - 0.5)
     ax_stack.set_ylabel("Blocks (sorted)")
     ax_stack.set_title(f"{stem} | channel {channel_id} | block overview")
     ax_stack.set_yticks([])
@@ -203,7 +236,7 @@ def create_overview_plot(
     time_extent = [0.0, max_time, 0, spectrogram.shape[0]]
 
     im = ax_spec.imshow(
-        spectrogram,
+        compressed_spec,
         aspect="auto",
         origin="lower",
         cmap="magma",
@@ -213,56 +246,53 @@ def create_overview_plot(
     ax_spec.set_title(f"{stem} | channel {channel_id} | spectrogram (blocks only)")
     fig.colorbar(im, ax=ax_spec, orientation="vertical", fraction=0.035, pad=0.01, label="dB")
 
-    legend_handles: list[Patch] = []
-    if cluster_ids.size == 0:
-        cluster_ids = np.full(intervals.shape[0], -1, dtype=int)
-
-    for block_idx, (interval, cluster_id) in enumerate(zip(intervals, cluster_ids, strict=False)):
-        start_time, end_time = block_time(tuple(map(int, interval)), frame_step)
-        color = colors.get(int(cluster_id), (0.7, 0.7, 0.7, 0.4))
+    legend_handles_spec: list[Patch] = []
+    for entry in block_entries:
+        cluster_id = entry["cluster"]
+        color = colors.get(cluster_id, (0.7, 0.7, 0.7, 0.4))
         alpha = 0.35 if cluster_id >= 0 else 0.15
-        ax_spec.axvspan(start_time, end_time, color=color, alpha=alpha)
-        mid_time = (start_time + end_time) * 0.5
-        if end_time > start_time:
-            ax_spec.text(
-                mid_time,
-                spectrogram.shape[0] * 0.95,
-                f"{cluster_id}",
-                ha="center",
-                va="top",
-                fontsize=8,
-                color="white",
-                bbox=dict(facecolor=color, alpha=0.6, boxstyle="round,pad=0.2"),
-            )
+        left = entry["new_start_col"] * frame_step
+        width = entry["length_cols"] * frame_step
+        ax_spec.axvspan(left, left + width, color=color, alpha=alpha)
+        ax_spec.text(
+            left + width / 2.0,
+            compressed_spec.shape[0] * 0.95,
+            f"{cluster_id}",
+            ha="center",
+            va="top",
+            fontsize=8,
+            color="white",
+            bbox=dict(facecolor=color, alpha=0.6, boxstyle="round,pad=0.2"),
+        )
         label_text = f"cluster {cluster_id}" if cluster_id >= 0 else "noise"
         handle = Patch(facecolor=color, alpha=0.6, label=label_text)
-        if not any(h.get_label() == handle.get_label() for h in legend_handles):
-            legend_handles.append(handle)
+        if not any(h.get_label() == handle.get_label() for h in legend_handles_spec):
+            legend_handles_spec.append(handle)
 
         ax_blocks.barh(
             y=0.5,
-            width=end_time - start_time,
-            left=start_time,
+            width=width,
+            left=left,
             color=color,
             alpha=alpha,
             edgecolor="black",
         )
 
-    ax_blocks.set_xlim(0, max(max_time, 1e-6))
+    ax_blocks.set_xlim(0, max_time)
     ax_blocks.set_xlabel("Time (s)")
     ax_blocks.set_yticks([])
     ax_blocks.set_title("Block assignments")
-    if legend_handles:
+    if legend_handles_spec:
         ax_blocks.legend(
-            handles=legend_handles,
+            handles=legend_handles_spec,
             loc="upper center",
-            ncol=min(4, len(legend_handles)),
+            ncol=min(4, len(legend_handles_spec)),
             bbox_to_anchor=(0.5, 1.45),
             fontsize=8,
         )
 
-    ax_spec.set_xlim(0, max(max_time, 1e-6))
-    ax_blocks.set_xlim(0, max(max_time, 1e-6))
+    ax_spec.set_xlim(0, max_time)
+    ax_blocks.set_xlim(0, max_time)
     ax_blocks.set_xlabel("Time (s)")
     ax_blocks.set_yticks([])
     ax_blocks.set_title("Block assignments")
