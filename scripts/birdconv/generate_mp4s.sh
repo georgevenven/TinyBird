@@ -59,14 +59,17 @@ process_wav() {
     filename="$(basename "$wav")"
     local base="${filename%.wav}"
 
-    local timestamp="${base%%_*}"
-    local remainder="${base#*_}"
-    local bird0="${remainder%%_*}"
-    remainder="${remainder#*_}"
-    local bird1="${remainder%%.*}"
-    remainder="${remainder#*.}"
-    local start="${remainder%%_*}"
-    local length="${remainder#*_}"
+    local pattern='^([^_]+)_([^_.]+)_([^._]+)\.([0-9.]+)_([0-9.]+)$'
+    if [[ "$base" =~ $pattern ]]; then
+        local timestamp="${BASH_REMATCH[1]}"
+        local bird0="${BASH_REMATCH[2]}"
+        local bird1="${BASH_REMATCH[3]}"
+        local start="${BASH_REMATCH[4]}"
+        local length="${BASH_REMATCH[5]}"
+    else
+        echo "  [WARN] unable to parse filename: $filename"
+        return 1
+    fi
 
     local key1="${timestamp}-${bird0}-${bird1}.mp4"
     local key2="${timestamp}-${bird1}-${bird0}.mp4"
