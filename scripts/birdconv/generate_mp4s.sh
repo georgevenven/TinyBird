@@ -64,6 +64,8 @@ process_wav() {
     local left="${base%%.*}"
     local right="${base#*.}"
 
+
+
     # ensure there was at least one dot
     if [[ "$left" == "$base" ]]; then
         echo "  [WARN] unable to parse filename (no dot to split): $filename"
@@ -98,20 +100,6 @@ process_wav() {
       return 1
     fi  
 
-
-
-    local pattern='^([^_]+)_([^_]+)_([^_]+)\.([0-9]+(?:\.[0-9]+)?)_([0-9]+(?:\.[0-9]+)?)$'
-    local timestamp bird0 bird1 start length
-    if [[ "$base" =~ $pattern ]]; then
-        timestamp="${BASH_REMATCH[1]}"
-        bird0="${BASH_REMATCH[2]}"
-        bird1="${BASH_REMATCH[3]}"
-        start="${BASH_REMATCH[4]}"
-        length="${BASH_REMATCH[5]}"
-    else
-        echo "  [WARN] unable to parse filename: $filename"
-        return 1
-    fi
 
     local key1="${timestamp}-${bird0}-${bird1}.mp4"
     local key2="${timestamp}-${bird1}-${bird0}.mp4"
