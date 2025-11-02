@@ -57,9 +57,50 @@ process_wav() {
 
     local filename
     filename="$(basename "$wav")"
-    local base="${filename%.wav}"
+    # local base="${filename%.wav}"
+    local base="${filename##*/}"
 
-    local pattern='^([^_]+)_([^_]+)_([^_.]+)\.([0-9]+(?:\.[0-9]+)?)_([0-9]+(?:\.[0-9]+)?)$'
+    # split at the FIRST dot: left="timestamp_bird0_bird1", right="start_length[.ext...]"
+    local left="${base%%.*}"
+    local right="${base#*.}"
+
+    # ensure there was at least one dot
+    if [[ "$left" == "$base" ]]; then
+        echo "  [WARN] unable to parse filename (no dot to split): $filename"
+        return 1
+    fi
+
+    # LEFT: strictly 'timestamp_bird0_bird1' with no dots in any field
+    # - timestamp, bird0, bird1 are separated by underscores
+    if [[ "$left" =~ ^([^._]+)_([^._]+)_([^._]+)$ ]]; then
+        timestamp="${BASH_REMATCH[1]}"
+        bird0="${BASH_REMATCH[2]}"
+        bird1="${BASH_REMATCH[3]}"
+    else
+        echo "  [WARN] unable to parse left half (timestamp_bird0_bird1): $filename"
+        return 1
+    fi
+
+    # RIGHT: 'start_length[.ext]' where:
+    # - start is a float with a decimal point (e.g., 0.0, 1.0)
+    # - length is an integer (often 300)
+    if [[ "$right" =~ ^([0-9]+\.[0-9]+)_([0-9]+)(\..*)?$ ]]; then
+        start="${BASH_REMATCH[1]}"
+        length="${BASH_REMATCH[2]}"
+    else
+        echo "  [WARN] unable to parse right half (start_length[.ext]): $filename"
+        return 1
+    fi
+
+    # (Optional) enforce length == 300
+    if [[ "$length" != "300" ]]; then
+      echo "  [WARN] expected length=300, got '$length' in: $filename"
+      return 1
+    fi  
+
+
+
+    local pattern='^([^_]+)_([^_]+)_([^_]+)\.([0-9]+(?:\.[0-9]+)?)_([0-9]+(?:\.[0-9]+)?)$'
     local timestamp bird0 bird1 start length
     if [[ "$base" =~ $pattern ]]; then
         timestamp="${BASH_REMATCH[1]}"
