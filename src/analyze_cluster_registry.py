@@ -40,6 +40,14 @@ class AnalysisArtifacts:
     summary_path: Path
     cluster_stats_path: Path
     noise_candidates_path: Path
+    top_cluster_size_plot: Path
+    top_cluster_length_plot: Path
+    top_cluster_bird_plot: Path
+    bird_balance_plot: Path
+    bird_balance_ratio_plot: Path
+    top_clusters_stats_path: Path
+    top_cluster_birds_path: Path
+    bird_balance_table_path: Path
 
 
 def parse_args() -> argparse.Namespace:
@@ -188,6 +196,7 @@ def compute_cluster_stats(
     grouped = members_df.groupby("cluster_id")
     stats = grouped.agg(
         samples=("cluster_id", "size"),
+        min_length=("block_length", "min"),
         median_length=("block_length", "median"),
         mean_length=("block_length", "mean"),
         max_length=("block_length", "max"),
@@ -375,6 +384,299 @@ def compute_correlations(cluster_stats: pd.DataFrame) -> dict[str, float]:
     }
 
 
+def select_top_clusters(
+    cluster_stats: pd.DataFrame,
+    coverage_fraction: float,
+    max_clusters: int,
+) -> tuple[pd.DataFrame, float, int]:
+    if cluster_stats.empty:
+        return cluster_stats.head(0), 0.0, 0
+
+    sorted_stats = cluster_stats.sort_values("member_count", ascending=False)
+    counts = sorted_stats["member_count"].to_numpy(dtype=np.float64)
+    total = counts.sum()
+    if total <= 0:
+        return sorted_stats.head(0), 0.0, 0
+
+    cumulative = np.cumsum(counts)
+    target = coverage_fraction * total
+    threshold_idx = int(np.searchsorted(cumulative, target, side="left")) if counts.size else 0
+    clusters_needed = min(threshold_idx + 1, counts.size)
+
+    top_n = min(max_clusters, counts.size)
+    top_stats = sorted_stats.head(top_n).copy()
+    coverage_top_n = float(cumulative[top_n - 1] / total) if top_n else 0.0
+    return top_stats, coverage_top_n, clusters_needed
+
+
+def summarize_top_cluster_birds(
+    top_stats: pd.DataFrame,
+    members_df: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    if top_stats.empty:
+        empty = top_stats.head(0)
+        return empty, pd.DataFrame(columns=["cluster_id", "bird", "block_count"]), members_df.head(0)
+
+    cluster_ids = top_stats.index.to_numpy()
+    top_members = members_df[members_df["cluster_id"].isin(cluster_ids)].copy()
+    top_members["bird"] = top_members["bird"].fillna("unknown")
+
+    bird_counts = (
+        top_members.groupby(["cluster_id", "bird"])
+        .size()
+        .rename("block_count")
+        .reset_index()
+        .sort_values(["cluster_id", "block_count"], ascending=[True, False])
+    )
+
+    summary_records: list[dict] = []
+    for cluster_id, sub in bird_counts.groupby("cluster_id"):
+        member_count = int(top_stats.loc[cluster_id, "member_count"])
+        if member_count <= 0:
+            continue
+        top_entry = sub.iloc[0]
+        dominant_bird = str(top_entry["bird"])
+        dominant_fraction = float(top_entry["block_count"] / member_count)
+        unique_birds = int(sub["bird"].nunique())
+        summary_records.append(
+            {
+                "cluster_id": int(cluster_id),
+                "member_count": member_count,
+                "dominant_bird": dominant_bird,
+                "dominant_fraction": dominant_fraction,
+                "unique_birds": unique_birds,
+            }
+        )
+
+    summary_df = pd.DataFrame(summary_records).set_index("cluster_id")
+    summary_df = summary_df.reindex(top_stats.index).fillna(
+        {
+            "member_count": top_stats["member_count"],
+            "dominant_bird": "unknown",
+            "dominant_fraction": 0.0,
+            "unique_birds": 0,
+        }
+    )
+    summary_df["member_count"] = top_stats["member_count"]
+    summary_df["median_length"] = top_stats["median_length"]
+    summary_df["min_length"] = top_stats["min_length"]
+    summary_df["max_length"] = top_stats["max_length"]
+    summary_df["p90_distance"] = top_stats["p90_distance"]
+    summary_df["window"] = top_stats["window"]
+    return summary_df, bird_counts, top_members
+
+
+def plot_top_cluster_sizes(top_stats: pd.DataFrame, output_path: Path) -> None:
+    if top_stats.empty:
+        LOG.warning("Top cluster set is empty; skipping size plot.")
+        return
+
+    member_counts = top_stats["member_count"].to_numpy(dtype=np.float64)
+    cluster_labels = [str(int(idx)) for idx in top_stats.index]
+    fig, ax = plt.subplots(figsize=(min(18, max(10, len(cluster_labels) * 0.18)), 6))
+    ax.bar(np.arange(len(member_counts)), member_counts, color="#1f77b4")
+    ax.set_ylabel("Blocks per cluster")
+    ax.set_xlabel("Cluster id (sorted by size)")
+    ax.set_xticks(np.arange(len(cluster_labels)))
+    step = max(1, len(cluster_labels) // 20)
+    ax.set_xticklabels(cluster_labels, rotation=45, ha="right")
+    for idx, label in enumerate(ax.xaxis.get_ticklabels()):
+        if isinstance(label, matplotlib.text.Text) and (idx % step != 0):
+            label.set_visible(False)
+    ax.grid(True, axis="y", linestyle="--", linewidth=0.5, alpha=0.5)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+    LOG.info("Saved top cluster size plot to %s", output_path)
+
+
+def plot_top_cluster_lengths(top_stats: pd.DataFrame, output_path: Path) -> None:
+    if top_stats.empty:
+        LOG.warning("Top cluster set is empty; skipping length range plot.")
+        return
+    med = top_stats["median_length"].to_numpy(dtype=np.float64)
+    min_len = top_stats["min_length"].fillna(0).to_numpy(dtype=np.float64)
+    max_len = top_stats["max_length"].fillna(0).to_numpy(dtype=np.float64)
+    med = np.clip(med, a_min=1e-3, a_max=None)
+    min_len = np.clip(min_len, a_min=1e-3, a_max=None)
+    max_len = np.clip(max_len, a_min=1e-3, a_max=None)
+    lower_err = np.maximum(0, med - min_len)
+    upper_err = np.maximum(0, max_len - med)
+    cluster_labels = [str(int(idx)) for idx in top_stats.index]
+    positions = np.arange(len(cluster_labels))
+    fig, ax = plt.subplots(figsize=(min(18, max(10, len(cluster_labels) * 0.18)), 6))
+    ax.errorbar(
+        positions,
+        med,
+        yerr=[lower_err, upper_err],
+        fmt="o",
+        ecolor="#2ca02c",
+        color="#ff7f0e",
+        elinewidth=1.0,
+        capsize=3,
+        alpha=0.8,
+    )
+    ax.set_ylabel("Block length (frames)")
+    ax.set_xlabel("Cluster id (sorted by size)")
+    ax.set_yscale("log")
+    ax.set_xticks(positions)
+    step = max(1, len(cluster_labels) // 20)
+    ax.set_xticklabels(cluster_labels, rotation=45, ha="right")
+    for idx, label in enumerate(ax.xaxis.get_ticklabels()):
+        if isinstance(label, matplotlib.text.Text) and (idx % step != 0):
+            label.set_visible(False)
+    ax.grid(True, which="both", linestyle="--", linewidth=0.5, alpha=0.5)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+    LOG.info("Saved top cluster length range plot to %s", output_path)
+
+
+def plot_top_cluster_bird_specificity(summary_df: pd.DataFrame, output_path: Path) -> None:
+    if summary_df.empty:
+        LOG.warning("No top cluster summary available; skipping bird specificity plot.")
+        return
+    counts = summary_df["member_count"].to_numpy(dtype=np.float64)
+    counts = np.clip(counts, a_min=1e-3, a_max=None)
+    dominant_fraction = summary_df["dominant_fraction"].to_numpy(dtype=np.float64)
+    birds = summary_df["dominant_bird"].astype(str).tolist()
+    unique_birds = sorted(set(birds))
+    cmap = plt.get_cmap("tab20", max(1, len(unique_birds)))
+    color_map = {bird: cmap(idx % cmap.N) for idx, bird in enumerate(unique_birds)}
+    colors = [color_map[bird] for bird in birds]
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    sc = ax.scatter(counts, dominant_fraction * 100.0, c=colors, s=40, alpha=0.8, edgecolors="none")
+    ax.set_xscale("log")
+    ax.set_xlabel("Cluster size (blocks, log scale)")
+    ax.set_ylabel("Dominant bird share (%)")
+    ax.set_ylim(0, 100)
+    ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.5)
+    legend_handles = [
+        matplotlib.lines.Line2D([0], [0], marker="o", color="w", label=bird, markerfacecolor=color_map[bird], markersize=6)
+        for bird in unique_birds[:15]
+    ]
+    if legend_handles:
+        ax.legend(handles=legend_handles, title="Dominant bird", loc="best", fontsize="small")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+    LOG.info("Saved bird specificity plot to %s", output_path)
+
+
+def compute_bird_balance(
+    members_df: pd.DataFrame,
+    top_members: pd.DataFrame,
+    top_limit: int = 20,
+) -> pd.DataFrame:
+    overall = members_df["bird"].dropna()
+    subset = top_members["bird"].dropna()
+    if overall.empty or subset.empty:
+        return pd.DataFrame(
+            columns=[
+                "bird",
+                "top_blocks",
+                "overall_blocks",
+                "top_share",
+                "overall_share",
+                "representation_ratio",
+                "balanced_weighted_share",
+            ]
+        )
+
+    combined = (
+        pd.concat(
+            [
+                subset.value_counts().rename("top_blocks"),
+                overall.value_counts().rename("overall_blocks"),
+            ],
+            axis=1,
+        )
+        .fillna(0)
+        .sort_values("top_blocks", ascending=False)
+    )
+
+    tail_birds: list[str] = []
+    if combined.shape[0] > top_limit:
+        head = combined.iloc[:top_limit]
+        tail = combined.iloc[top_limit:]
+        tail_birds = tail.index.tolist()
+        aggregated = pd.DataFrame(
+            {
+                "top_blocks": [tail["top_blocks"].sum()],
+                "overall_blocks": [tail["overall_blocks"].sum()],
+            },
+            index=["Other"],
+        )
+        combined = pd.concat([head, aggregated], axis=0)
+
+    total_top = combined["top_blocks"].sum()
+    total_overall = combined["overall_blocks"].sum()
+    combined["top_share"] = (combined["top_blocks"] / total_top) if total_top else 0.0
+    combined["overall_share"] = (combined["overall_blocks"] / total_overall) if total_overall else 0.0
+    combined["representation_ratio"] = combined["top_share"] / combined["overall_share"].replace({0: np.nan})
+
+    weights = (1.0 / overall.value_counts()).to_dict()
+    weighted_series = subset.map(weights).fillna(0.0)
+    balanced_counts = weighted_series.groupby(subset).sum()
+    combined_index = combined.index.tolist()
+    balanced_counts = balanced_counts.reindex([idx for idx in combined_index if idx != "Other"], fill_value=0.0)
+    if "Other" in combined_index:
+        other_weight = weighted_series[top_members["bird"].isin(tail_birds)].sum() if tail_birds else 0.0
+        balanced_counts = pd.concat([balanced_counts, pd.Series({"Other": other_weight})])
+    total_weight = balanced_counts.sum()
+    if total_weight > 0:
+        balanced_share = (balanced_counts / total_weight)
+    else:
+        balanced_share = balanced_counts
+    combined["balanced_weighted_share"] = balanced_share.reindex(combined.index).fillna(0.0)
+
+    combined.reset_index(inplace=True)
+    combined.rename(columns={"index": "bird"}, inplace=True)
+    return combined
+
+
+def plot_bird_balance(
+    balance_df: pd.DataFrame,
+    share_plot_path: Path,
+    ratio_plot_path: Path,
+) -> None:
+    if balance_df.empty:
+        LOG.warning("Bird balance table empty; skipping balance plots.")
+        return
+
+    birds = balance_df["bird"].tolist()
+    x = np.arange(len(birds))
+    width = 0.35
+
+    fig, ax = plt.subplots(figsize=(min(16, max(10, len(birds) * 0.5)), 6))
+    ax.bar(x - width / 2, balance_df["overall_share"], width, label="Overall share", color="#1f77b4")
+    ax.bar(x + width / 2, balance_df["top_share"], width, label="Top clusters share", color="#ff7f0e")
+    ax.set_xticks(x)
+    ax.set_xticklabels(birds, rotation=45, ha="right")
+    ax.set_ylabel("Share of blocks")
+    ax.set_xlabel("Bird")
+    ax.legend()
+    ax.grid(True, axis="y", linestyle="--", linewidth=0.5, alpha=0.5)
+    fig.tight_layout()
+    fig.savefig(share_plot_path, dpi=200)
+    plt.close(fig)
+    LOG.info("Saved bird share comparison plot to %s", share_plot_path)
+
+    fig, ax = plt.subplots(figsize=(min(16, max(10, len(birds) * 0.5)), 5))
+    ax.bar(x, balance_df["representation_ratio"], color="#2ca02c")
+    ax.axhline(1.0, color="black", linestyle="--", linewidth=1.0, label="Baseline")
+    ax.set_xticks(x)
+    ax.set_xticklabels(birds, rotation=45, ha="right")
+    ax.set_ylabel("Representation ratio (top / overall)")
+    ax.set_xlabel("Bird")
+    ax.legend()
+    ax.grid(True, axis="y", linestyle="--", linewidth=0.5, alpha=0.5)
+    fig.tight_layout()
+    fig.savefig(ratio_plot_path, dpi=200)
+    plt.close(fig)
+    LOG.info("Saved bird representation ratio plot to %s", ratio_plot_path)
+
 def write_summary(
     output_path: Path,
     total_clusters: int,
@@ -384,6 +686,10 @@ def write_summary(
     bird_counts: dict[str, int],
     noise_candidates: pd.DataFrame,
     correlations: dict[str, float],
+    top_stats: pd.DataFrame,
+    top_coverage: float,
+    clusters_for_half: int,
+    balance_df: pd.DataFrame,
 ) -> None:
     lines: list[str] = []
     lines.append("Cluster Registry Analysis")
@@ -401,6 +707,20 @@ def write_summary(
                 f"  {pct:>2}% coverage -> {point.clusters_needed:,} clusters "
                 f"({point.blocks_covered:,} blocks)"
             )
+        lines.append("")
+
+    if not top_stats.empty:
+        lines.append("Top clusters focus:")
+        lines.append(
+            f"  Analysed clusters: {len(top_stats):,} (cover {top_coverage * 100:.2f}% of blocks)"
+        )
+        lines.append(
+            f"  Clusters needed for 50%% coverage: {clusters_for_half:,}"
+        )
+        median_dominant = top_stats["dominant_fraction"].median() * 100 if "dominant_fraction" in top_stats else float("nan")
+        lines.append(
+            f"  Median dominant bird share: {median_dominant:.1f}%"
+        )
         lines.append("")
 
     if bird_counts:
@@ -430,6 +750,18 @@ def write_summary(
     else:
         lines.append("No candidate noise clusters met the scoring criteria.\n")
 
+    if not balance_df.empty:
+        lines.append("Bird representation in top clusters (top entries):")
+        for _, row in balance_df.head(10).iterrows():
+            bird = row["bird"]
+            top_share = row["top_share"] * 100
+            overall_share = row["overall_share"] * 100
+            ratio = row["representation_ratio"]
+            lines.append(
+                f"  {bird}: top share {top_share:.2f}% vs overall {overall_share:.2f}% (ratio {ratio:.2f}x)"
+            )
+        lines.append("")
+
     output_path.write_text("\n".join(lines))
     LOG.info("Wrote summary to %s", output_path)
 
@@ -437,6 +769,9 @@ def write_summary(
 def write_tables(
     cluster_stats: pd.DataFrame,
     noise_candidates: pd.DataFrame,
+    top_summary: pd.DataFrame,
+    top_bird_counts: pd.DataFrame,
+    balance_df: pd.DataFrame,
     artifacts: AnalysisArtifacts,
 ) -> None:
     cluster_stats.to_csv(artifacts.cluster_stats_path, index=True)
@@ -444,6 +779,15 @@ def write_tables(
     if not noise_candidates.empty:
         noise_candidates.to_csv(artifacts.noise_candidates_path, index=True)
         LOG.info("Wrote noise candidate table to %s", artifacts.noise_candidates_path)
+    if not top_summary.empty:
+        top_summary.to_csv(artifacts.top_clusters_stats_path, index=True)
+        LOG.info("Wrote top cluster summary to %s", artifacts.top_clusters_stats_path)
+    if not top_bird_counts.empty:
+        top_bird_counts.to_csv(artifacts.top_cluster_birds_path, index=False)
+        LOG.info("Wrote top cluster bird distribution to %s", artifacts.top_cluster_birds_path)
+    if not balance_df.empty:
+        balance_df.to_csv(artifacts.bird_balance_table_path, index=False)
+        LOG.info("Wrote bird balance table to %s", artifacts.bird_balance_table_path)
 
 
 def main() -> None:
@@ -468,11 +812,29 @@ def main() -> None:
     summary_path = output_dir / "summary.txt"
     cluster_stats_path = output_dir / "cluster_stats.csv"
     noise_candidates_path = output_dir / "noise_clusters.csv"
+    top_cluster_size_plot = output_dir / "top_clusters_block_counts.png"
+    top_cluster_length_plot = output_dir / "top_clusters_length_ranges.png"
+    top_cluster_bird_plot = output_dir / "top_clusters_dominant_birds.png"
+    bird_balance_plot = output_dir / "bird_share_comparison.png"
+    bird_balance_ratio_plot = output_dir / "bird_representation_ratio.png"
+    top_clusters_stats_path = output_dir / "top_clusters_summary.csv"
+    top_cluster_birds_path = output_dir / "top_clusters_bird_distribution.csv"
+    bird_balance_table_path = output_dir / "bird_balance_table.csv"
 
     coverage_points = plot_cumulative_coverage(cluster_stats, coverage_plot)
     bird_counts = plot_bird_histogram(members_df, bird_histogram, args.bird_top_n)
     plot_length_vs_density(cluster_stats, length_density_plot)
     correlations = compute_correlations(cluster_stats)
+
+    top_stats_raw, top_coverage, clusters_for_half = select_top_clusters(
+        cluster_stats, coverage_fraction=0.5, max_clusters=129
+    )
+    top_summary, top_bird_counts, top_members = summarize_top_cluster_birds(top_stats_raw, members_df)
+    plot_top_cluster_sizes(top_summary, top_cluster_size_plot)
+    plot_top_cluster_lengths(top_summary, top_cluster_length_plot)
+    plot_top_cluster_bird_specificity(top_summary, top_cluster_bird_plot)
+    balance_df = compute_bird_balance(members_df, top_members)
+    plot_bird_balance(balance_df, bird_balance_plot, bird_balance_ratio_plot)
 
     noise_candidates = detect_noise_clusters(
         cluster_stats,
@@ -488,6 +850,14 @@ def main() -> None:
         summary_path=summary_path,
         cluster_stats_path=cluster_stats_path,
         noise_candidates_path=noise_candidates_path,
+        top_cluster_size_plot=top_cluster_size_plot,
+        top_cluster_length_plot=top_cluster_length_plot,
+        top_cluster_bird_plot=top_cluster_bird_plot,
+        bird_balance_plot=bird_balance_plot,
+        bird_balance_ratio_plot=bird_balance_ratio_plot,
+        top_clusters_stats_path=top_clusters_stats_path,
+        top_cluster_birds_path=top_cluster_birds_path,
+        bird_balance_table_path=bird_balance_table_path,
     )
 
     write_summary(
@@ -499,9 +869,20 @@ def main() -> None:
         bird_counts=bird_counts,
         noise_candidates=noise_candidates,
         correlations=correlations,
+        top_stats=top_summary,
+        top_coverage=top_coverage,
+        clusters_for_half=clusters_for_half,
+        balance_df=balance_df,
     )
 
-    write_tables(cluster_stats, noise_candidates, artifacts)
+    write_tables(
+        cluster_stats,
+        noise_candidates,
+        top_summary,
+        top_bird_counts,
+        balance_df,
+        artifacts,
+    )
 
     metadata = {
         "registry": str(args.registry),
@@ -509,9 +890,17 @@ def main() -> None:
             "coverage_plot": str(coverage_plot),
             "bird_histogram": str(bird_histogram),
             "length_vs_population_plot": str(length_density_plot),
+            "top_cluster_size_plot": str(top_cluster_size_plot),
+            "top_cluster_length_plot": str(top_cluster_length_plot),
+            "top_cluster_bird_plot": str(top_cluster_bird_plot),
+            "bird_balance_plot": str(bird_balance_plot),
+            "bird_balance_ratio_plot": str(bird_balance_ratio_plot),
             "summary": str(summary_path),
             "cluster_stats": str(cluster_stats_path),
             "noise_candidates": str(noise_candidates_path),
+            "top_clusters_summary": str(top_clusters_stats_path),
+            "top_cluster_birds": str(top_cluster_birds_path),
+            "bird_balance_table": str(bird_balance_table_path),
         },
         "parameters": {
             "bird_top_n": args.bird_top_n,

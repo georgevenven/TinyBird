@@ -357,7 +357,7 @@ class SingleChannelProcessor:
                 window_matches = 0
                 seed_count = 0
 
-                if window < 2:
+                if window < 3:
                     if window_progress:
                         window_progress.update(1)
                     logging.info(
@@ -602,21 +602,23 @@ class SingleChannelProcessor:
     def _determine_window_grid(self) -> list[int]:
         if self.features.size == 0:
             return []
-        valid_lengths = self.block_lengths[self.block_lengths >= 2]
+        valid_lengths = self.block_lengths[self.block_lengths >= 3]
         if valid_lengths.size == 0:
             default_window = int(getattr(self.args, "mstump_window", 0))
-            if 2 <= default_window <= self.features.shape[1]:
+            if 3 <= default_window <= self.features.shape[1]:
                 return [default_window]
             return []
 
         quantiles = np.quantile(valid_lengths.astype(np.float64), [0.9, 0.75, 0.5, 0.25])
-        candidate = {int(round(q)) for q in quantiles if np.isfinite(q) and q >= 2}
+        candidate = {int(round(q)) for q in quantiles if np.isfinite(q) and q >= 3}
         candidate.add(int(valid_lengths.max()))
         default_window = int(getattr(self.args, "mstump_window", 0))
-        if default_window >= 2:
+        if default_window >= 3:
             candidate.add(default_window)
 
-        min_window = int(getattr(self.args, "mstump_min_window", 2))
+        min_window = int(getattr(self.args, "mstump_min_window", 3))
+        if min_window < 3:
+            min_window = 3
         candidate = {int(max(min_window, value)) for value in candidate}
         windows = sorted(
             {value for value in candidate if value <= self.features.shape[1] and np.any(valid_lengths >= value)},
