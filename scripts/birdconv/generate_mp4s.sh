@@ -133,10 +133,10 @@ process_wav() {
     ffmpeg_cmd+=("$output_path")
 
     echo "  [GEN] ${filename} -> $(basename "$output_path") (${orientation})"
-    # if ! "${ffmpeg_cmd[@]}"; then
-    #     echo "  [FAIL] ffmpeg failed for $filename"
-    #     return 2
-    # fi
+    if ! "${ffmpeg_cmd[@]}"; then
+        echo "  [FAIL] ffmpeg failed for $filename"
+        return 2
+    fi
 
     return 0
 }
