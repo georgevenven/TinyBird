@@ -412,22 +412,33 @@ def generate_label_array(
 
     fig = plt.figure(figsize=(width / dpi, height / dpi), dpi=dpi, facecolor="black")
     fig.patch.set_alpha(0.6)
-    ax = fig.add_axes([0.01, 0.0, 0.98, 1.0])
+    ax = fig.add_axes([0.05, 0.05, 0.9, 0.9])
     ax.axis("off")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
     align = align.lower()
     if align not in {"left", "center", "right"}:
         align = "center"
-    x_coord = {"left": 0.01, "center": 0.5, "right": 0.99}[align]
-    ax.text(
-        x_coord,
-        0.5,
-        text,
-        ha=align,
-        va="center",
-        color="white",
-        fontsize=max(16, int(height * 0.45)),
-        fontweight="bold",
-    )
+    x_coord = {"left": 0.0, "center": 0.5, "right": 1.0}[align]
+
+    lines = text.splitlines() or [text]
+    base_size = max(16, int(height * 0.38))
+    for idx, line in enumerate(lines):
+        if not line:
+            continue
+        y = 1.0 - (idx + 1) / (len(lines) + 1)
+        size = base_size if idx else int(base_size * 1.15)
+        ax.text(
+            x_coord,
+            y,
+            line,
+            ha=align,
+            va="center",
+            color="white",
+            fontsize=size,
+            fontweight="bold" if idx == 0 else "normal",
+            wrap=True,
+        )
     fig.canvas.draw()
     canvas = fig.canvas
     try:
@@ -443,11 +454,12 @@ def generate_label_array(
 def annotate_clip(clip: VideoFileClip, plan: ClipPlan, cluster_id: int) -> CompositeVideoClip:
     width = clip.w
     height = clip.h
-    label_height = max(60, int(width * 0.06))
+    label_height = max(80, int(width * 0.08))
     position = "left" if plan.channel_index == 0 else "right"
-    label_text = f"{plan.bird_label} • {plan.file_name} ({plan.block_length:.2f}s)"
+    metadata_parts = [f"{plan.file_name} ({plan.block_length:.2f}s)"]
     if plan.distance is not None:
-        label_text += f" • d={plan.distance:.3f}"
+        metadata_parts.append(f"d={plan.distance:.3f}")
+    label_text = f"{plan.bird_label}\n" + " • ".join(metadata_parts)
     label_img = generate_label_array(label_text, width, height=label_height, align=position)
     label_clip = ImageClip(label_img, is_mask=False)
     label_clip = _with_clip_attribute(label_clip, "duration", clip.duration)
@@ -578,6 +590,12 @@ def assemble_video(
 
         if not annotated_clips:
             raise RuntimeError("no usable clips were gathered for the requested cluster.")
+
+        annotated_clips.sort(key=lambda clip: float(clip.duration or 0.0))
+        logging.debug(
+            "sorted clip durations: %s",
+            [float(clip.duration or 0.0) for clip in annotated_clips],
+        )
 
         final = concatenate_clips(annotated_clips)
         audio_clip = getattr(final, "audio", None)
