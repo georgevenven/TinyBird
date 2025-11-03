@@ -27,33 +27,33 @@ echo "==> Step 1: per-channel clustering (validation set)"
 #   --dst_dir "${VAL_OUT}"
 
 echo "==> Step 2: sync training clusters into global registry"
-uv run python -m src/cluster_regsitry sync \
+uv run python src/cluster_regsitry.y sync \
   --registry "${REGISTRY_DB}" \
   --clusters_dir "${TRAIN_OUT}/cluster" \
   --split train \
   --match-threshold "${MATCH_THRESHOLD}"
 
 echo "==> Step 2: sync validation clusters into global registry"
-uv run python -m src/cluster_regsitry sync \
+uv run python src/cluster_regsitry.py sync \
   --registry "${REGISTRY_DB}" \
   --clusters_dir "${VAL_OUT}/cluster" \
   --split validation \
   --match-threshold "${MATCH_THRESHOLD}"
 
 echo "==> Step 3: reclassify noise blocks (training set)"
-uv run python -m src/cluster_regsitry reclassify \
+uv run python src/cluster_regsitry.py reclassify \
   --registry "${REGISTRY_DB}" \
   --clusters_dir "${TRAIN_OUT}/cluster" \
   --match-threshold "${MATCH_THRESHOLD}"
 
 echo "==> Step 3: reclassify noise blocks (validation set)"
-uv run python -m src/cluster_regsitry reclassify \
+uv run python src/cluster_regsitry.py reclassify \
   --registry "${REGISTRY_DB}" \
   --clusters_dir "${VAL_OUT}/cluster" \
   --match-threshold "${MATCH_THRESHOLD}"
 
 echo "==> Registry summary"
-uv run python -m src/cluster_regsitry info \
+uv run python src/cluster_regsitry.py info \
   --registry "${REGISTRY_DB}"
 
 echo "==> Pipeline complete."
