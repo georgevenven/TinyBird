@@ -402,8 +402,13 @@ def generate_label_array(
         fontweight="bold",
     )
     fig.canvas.draw()
-    buf = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-    buf = buf.reshape((height, width, 3))
+    canvas = fig.canvas
+    try:
+        raw = canvas.tostring_rgb()  # Matplotlib <=3.9
+        buf = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3))
+    except AttributeError:
+        rgba = np.asarray(canvas.buffer_rgba())
+        buf = rgba[..., :3].copy()
     plt.close(fig)
     return buf
 
