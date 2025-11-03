@@ -541,7 +541,7 @@ def assemble_video(
     fps: Optional[float],
     min_duration: float,
 ) -> None:
-    temp_clips: list[VideoFileClip] = []
+    opened_clips: list[VideoFileClip] = []
     annotated_clips: list[CompositeVideoClip] = []
 
     try:
@@ -552,9 +552,9 @@ def assemble_video(
                 logging.warning("failed to open %s (%s)", plan.video_path, exc)
                 continue
 
+            opened_clips.append(base_clip)
             available = float(base_clip.duration or 0.0)
             if available <= 0:
-                base_clip.close()
                 continue
             clip_start = min(max(plan.start_time, 0.0), max(0.0, available - 1e-3))
             clip_end = min(available, clip_start + plan.duration)
@@ -563,12 +563,10 @@ def assemble_video(
                 clip_start = max(0.0, clip_start - extension / 2)
                 clip_end = min(available, clip_end + extension / 2)
             if clip_end - clip_start < min_duration:
-                base_clip.close()
                 continue
 
             subclip = _subclip_video(base_clip, clip_start, clip_end)
-            base_clip.close()
-            temp_clips.append(subclip)
+            opened_clips.append(subclip)
             annotated = annotate_clip(subclip, plan, cluster_id)
             logging.debug(
                 "annotated clip for %s: %s (audio=%s)",
@@ -625,7 +623,7 @@ def assemble_video(
     finally:
         for clip in annotated_clips:
             clip.close()
-        for clip in temp_clips:
+        for clip in opened_clips:
             clip.close()
 
 
