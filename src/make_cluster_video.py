@@ -21,14 +21,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-from moviepy.audio.AudioClip import CompositeAudioClip  # noqa: E402
-from moviepy.video.VideoClip import ImageClip  # noqa: E402
-from moviepy.video.compositing.CompositeVideoClip import CompositeVideoClip  # noqa: E402
-from moviepy.video.io.VideoFileClip import VideoFileClip  # noqa: E402
+from moviepy import CompositeAudioClip, CompositeVideoClip, ImageClip, VideoFileClip  # noqa: E402
 
-
-def _has_attr(obj: object, name: str) -> bool:
-    return hasattr(obj, name)
 
 FILENAME_PATTERN = re.compile(r"^(?P<timestamp>[^._]+)_(?P<bird0>[^._]+)_(?P<bird1>[^._]+)$")
 
@@ -57,6 +51,29 @@ class ClipPlan:
     file_name: str
     block_length: float
     distance: float | None
+
+
+def _with_clip_attribute(clip, attribute: str, *args, **kwargs):
+    """Call MoviePy's v2 ``with_`` API, with a fallback for legacy ``set_`` methods."""
+    modern = getattr(clip, f"with_{attribute}", None)
+    if callable(modern):
+        return modern(*args, **kwargs)
+    legacy = getattr(clip, f"set_{attribute}", None)
+    if callable(legacy):
+        return legacy(*args, **kwargs)
+    raise AttributeError(f"Clip does not expose with_{attribute} or set_{attribute}")
+
+
+def _with_audio(clip, audio_clip):
+    """Attach ``audio_clip`` to ``clip`` using either v2 or legacy APIs."""
+    modern = getattr(clip, "with_audio", None)
+    if callable(modern):
+        return modern(audio_clip)
+    legacy = getattr(clip, "set_audio", None)
+    if callable(legacy):
+        return legacy(audio_clip)
+    clip.audio = audio_clip
+    return clip
 
 
 def parse_args() -> argparse.Namespace:
@@ -317,11 +334,33 @@ def compute_clip_plan(
 
 
 def _subclip_video(base_clip: VideoFileClip, start: float, end: float) -> VideoFileClip:
-    if hasattr(base_clip, "subclip"):
-        return base_clip.subclip(start, end)
-    if fx_subclip is None:
-        raise AttributeError("moviepy installation lacks subclip/time_slice support")
-    return fx_subclip(base_clip, start, end)
+    """Return a time-sliced version of ``base_clip`` compatible with MoviePy 1.x and 2.x."""
+
+    def _attempt(method_name: str) -> VideoFileClip | None:
+        candidate = getattr(base_clip, method_name, None)
+        if not callable(candidate):
+            return None
+        signatures = (
+            ((start, end), {}),
+            ((), {"start": start, "end": end}),
+            ((), {"start_time": start, "end_time": end}),
+            ((), {"t_start": start, "t_end": end}),
+        )
+        for args, kwargs in signatures:
+            try:
+                result = candidate(*args, **kwargs)
+            except TypeError:
+                continue
+            if result is not None:
+                return result
+        return None
+
+    for name in ("with_time_range", "with_time_slice", "time_slice", "with_subclip", "subclip"):
+        clipped = _attempt(name)
+        if clipped is not None:
+            return clipped
+
+    raise AttributeError("moviepy installation lacks subclip/time_slice support")
 
 
 def generate_label_array(
@@ -371,14 +410,20 @@ def annotate_clip(clip: VideoFileClip, plan: ClipPlan, cluster_id: int) -> Compo
     if plan.distance is not None:
         label_text += f" • d={plan.distance:.3f}"
     label_img = generate_label_array(label_text, width, height=label_height, align=position)
-    label_clip = ImageClip(label_img, ismask=False).set_duration(clip.duration).set_position(
-        ("left" if position == "left" else "right", "bottom")
+    label_clip = ImageClip(label_img, ismask=False)
+    label_clip = _with_clip_attribute(label_clip, "duration", clip.duration)
+    label_clip = _with_clip_attribute(
+        label_clip,
+        "position",
+        ("left" if position == "left" else "right", "bottom"),
     )
 
     title_height = max(60, int(width * 0.05))
     title_text = f"Cluster {cluster_id}"
     title_img = generate_label_array(title_text, width, height=title_height, align="center")
-    title_clip = ImageClip(title_img, ismask=False).set_duration(clip.duration).set_position(("center", "top"))
+    title_clip = ImageClip(title_img, ismask=False)
+    title_clip = _with_clip_attribute(title_clip, "duration", clip.duration)
+    title_clip = _with_clip_attribute(title_clip, "position", ("center", "top"))
 
     return CompositeVideoClip([clip, label_clip, title_clip])
 
@@ -392,16 +437,21 @@ def concatenate_clips(clips: list[CompositeVideoClip]) -> CompositeVideoClip:
     current_start = 0.0
     for clip in clips:
         clip_duration = float(clip.duration or 0.0)
-        shifted = clip.set_start(current_start).set_end(current_start + clip_duration)
+        shifted = _with_clip_attribute(clip, "start", current_start)
+        shifted = _with_clip_attribute(shifted, "end", current_start + clip_duration)
         arranged.append(shifted)
         if clip.audio:
-            audio_segments.append(clip.audio.set_start(current_start).set_end(current_start + clip_duration))
+            audio_segment = _with_clip_attribute(clip.audio, "start", current_start)
+            audio_segment = _with_clip_attribute(audio_segment, "end", current_start + clip_duration)
+            audio_segments.append(audio_segment)
         current_start += clip_duration
 
     composite = CompositeVideoClip(arranged)
-    composite = composite.set_duration(current_start)
+    composite = _with_clip_attribute(composite, "duration", current_start)
     if audio_segments:
-        composite.audio = CompositeAudioClip(audio_segments).set_duration(current_start)
+        composite_audio = CompositeAudioClip(audio_segments)
+        composite_audio = _with_clip_attribute(composite_audio, "duration", current_start)
+        composite = _with_audio(composite, composite_audio)
     return composite
 
 
