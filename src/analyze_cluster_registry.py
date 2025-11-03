@@ -179,15 +179,23 @@ def enrich_members(members_df: pd.DataFrame) -> pd.DataFrame:
     for column in ("start_col", "end_col", "channel_index", "cluster_id", "block_index"):
         members_df[column] = members_df[column].fillna(0).astype(np.int64)
     members_df["distance"] = pd.to_numeric(members_df["distance"], errors="coerce")
-    lengths = members_df["end_col"] - members_df["start_col"]
+    start_cols = pd.to_numeric(members_df["start_col"], errors="coerce").astype(float)
+    end_cols = pd.to_numeric(members_df["end_col"], errors="coerce").astype(float)
+    start_norm = start_cols.round(6)
+    end_norm = end_cols.round(6)
+    members_df["start_col"] = start_cols
+    members_df["end_col"] = end_cols
+    members_df["start_col_norm"] = start_norm
+    members_df["end_col_norm"] = end_norm
+    lengths = end_cols - start_cols
     members_df["block_length"] = lengths.clip(lower=0)
     members_df["has_distance"] = members_df["distance"].notna()
     members_df["block_key"] = list(
         zip(
             members_df["file_path"],
             members_df["channel_index"],
-            members_df["start_col"],
-            members_df["end_col"],
+            start_norm,
+            end_norm,
         )
     )
     return members_df

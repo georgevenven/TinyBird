@@ -35,8 +35,8 @@ DEFAULT_VAL_VIDEOS = Path("/mnt/birdconv/tb_conv_video_data_val")
 class MemberRecord:
     file_path: str
     channel_index: int
-    start_col: int
-    end_col: int
+    start_col: float
+    end_col: float
     split: str
     distance: float | None
     source_pickle: str
@@ -52,6 +52,13 @@ class ClipPlan:
     file_name: str
     block_length: float
     distance: float | None
+
+
+_COLUMN_PRECISION = 6
+
+
+def _normalize_col(value: float) -> float:
+    return round(float(value), _COLUMN_PRECISION)
 
 
 def _describe_clip(clip) -> str:
@@ -231,8 +238,8 @@ def fetch_members(registry_path: Path, cluster_id: int) -> list[MemberRecord]:
             MemberRecord(
                 file_path=file_path,
                 channel_index=int(channel_index),
-                start_col=int(start_col),
-                end_col=int(end_col),
+                start_col=float(start_col),
+                end_col=float(end_col),
                 split=split or "",
                 distance=float(distance) if distance is not None else None,
                 source_pickle=source_pickle,
@@ -333,8 +340,8 @@ def compute_clip_plan(
             member.source_pickle,
         )
         return None
-    block_frames = int(member.end_col - member.start_col)
-    if block_frames <= 0:
+    block_cols = max(0.0, float(member.end_col) - float(member.start_col))
+    if block_cols <= 0:
         logging.debug(
             "skipping %s: non-positive block frame count (%s -> %s)",
             member.file_path,
@@ -343,7 +350,7 @@ def compute_clip_plan(
         )
         return None
 
-    full_duration = max(0.0, block_frames * frame_step)
+    full_duration = max(0.0, block_cols * frame_step)
     if full_duration < min_duration:
         logging.debug(
             "skipping %s: block duration %.3fs < min_duration %.3fs",
@@ -755,11 +762,16 @@ def select_plans(
     args: argparse.Namespace,
 ) -> list[ClipPlan]:
     plans: list[ClipPlan] = []
-    seen: set[tuple[str, int, int, int]] = set()
+    seen: set[tuple[str, int, float, float]] = set()
     per_channel_counter: dict[int, int] = {}
 
     for member in members:
-        key = (member.file_path, member.channel_index, member.start_col, member.end_col)
+        key = (
+            member.file_path,
+            member.channel_index,
+            _normalize_col(member.start_col),
+            _normalize_col(member.end_col),
+        )
         if key in seen:
             continue
         seen.add(key)
