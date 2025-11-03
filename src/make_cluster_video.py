@@ -422,7 +422,7 @@ def annotate_clip(clip: VideoFileClip, plan: ClipPlan, cluster_id: int) -> Compo
     if plan.distance is not None:
         label_text += f" • d={plan.distance:.3f}"
     label_img = generate_label_array(label_text, width, height=label_height, align=position)
-    label_clip = ImageClip(label_img, ismask=False)
+    label_clip = ImageClip(label_img, is_mask=False)
     label_clip = _with_clip_attribute(label_clip, "duration", clip.duration)
     label_clip = _with_clip_attribute(
         label_clip,
@@ -433,7 +433,7 @@ def annotate_clip(clip: VideoFileClip, plan: ClipPlan, cluster_id: int) -> Compo
     title_height = max(60, int(width * 0.05))
     title_text = f"Cluster {cluster_id}"
     title_img = generate_label_array(title_text, width, height=title_height, align="center")
-    title_clip = ImageClip(title_img, ismask=False)
+    title_clip = ImageClip(title_img, is_mask=False)
     title_clip = _with_clip_attribute(title_clip, "duration", clip.duration)
     title_clip = _with_clip_attribute(title_clip, "position", ("center", "top"))
 
