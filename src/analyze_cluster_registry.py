@@ -182,6 +182,14 @@ def enrich_members(members_df: pd.DataFrame) -> pd.DataFrame:
     lengths = members_df["end_col"] - members_df["start_col"]
     members_df["block_length"] = lengths.clip(lower=0)
     members_df["has_distance"] = members_df["distance"].notna()
+    members_df["block_key"] = list(
+        zip(
+            members_df["file_path"],
+            members_df["channel_index"],
+            members_df["start_col"],
+            members_df["end_col"],
+        )
+    )
     return members_df
 
 
@@ -208,6 +216,7 @@ def compute_cluster_stats(
         p90_distance=("distance", lambda series: percentile(series, 90.0)),
         has_distance=("has_distance", "any"),
         unique_files=("file_path", pd.Series.nunique),
+        unique_blocks=("block_key", pd.Series.nunique),
     )
     stats.index.name = "cluster_id"
     clusters_meta = clusters_df.rename(columns={"id": "cluster_id", "member_count": "registry_member_count"})
@@ -469,6 +478,8 @@ def summarize_top_cluster_birds(
     summary_df["window"] = top_stats["window"]
     if "unique_files" in top_stats:
         summary_df["unique_files"] = top_stats["unique_files"]
+    if "unique_blocks" in top_stats:
+        summary_df["unique_blocks"] = top_stats["unique_blocks"]
     return summary_df, bird_counts, top_members
 
 

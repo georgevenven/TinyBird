@@ -326,19 +326,43 @@ def compute_clip_plan(
 ) -> Optional[ClipPlan]:
     frame_step = load_frame_step(member.source_pickle)
     if frame_step <= 0:
+        logging.debug(
+            "skipping %s: invalid frame_step=%s (source=%s)",
+            member.file_path,
+            frame_step,
+            member.source_pickle,
+        )
         return None
     block_frames = int(member.end_col - member.start_col)
     if block_frames <= 0:
+        logging.debug(
+            "skipping %s: non-positive block frame count (%s -> %s)",
+            member.file_path,
+            member.start_col,
+            member.end_col,
+        )
         return None
 
     full_duration = max(0.0, block_frames * frame_step)
     if full_duration < min_duration:
+        logging.debug(
+            "skipping %s: block duration %.3fs < min_duration %.3fs",
+            member.file_path,
+            full_duration,
+            min_duration,
+        )
         return None
 
     desired_duration = min(full_duration, clip_duration) if clip_duration > 0 else full_duration
     if desired_duration < min_duration:
         desired_duration = full_duration
         if desired_duration < min_duration:
+            logging.debug(
+                "skipping %s: desired duration %.3fs < min_duration %.3fs after adjustment",
+                member.file_path,
+                desired_duration,
+                min_duration,
+            )
             return None
 
     start_offset = member.start_col * frame_step
