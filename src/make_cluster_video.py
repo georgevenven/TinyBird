@@ -454,20 +454,20 @@ def generate_label_array(
 def annotate_clip(clip: VideoFileClip, plan: ClipPlan, cluster_id: int) -> CompositeVideoClip:
     width = clip.w
     height = clip.h
-    label_height = max(80, int(width * 0.08))
+    label_width = max(int(width * 0.45), 320)
+    label_height = max(90, int(label_width * 0.32))
     position = "left" if plan.channel_index == 0 else "right"
     metadata_parts = [f"{plan.file_name} ({plan.block_length:.2f}s)"]
     if plan.distance is not None:
         metadata_parts.append(f"d={plan.distance:.3f}")
     label_text = f"{plan.bird_label}\n" + " • ".join(metadata_parts)
-    label_img = generate_label_array(label_text, width, height=label_height, align=position)
+    label_img = generate_label_array(label_text, label_width, height=label_height, align=position)
     label_clip = ImageClip(label_img, is_mask=False)
     label_clip = _with_clip_attribute(label_clip, "duration", clip.duration)
-    label_clip = _with_clip_attribute(
-        label_clip,
-        "position",
-        ("left" if position == "left" else "right", "bottom"),
-    )
+    margin = max(int(width * 0.02), 20)
+    pos_x = margin if position == "left" else max(width - label_width - margin, margin)
+    pos_y = max(height - label_height - margin, margin)
+    label_clip = _with_clip_attribute(label_clip, "position", (pos_x, pos_y))
 
     title_height = max(60, int(width * 0.05))
     title_text = f"Cluster {cluster_id}"
