@@ -64,13 +64,7 @@ process_wav() {
     local left="${base%%.*}"
     local right="${base#*.}"
 
-
-
-    # ensure there was at least one dot
-    if [[ "$left" == "$base" ]]; then
-        echo "  [WARN] unable to parse filename (no dot to split): $filename"
-        return 1
-    fi
+    echo "  [INFO] left: $left, right: $right"
 
     # LEFT: strictly 'timestamp_bird0_bird1' with no dots in any field
     # - timestamp, bird0, bird1 are separated by underscores
@@ -78,6 +72,7 @@ process_wav() {
         timestamp="${BASH_REMATCH[1]}"
         bird0="${BASH_REMATCH[2]}"
         bird1="${BASH_REMATCH[3]}"
+        echo "  [INFO] timestamp: $timestamp, bird0: $bird0, bird1: $bird1"
     else
         echo "  [WARN] unable to parse left half (timestamp_bird0_bird1): $filename"
         return 1
@@ -89,6 +84,7 @@ process_wav() {
     if [[ "$right" =~ ^([0-9]+\.[0-9]+)_([0-9]+)(\..*)?$ ]]; then
         start="${BASH_REMATCH[1]}"
         length="${BASH_REMATCH[2]}"
+        echo "  [INFO] start: $start, length: $length"
     else
         echo "  [WARN] unable to parse right half (start_length[.ext]): $filename"
         return 1
@@ -100,6 +96,7 @@ process_wav() {
       return 1
     fi  
 
+    echo "  [INFO] timestamp: $timestamp, bird0: $bird0, bird1: $bird1, start: $start, length: $length"
 
     local key1="${timestamp}-${bird0}-${bird1}.mp4"
     local key2="${timestamp}-${bird1}-${bird0}.mp4"
@@ -136,10 +133,10 @@ process_wav() {
     ffmpeg_cmd+=("$output_path")
 
     echo "  [GEN] ${filename} -> $(basename "$output_path") (${orientation})"
-    if ! "${ffmpeg_cmd[@]}"; then
-        echo "  [FAIL] ffmpeg failed for $filename"
-        return 2
-    fi
+    # if ! "${ffmpeg_cmd[@]}"; then
+    #     echo "  [FAIL] ffmpeg failed for $filename"
+    #     return 2
+    # fi
 
     return 0
 }
@@ -173,7 +170,10 @@ main() {
         if (( count == 0 )); then
             echo "  [INFO] no WAV files found in $wav_dir"
             continue
+        else
+            echo "  [INFO] directory found: $wav_dir $count WAV files"
         fi
+
         local idx=0
         while IFS= read -r -d '' wav; do
             idx=$((idx + 1))
