@@ -25,6 +25,13 @@ from moviepy.audio.AudioClip import CompositeAudioClip  # noqa: E402
 from moviepy.video.VideoClip import ImageClip  # noqa: E402
 from moviepy.video.compositing.CompositeVideoClip import CompositeVideoClip  # noqa: E402
 from moviepy.video.io.VideoFileClip import VideoFileClip  # noqa: E402
+try:  # noqa: E402
+    from moviepy.video.fx.all import subclip as fx_subclip
+except ImportError:  # pragma: no cover
+    try:
+        from moviepy.video.fx.all import time_slice as fx_subclip  # noqa: E402
+    except ImportError:  # pragma: no cover
+        fx_subclip = None
 
 FILENAME_PATTERN = re.compile(r"^(?P<timestamp>[^._]+)_(?P<bird0>[^._]+)_(?P<bird1>[^._]+)$")
 
@@ -312,6 +319,14 @@ def compute_clip_plan(
     )
 
 
+def _subclip_video(base_clip: VideoFileClip, start: float, end: float) -> VideoFileClip:
+    if hasattr(base_clip, "subclip"):
+        return base_clip.subclip(start, end)
+    if fx_subclip is None:
+        raise AttributeError("moviepy installation lacks subclip/time_slice support")
+    return fx_subclip(base_clip, start, end)
+
+
 def generate_label_array(
     text: str,
     width: int,
@@ -411,18 +426,21 @@ def assemble_video(
                 logging.warning("failed to open %s (%s)", plan.video_path, exc)
                 continue
 
-            available = base_clip.duration
+            available = float(base_clip.duration or 0.0)
+            if available <= 0:
+                base_clip.close()
+                continue
             clip_start = min(max(plan.start_time, 0.0), max(0.0, available - 1e-3))
             clip_end = min(available, clip_start + plan.duration)
             if clip_end - clip_start < min_duration:
-                # Try to extend within bounds.
                 extension = min_duration - (clip_end - clip_start)
                 clip_start = max(0.0, clip_start - extension / 2)
                 clip_end = min(available, clip_end + extension / 2)
             if clip_end - clip_start < min_duration:
                 base_clip.close()
                 continue
-            subclip = base_clip.subclip(clip_start, clip_end)
+
+            subclip = _subclip_video(base_clip, clip_start, clip_end)
             base_clip.close()
             temp_clips.append(subclip)
             annotated = annotate_clip(subclip, plan, cluster_id)
