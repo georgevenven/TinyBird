@@ -57,10 +57,12 @@ def _with_clip_attribute(clip, attribute: str, *args, **kwargs):
     """Call MoviePy's v2 ``with_`` API, with a fallback for legacy ``set_`` methods."""
     modern = getattr(clip, f"with_{attribute}", None)
     if callable(modern):
-        return modern(*args, **kwargs)
+        updated = modern(*args, **kwargs)
+        return clip if updated is None else updated
     legacy = getattr(clip, f"set_{attribute}", None)
     if callable(legacy):
-        return legacy(*args, **kwargs)
+        updated = legacy(*args, **kwargs)
+        return clip if updated is None else updated
     raise AttributeError(f"Clip does not expose with_{attribute} or set_{attribute}")
 
 
