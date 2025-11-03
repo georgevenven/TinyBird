@@ -176,8 +176,12 @@ def assign_bird_labels(members_df: pd.DataFrame) -> pd.DataFrame:
 
 def enrich_members(members_df: pd.DataFrame) -> pd.DataFrame:
     members_df = members_df.copy()
-    for column in ("start_col", "end_col", "channel_index", "cluster_id", "block_index"):
+    int_columns = ("channel_index", "cluster_id", "block_index")
+    for column in int_columns:
         members_df[column] = members_df[column].fillna(0).astype(np.int64)
+    float_columns = ("start_col", "end_col")
+    for column in float_columns:
+        members_df[column] = pd.to_numeric(members_df[column], errors="coerce")
     members_df["distance"] = pd.to_numeric(members_df["distance"], errors="coerce")
     start_cols = pd.to_numeric(members_df["start_col"], errors="coerce").astype(float)
     end_cols = pd.to_numeric(members_df["end_col"], errors="coerce").astype(float)
