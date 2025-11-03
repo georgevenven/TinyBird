@@ -21,9 +21,9 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
+from moviepy.audio.AudioClip import CompositeAudioClip  # noqa: E402
 from moviepy.video.VideoClip import ImageClip  # noqa: E402
 from moviepy.video.compositing.CompositeVideoClip import CompositeVideoClip  # noqa: E402
-from moviepy.video.compositing.concatenate import concatenate_videoclips  # noqa: E402
 from moviepy.video.io.VideoFileClip import VideoFileClip  # noqa: E402
 
 FILENAME_PATTERN = re.compile(r"^(?P<timestamp>[^._]+)_(?P<bird0>[^._]+)_(?P<bird1>[^._]+)$")
@@ -371,6 +371,28 @@ def annotate_clip(clip: VideoFileClip, plan: ClipPlan, cluster_id: int) -> Compo
     return CompositeVideoClip([clip, label_clip, title_clip])
 
 
+def concatenate_clips(clips: list[CompositeVideoClip]) -> CompositeVideoClip:
+    if not clips:
+        raise ValueError("no clips to concatenate")
+
+    arranged: list[CompositeVideoClip] = []
+    audio_segments: list = []
+    current_start = 0.0
+    for clip in clips:
+        clip_duration = float(clip.duration or 0.0)
+        shifted = clip.set_start(current_start).set_end(current_start + clip_duration)
+        arranged.append(shifted)
+        if clip.audio:
+            audio_segments.append(clip.audio.set_start(current_start).set_end(current_start + clip_duration))
+        current_start += clip_duration
+
+    composite = CompositeVideoClip(arranged)
+    composite = composite.set_duration(current_start)
+    if audio_segments:
+        composite.audio = CompositeAudioClip(audio_segments).set_duration(current_start)
+    return composite
+
+
 def assemble_video(
     plans: list[ClipPlan],
     output_path: Path,
@@ -409,7 +431,7 @@ def assemble_video(
         if not annotated_clips:
             raise RuntimeError("no usable clips were gathered for the requested cluster.")
 
-        final = concatenate_videoclips(annotated_clips, method="compose")
+        final = concatenate_clips(annotated_clips)
         logging.info("writing composite video (%s)", output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         write_kwargs = {"codec": "libx264", "audio_codec": "aac"}
