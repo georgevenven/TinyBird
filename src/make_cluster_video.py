@@ -21,12 +21,10 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-from moviepy.editor import (  # noqa: E402
-    CompositeVideoClip,
-    ImageClip,
-    VideoFileClip,
-    concatenate_videoclips,
-)
+from moviepy.video.VideoClip import ImageClip  # noqa: E402
+from moviepy.video.compositing.CompositeVideoClip import CompositeVideoClip  # noqa: E402
+from moviepy.video.compositing.concatenate import concatenate_videoclips  # noqa: E402
+from moviepy.video.io.VideoFileClip import VideoFileClip  # noqa: E402
 
 FILENAME_PATTERN = re.compile(r"^(?P<timestamp>[^._]+)_(?P<bird0>[^._]+)_(?P<bird1>[^._]+)$")
 
