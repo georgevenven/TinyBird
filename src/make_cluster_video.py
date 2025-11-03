@@ -53,16 +53,38 @@ class ClipPlan:
     distance: float | None
 
 
+def _describe_clip(clip) -> str:
+    """Return a concise string describing a MoviePy clip instance."""
+    if clip is None:
+        return "None"
+    attrs = []
+    for name in ("start", "end", "duration", "fps"):
+        value = getattr(clip, name, None)
+        if value is not None:
+            attrs.append(f"{name}={value!r}")
+    has_audio = getattr(clip, "audio", None) is not None
+    attrs.append(f"audio={has_audio}")
+    return f"{clip.__class__.__name__}({', '.join(attrs)})"
+
+
 def _with_clip_attribute(clip, attribute: str, *args, **kwargs):
     """Call MoviePy's v2 ``with_`` API, with a fallback for legacy ``set_`` methods."""
     modern = getattr(clip, f"with_{attribute}", None)
     if callable(modern):
+        logging.debug("calling %s.with_%s%s", clip.__class__.__name__, attribute, (args, kwargs))
         updated = modern(*args, **kwargs)
-        return clip if updated is None else updated
+        if updated is None:
+            logging.debug("%s.with_%s returned None; reusing original clip", clip.__class__.__name__, attribute)
+            return clip
+        return updated
     legacy = getattr(clip, f"set_{attribute}", None)
     if callable(legacy):
+        logging.debug("calling %s.set_%s%s", clip.__class__.__name__, attribute, (args, kwargs))
         updated = legacy(*args, **kwargs)
-        return clip if updated is None else updated
+        if updated is None:
+            logging.debug("%s.set_%s returned None; reusing original clip", clip.__class__.__name__, attribute)
+            return clip
+        return updated
     raise AttributeError(f"Clip does not expose with_{attribute} or set_{attribute}")
 
 
@@ -70,11 +92,14 @@ def _with_audio(clip, audio_clip):
     """Attach ``audio_clip`` to ``clip`` using either v2 or legacy APIs."""
     modern = getattr(clip, "with_audio", None)
     if callable(modern):
+        logging.debug("attaching audio via with_audio: %s <- %s", _describe_clip(clip), _describe_clip(audio_clip))
         return modern(audio_clip)
     legacy = getattr(clip, "set_audio", None)
     if callable(legacy):
+        logging.debug("attaching audio via set_audio: %s <- %s", _describe_clip(clip), _describe_clip(audio_clip))
         return legacy(audio_clip)
     clip.audio = audio_clip
+    logging.debug("attaching audio via attribute assignment: %s <- %s", _describe_clip(clip), _describe_clip(audio_clip))
     return clip
 
 
@@ -439,7 +464,19 @@ def annotate_clip(clip: VideoFileClip, plan: ClipPlan, cluster_id: int) -> Compo
     title_clip = _with_clip_attribute(title_clip, "duration", clip.duration)
     title_clip = _with_clip_attribute(title_clip, "position", ("center", "top"))
 
-    return CompositeVideoClip([clip, label_clip, title_clip])
+    composite = CompositeVideoClip([clip, label_clip, title_clip])
+    base_audio = getattr(clip, "audio", None)
+    if base_audio is not None:
+        logging.debug(
+            "propagating audio for clip %s: %s -> %s",
+            plan.file_name,
+            _describe_clip(base_audio),
+            _describe_clip(composite),
+        )
+        composite = _with_audio(composite, base_audio)
+    else:
+        logging.debug("clip %s has no audio to propagate", plan.file_name)
+    return composite
 
 
 def concatenate_clips(clips: list[CompositeVideoClip]) -> CompositeVideoClip:
@@ -451,14 +488,22 @@ def concatenate_clips(clips: list[CompositeVideoClip]) -> CompositeVideoClip:
     current_start = 0.0
     for clip in clips:
         clip_duration = float(clip.duration or 0.0)
+        logging.debug(
+            "processing clip %s duration=%s audio=%s",
+            _describe_clip(clip),
+            clip_duration,
+            hasattr(clip, "audio") and clip.audio is not None,
+        )
         shifted = _with_clip_attribute(clip, "start", current_start)
         shifted = _with_clip_attribute(shifted, "end", current_start + clip_duration)
         arranged.append(shifted)
         if clip.audio:
             audio_segment = clip.audio
+            logging.debug("  original audio segment: %s", _describe_clip(audio_segment))
             audio_segment = _with_clip_attribute(audio_segment, "start", current_start)
             audio_segment = _with_clip_attribute(audio_segment, "end", current_start + clip_duration)
             if audio_segment is not None and hasattr(audio_segment, "get_frame"):
+                logging.debug("  prepared audio segment: %s", _describe_clip(audio_segment))
                 audio_segments.append(audio_segment)
             else:
                 logging.debug("audio segment dropped due to unsupported start/end setters or missing get_frame")
@@ -466,6 +511,7 @@ def concatenate_clips(clips: list[CompositeVideoClip]) -> CompositeVideoClip:
 
     composite = CompositeVideoClip(arranged)
     composite = _with_clip_attribute(composite, "duration", current_start)
+    logging.debug("built video composite: %s", _describe_clip(composite))
     filtered_audio = [
         segment
         for segment in audio_segments
@@ -478,9 +524,13 @@ def concatenate_clips(clips: list[CompositeVideoClip]) -> CompositeVideoClip:
         )
     audio_segments = filtered_audio
     if audio_segments:
+        logging.debug("final audio segments: %s", [ _describe_clip(seg) for seg in audio_segments ])
         composite_audio = CompositeAudioClip(audio_segments)
         composite_audio = _with_clip_attribute(composite_audio, "duration", current_start)
         composite = _with_audio(composite, composite_audio)
+        logging.debug("attached composite audio: %s", _describe_clip(composite.audio))
+    else:
+        logging.debug("no usable audio segments, returning silent composite")
     return composite
 
 
@@ -520,6 +570,12 @@ def assemble_video(
             base_clip.close()
             temp_clips.append(subclip)
             annotated = annotate_clip(subclip, plan, cluster_id)
+            logging.debug(
+                "annotated clip for %s: %s (audio=%s)",
+                plan.file_name,
+                _describe_clip(annotated),
+                hasattr(annotated, "audio") and annotated.audio is not None,
+            )
             annotated_clips.append(annotated)
 
         if not annotated_clips:
