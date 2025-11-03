@@ -57,8 +57,8 @@ process_wav() {
 
     local filename
     filename="$(basename "$wav")"
-    # local base="${filename%.wav}"
-    local base="${filename##*/}"
+    local base="${filename%.wav}"
+    #local base="${filename##*/}"
 
     # split at the FIRST dot: left="timestamp_bird0_bird1", right="start_length[.ext...]"
     local left="${base%%.*}"
