@@ -466,6 +466,17 @@ def concatenate_clips(clips: list[CompositeVideoClip]) -> CompositeVideoClip:
 
     composite = CompositeVideoClip(arranged)
     composite = _with_clip_attribute(composite, "duration", current_start)
+    filtered_audio = [
+        segment
+        for segment in audio_segments
+        if segment is not None and hasattr(segment, "get_frame")
+    ]
+    if len(filtered_audio) < len(audio_segments):
+        logging.debug(
+            "filtered %d unusable audio segments",
+            len(audio_segments) - len(filtered_audio),
+        )
+    audio_segments = filtered_audio
     if audio_segments:
         composite_audio = CompositeAudioClip(audio_segments)
         composite_audio = _with_clip_attribute(composite_audio, "duration", current_start)
