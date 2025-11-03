@@ -355,7 +355,14 @@ def _subclip_video(base_clip: VideoFileClip, start: float, end: float) -> VideoF
                 return result
         return None
 
-    for name in ("with_time_range", "with_time_slice", "time_slice", "with_subclip", "subclip"):
+    for name in (
+        "with_time_range",
+        "with_time_slice",
+        "time_slice",
+        "with_subclip",
+        "subclip",
+        "subclipped",
+    ):
         clipped = _attempt(name)
         if clipped is not None:
             return clipped
