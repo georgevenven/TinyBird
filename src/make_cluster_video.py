@@ -25,13 +25,10 @@ from moviepy.audio.AudioClip import CompositeAudioClip  # noqa: E402
 from moviepy.video.VideoClip import ImageClip  # noqa: E402
 from moviepy.video.compositing.CompositeVideoClip import CompositeVideoClip  # noqa: E402
 from moviepy.video.io.VideoFileClip import VideoFileClip  # noqa: E402
-try:  # noqa: E402
-    from moviepy.video.fx.all import subclip as fx_subclip
-except ImportError:  # pragma: no cover
-    try:
-        from moviepy.video.fx.all import time_slice as fx_subclip  # noqa: E402
-    except ImportError:  # pragma: no cover
-        fx_subclip = None
+
+
+def _has_attr(obj: object, name: str) -> bool:
+    return hasattr(obj, name)
 
 FILENAME_PATTERN = re.compile(r"^(?P<timestamp>[^._]+)_(?P<bird0>[^._]+)_(?P<bird1>[^._]+)$")
 

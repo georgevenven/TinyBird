@@ -14,7 +14,7 @@ dependencies = [
     "tqdm>=4.67.1",
     "wandb>=0.19.2",
     "pandas>=2.2.6",
-    "moviepy>=1.0.3",
+    "moviepy>=2.0.0",
 ]
 [tool.ruff]
 line-length = 120
