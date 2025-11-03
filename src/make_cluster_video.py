@@ -455,9 +455,13 @@ def concatenate_clips(clips: list[CompositeVideoClip]) -> CompositeVideoClip:
         shifted = _with_clip_attribute(shifted, "end", current_start + clip_duration)
         arranged.append(shifted)
         if clip.audio:
-            audio_segment = _with_clip_attribute(clip.audio, "start", current_start)
+            audio_segment = clip.audio
+            audio_segment = _with_clip_attribute(audio_segment, "start", current_start)
             audio_segment = _with_clip_attribute(audio_segment, "end", current_start + clip_duration)
-            audio_segments.append(audio_segment)
+            if audio_segment is not None and hasattr(audio_segment, "get_frame"):
+                audio_segments.append(audio_segment)
+            else:
+                logging.debug("audio segment dropped due to unsupported start/end setters or missing get_frame")
         current_start += clip_duration
 
     composite = CompositeVideoClip(arranged)
