@@ -582,6 +582,39 @@ def assemble_video(
             raise RuntimeError("no usable clips were gathered for the requested cluster.")
 
         final = concatenate_clips(annotated_clips)
+        audio_clip = getattr(final, "audio", None)
+        if audio_clip is None:
+            logging.debug("final composite has no audio")
+        else:
+            logging.debug(
+                "final composite audio summary: %s containing %d segments",
+                _describe_clip(audio_clip),
+                len(getattr(audio_clip, "clips", []) or []),
+            )
+            segments = getattr(audio_clip, "clips", []) or []
+            for idx, segment in enumerate(segments):
+                logging.debug(
+                    "audio clip %d: %s",
+                    idx,
+                    _describe_clip(segment),
+                )
+                probe_time = max(0.0, min(0.001, float(getattr(segment, "duration", 0.0)) / 2))
+                try:
+                    sample = segment.get_frame(probe_time)
+                except Exception as exc:  # noqa: BLE001
+                    logging.debug("audio clip %d get_frame failed at %s: %s", idx, probe_time, exc)
+                else:
+                    if sample is None:
+                        logging.debug("audio clip %d get_frame(%s) returned None", idx, probe_time)
+                    else:
+                        logging.debug(
+                            "audio clip %d get_frame(%s) sample type=%s shape=%s",
+                            idx,
+                            probe_time,
+                            type(sample),
+                            getattr(sample, "shape", None),
+                        )
+
         logging.info("writing composite video (%s)", output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         write_kwargs = {"codec": "libx264", "audio_codec": "aac"}
