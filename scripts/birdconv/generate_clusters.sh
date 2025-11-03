@@ -27,7 +27,7 @@ echo "==> Step 1: per-channel clustering (validation set)"
 #   --dst_dir "${VAL_OUT}"
 
 echo "==> Step 2: sync training clusters into global registry"
-uv run python src/cluster_regsitry.y sync \
+uv run python src/cluster_regsitry.py sync \
   --registry "${REGISTRY_DB}" \
   --clusters_dir "${TRAIN_OUT}/cluster" \
   --split train \
