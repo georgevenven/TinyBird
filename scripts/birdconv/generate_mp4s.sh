@@ -118,7 +118,7 @@ process_wav() {
 
     mkdir -p "$out_dir"
 
-    local ffmpeg_cmd=("$FFMPEG_BIN" -hide_banner -loglevel error -ss "$start" -i "$source_path" -t "$length")
+    local ffmpeg_cmd=("$FFMPEG_BIN" -ss "$start" -i "$source_path" -t "$length")
 
     if [[ "$orientation" == "swap" ]]; then
         ffmpeg_cmd+=(
@@ -130,9 +130,17 @@ process_wav() {
         ffmpeg_cmd+=(-c:v libx264 -preset veryfast -crf 18 -c:a aac -b:a 192k)
     fi
 
+    # Ensure we see ffmpeg output (override any earlier -loglevel) and write a report file
+    ffmpeg_cmd+=(-loglevel info -report)
+
+    # Output file path
     ffmpeg_cmd+=("$output_path")
 
+    # Show the exact command we are about to run
+    printf '  [CMD] ' ; printf '%q ' "${ffmpeg_cmd[@]}"; echo
     echo "  [GEN] ${filename} -> $(basename "$output_path") (${orientation})"
+
+    # Run it and show all output
     if ! "${ffmpeg_cmd[@]}"; then
         echo "  [FAIL] ffmpeg failed for $filename"
         return 2
@@ -165,19 +173,44 @@ main() {
             echo "  [WARN] directory not found: $wav_dir"
             continue
         fi
-        local count
-        count=$(find "$wav_dir" -type f -name "*.wav" | wc -l | awk '{print $1}')
+        local -a wav_files=()
+        if ! mapfile -d '' -t wav_files < <(
+            WAV_DIR="$wav_dir" python3 - <<'PY'
+import os
+import sys
+
+root = os.environ.get("WAV_DIR")
+if not root or not os.path.isdir(root):
+    sys.exit(0)
+
+paths = []
+for cur_dir, _, files in os.walk(root):
+    for name in files:
+        if name.lower().endswith(".wav"):
+            paths.append(os.path.join(cur_dir, name))
+
+paths.sort()
+if paths:
+    sys.stdout.write("\0".join(paths))
+    sys.stdout.write("\0")
+PY
+        ); then
+            wav_files=()
+        fi
+
+        local count="${#wav_files[@]}"
         if (( count == 0 )); then
             echo "  [INFO] no WAV files found in $wav_dir"
             continue
-        else
-            echo "  [INFO] directory found: $wav_dir $count WAV files"
         fi
 
-        local idx=0
-        while IFS= read -r -d '' wav; do
-            idx=$((idx + 1))
-            printf "[%d/%d] %s\n" "$idx" "$count" "$(basename "$wav")"
+        echo "  [INFO] directory found: $wav_dir $count WAV files"
+
+        local file_idx=0
+        for wav in "${wav_files[@]}"; do
+            file_idx=$((file_idx + 1))
+            printf "[%d/%d] %s\n" "$file_idx" "$count" "$(basename "$wav")"
+            echo "  [INFO] Processing WAV: $wav"
             if process_wav "$wav" "$out_dir"; then
                 ((total_processed++))
             else
@@ -189,7 +222,7 @@ main() {
                     *) ;;
                 esac
             fi
-        done < <(find "$wav_dir" -type f -name "*.wav" -print0 | sort -z)
+        done
     done
 
     echo "Summary:"
