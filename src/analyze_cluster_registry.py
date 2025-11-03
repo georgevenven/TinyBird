@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import pickle
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -48,6 +49,8 @@ class AnalysisArtifacts:
     top_clusters_stats_path: Path
     top_cluster_birds_path: Path
     bird_balance_table_path: Path
+    top_cluster_distance_heatmap: Path
+    top_cluster_distance_matrix: Path
 
 
 def parse_args() -> argparse.Namespace:
@@ -204,6 +207,7 @@ def compute_cluster_stats(
         mean_distance=("distance", "mean"),
         p90_distance=("distance", lambda series: percentile(series, 90.0)),
         has_distance=("has_distance", "any"),
+        unique_files=("file_path", pd.Series.nunique),
     )
     stats.index.name = "cluster_id"
     clusters_meta = clusters_df.rename(columns={"id": "cluster_id", "member_count": "registry_member_count"})
@@ -463,6 +467,8 @@ def summarize_top_cluster_birds(
     summary_df["max_length"] = top_stats["max_length"]
     summary_df["p90_distance"] = top_stats["p90_distance"]
     summary_df["window"] = top_stats["window"]
+    if "unique_files" in top_stats:
+        summary_df["unique_files"] = top_stats["unique_files"]
     return summary_df, bird_counts, top_members
 
 
@@ -634,6 +640,151 @@ def compute_bird_balance(
     combined.reset_index(inplace=True)
     combined.rename(columns={"index": "bird"}, inplace=True)
     return combined
+
+
+def _deserialize_exemplar(blob: bytes) -> np.ndarray:
+    return pickle.loads(blob)
+
+
+def _normalize_vector(array: np.ndarray) -> np.ndarray:
+    vec = np.asarray(array, dtype=np.float64).ravel()
+    if vec.size == 0:
+        return vec
+    mean = np.mean(vec)
+    std = np.std(vec)
+    if std < 1e-8:
+        return vec - mean
+    return (vec - mean) / std
+
+
+def load_prototypes_for_clusters(clusters_df: pd.DataFrame, cluster_ids: Iterable[int]) -> dict[int, dict]:
+    subset = clusters_df[clusters_df["id"].isin(list(cluster_ids))]
+    prototypes: dict[int, dict] = {}
+    for _, row in subset.iterrows():
+        cluster_id = int(row["id"])
+        dims = json.loads(row["dims"]) if row["dims"] else []
+        dims_arr = np.asarray(dims, dtype=np.int32)
+        exemplar_blob = row["exemplar"]
+        exemplar = _deserialize_exemplar(exemplar_blob)
+        if dims_arr.size == 0 and exemplar.ndim == 2:
+            dims_arr = np.arange(exemplar.shape[0], dtype=np.int32)
+        prototypes[cluster_id] = {
+            "dims": dims_arr,
+            "window": int(row["window"]),
+            "exemplar": np.asarray(exemplar, dtype=np.float64),
+        }
+    return prototypes
+
+
+def build_distance_matrix(
+    prototypes: dict[int, dict],
+    ordered_ids: list[int],
+) -> np.ndarray:
+    n = len(ordered_ids)
+    matrix = np.full((n, n), np.nan, dtype=np.float64)
+    vectors: dict[int, np.ndarray] = {}
+    windows: dict[int, int] = {}
+    for cluster_id in ordered_ids:
+        proto = prototypes.get(cluster_id)
+        if not proto:
+            continue
+        exemplar = proto["exemplar"]
+        dims = proto["dims"]
+        if exemplar.ndim == 2 and dims.size and dims.size == exemplar.shape[0]:
+            selected = exemplar
+        else:
+            selected = exemplar
+            if exemplar.ndim == 3:
+                selected = exemplar.reshape(exemplar.shape[0], -1)
+        vectors[cluster_id] = _normalize_vector(selected)
+        windows[cluster_id] = proto["window"]
+
+    for i in range(n):
+        cid_i = ordered_ids[i]
+        vec_i = vectors.get(cid_i)
+        win_i = windows.get(cid_i)
+        if vec_i is None:
+            continue
+        for j in range(i + 1, n):
+            cid_j = ordered_ids[j]
+            vec_j = vectors.get(cid_j)
+            win_j = windows.get(cid_j)
+            if vec_j is None or win_i != win_j or vec_i.size != vec_j.size:
+                continue
+            dist = float(np.linalg.norm(vec_i - vec_j))
+            matrix[i, j] = dist
+            matrix[j, i] = dist
+    np.fill_diagonal(matrix, 0.0)
+    return matrix
+
+
+def order_distance_matrix(distance_matrix: np.ndarray) -> list[int]:
+    n = distance_matrix.shape[0]
+    if n == 0:
+        return []
+    order = [0]
+    visited = np.zeros(n, dtype=bool)
+    visited[0] = True
+    for _ in range(1, n):
+        last = order[-1]
+        row = distance_matrix[last].copy()
+        row[np.isnan(row)] = np.inf
+        row[visited] = np.inf
+        if np.all(np.isinf(row)):
+            next_idx_candidates = np.where(~visited)[0]
+            if next_idx_candidates.size == 0:
+                break
+            next_idx = int(next_idx_candidates[0])
+        else:
+            next_idx = int(np.argmin(row))
+        order.append(next_idx)
+        visited[next_idx] = True
+    return order
+
+
+def plot_distance_heatmap(
+    distance_matrix: np.ndarray,
+    cluster_ids: list[int],
+    output_path: Path,
+) -> None:
+    if distance_matrix.size == 0:
+        LOG.warning("Distance matrix empty; skipping heatmap.")
+        return
+    finite = distance_matrix[np.isfinite(distance_matrix)]
+    fill_value = float(np.nanmax(finite)) if finite.size else 0.0
+    remapped = np.where(np.isnan(distance_matrix), fill_value, distance_matrix)
+    mask = np.isnan(distance_matrix)
+    data = np.ma.array(remapped, mask=mask)
+    n = distance_matrix.shape[0]
+    fig_size = max(6, min(18, n * 0.35))
+    fig, ax = plt.subplots(figsize=(fig_size, fig_size))
+    cmap = plt.cm.get_cmap("magma").copy()
+    cmap.set_bad(color="lightgrey")
+    im = ax.imshow(data, cmap=cmap, interpolation="nearest")
+    ax.set_xticks(np.arange(n))
+    ax.set_yticks(np.arange(n))
+    ax.set_xticklabels(cluster_ids, rotation=90, fontsize="small")
+    ax.set_yticklabels(cluster_ids, fontsize="small")
+    ax.set_xlabel("Cluster id")
+    ax.set_ylabel("Cluster id")
+    ax.set_title("Top coverage clusters similarity (Euclidean distance)")
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="Distance")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+    LOG.info("Saved cluster distance heatmap to %s", output_path)
+
+
+def write_distance_matrix_csv(
+    distance_matrix: np.ndarray,
+    cluster_ids: list[int],
+    output_path: Path,
+) -> None:
+    if distance_matrix.size == 0:
+        return
+    df = pd.DataFrame(distance_matrix, index=cluster_ids, columns=cluster_ids)
+    df.to_csv(output_path)
+    LOG.info("Wrote cluster distance matrix to %s", output_path)
 
 
 def plot_bird_balance(
@@ -817,6 +968,8 @@ def main() -> None:
     top_cluster_bird_plot = output_dir / "top_clusters_dominant_birds.png"
     bird_balance_plot = output_dir / "bird_share_comparison.png"
     bird_balance_ratio_plot = output_dir / "bird_representation_ratio.png"
+    top_cluster_distance_heatmap = output_dir / "top_clusters_distance_heatmap.png"
+    top_cluster_distance_matrix = output_dir / "top_clusters_distance_matrix.csv"
     top_clusters_stats_path = output_dir / "top_clusters_summary.csv"
     top_cluster_birds_path = output_dir / "top_clusters_bird_distribution.csv"
     bird_balance_table_path = output_dir / "bird_balance_table.csv"
@@ -835,6 +988,21 @@ def main() -> None:
     plot_top_cluster_bird_specificity(top_summary, top_cluster_bird_plot)
     balance_df = compute_bird_balance(members_df, top_members)
     plot_bird_balance(balance_df, bird_balance_plot, bird_balance_ratio_plot)
+
+    distance_order_ids = list(top_summary.index)
+    distance_matrix = np.empty((0, 0))
+    if distance_order_ids:
+        prototypes = load_prototypes_for_clusters(clusters_df, distance_order_ids)
+        distance_matrix = build_distance_matrix(prototypes, distance_order_ids)
+        if distance_matrix.size:
+            order_indices = order_distance_matrix(distance_matrix)
+            ordered_ids = [distance_order_ids[idx] for idx in order_indices]
+            reordered_matrix = distance_matrix[np.ix_(order_indices, order_indices)]
+            plot_distance_heatmap(reordered_matrix, ordered_ids, top_cluster_distance_heatmap)
+            write_distance_matrix_csv(reordered_matrix, ordered_ids, top_cluster_distance_matrix)
+        else:
+            distance_matrix = np.empty((0, 0))
+            LOG.info("Distance matrix unavailable; heatmap skipped.")
 
     noise_candidates = detect_noise_clusters(
         cluster_stats,
@@ -858,6 +1026,8 @@ def main() -> None:
         top_clusters_stats_path=top_clusters_stats_path,
         top_cluster_birds_path=top_cluster_birds_path,
         bird_balance_table_path=bird_balance_table_path,
+        top_cluster_distance_heatmap=top_cluster_distance_heatmap,
+        top_cluster_distance_matrix=top_cluster_distance_matrix,
     )
 
     write_summary(
@@ -895,6 +1065,8 @@ def main() -> None:
             "top_cluster_bird_plot": str(top_cluster_bird_plot),
             "bird_balance_plot": str(bird_balance_plot),
             "bird_balance_ratio_plot": str(bird_balance_ratio_plot),
+            "top_cluster_distance_heatmap": str(top_cluster_distance_heatmap),
+            "top_cluster_distance_matrix": str(top_cluster_distance_matrix),
             "summary": str(summary_path),
             "cluster_stats": str(cluster_stats_path),
             "noise_candidates": str(noise_candidates_path),
