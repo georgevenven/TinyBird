@@ -19,7 +19,8 @@ import numpy as np
 import matplotlib
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
+import matplotlib.font_manager as font_manager  # noqa: E402
+from PIL import Image, ImageDraw, ImageFont  # noqa: E402
 
 from moviepy import CompositeAudioClip, CompositeVideoClip, ImageClip, VideoFileClip  # noqa: E402
 
@@ -397,6 +398,63 @@ def _subclip_video(base_clip: VideoFileClip, start: float, end: float) -> VideoF
     raise AttributeError("moviepy installation lacks subclip/time_slice support")
 
 
+_FONT_CACHE: dict[tuple[int, bool], ImageFont.ImageFont] = {}
+
+
+def _line_height(font: ImageFont.ImageFont) -> int:
+    try:
+        ascent, descent = font.getmetrics()
+        return ascent + descent
+    except Exception:  # noqa: BLE001
+        bbox = font.getbbox("Hg")
+        return max(1, bbox[3] - bbox[1])
+
+
+def _load_font(size: int, *, bold: bool = False) -> ImageFont.ImageFont:
+    key = (size, bold)
+    if key not in _FONT_CACHE:
+        family = "DejaVu Sans Bold" if bold else "DejaVu Sans"
+        path = font_manager.findfont(family, fallback_to_default=True)
+        try:
+            font = ImageFont.truetype(path, size=size)
+        except (OSError, ValueError):
+            font = ImageFont.load_default()
+        _FONT_CACHE[key] = font
+    return _FONT_CACHE[key]
+
+
+def _wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_width: int) -> list[str]:
+    if not text:
+        return []
+    words = text.split()
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if not candidate:
+            continue
+        if draw.textlength(candidate, font=font) <= max_width:
+            current = candidate
+            continue
+        if current:
+            lines.append(current)
+        if draw.textlength(word, font=font) <= max_width:
+            current = word
+        else:
+            chunk = ""
+            for char in word:
+                trial = chunk + char
+                if draw.textlength(trial, font=font) > max_width and chunk:
+                    lines.append(chunk)
+                    chunk = char
+                else:
+                    chunk = trial
+            current = chunk
+    if current:
+        lines.append(current)
+    return lines
+
+
 def generate_label_array(
     text: str,
     width: int,
@@ -408,47 +466,70 @@ def generate_label_array(
         width = 640
     if height is None:
         height = max(60, int(width * 0.06))
-    dpi = 150
+    width = int(width)
+    height = int(height)
+    margin = max(int(min(width, height) * 0.1), 12)
+    max_text_width = max(1, width - 2 * margin)
 
-    fig = plt.figure(figsize=(width / dpi, height / dpi), dpi=dpi, facecolor="black")
-    fig.patch.set_alpha(0.6)
-    ax = fig.add_axes([0.05, 0.05, 0.9, 0.9])
-    ax.axis("off")
-    ax.set_xlim(0, 1)
-    ax.set_ylim(0, 1)
+    image = Image.new("RGB", (width, height), color=(0, 0, 0))
+    draw = ImageDraw.Draw(image)
+
     align = align.lower()
     if align not in {"left", "center", "right"}:
         align = "center"
-    x_coord = {"left": 0.0, "center": 0.5, "right": 1.0}[align]
-
     lines = text.splitlines() or [text]
-    base_size = max(16, int(height * 0.38))
-    for idx, line in enumerate(lines):
-        if not line:
-            continue
-        y = 1.0 - (idx + 1) / (len(lines) + 1)
-        size = base_size if idx else int(base_size * 1.15)
-        ax.text(
-            x_coord,
-            y,
-            line,
-            ha=align,
-            va="center",
-            color="white",
-            fontsize=size,
-            fontweight="bold" if idx == 0 else "normal",
-            wrap=True,
-        )
-    fig.canvas.draw()
-    canvas = fig.canvas
-    try:
-        raw = canvas.tostring_rgb()  # Matplotlib <=3.9
-        buf = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3))
-    except AttributeError:
-        rgba = np.asarray(canvas.buffer_rgba())
-        buf = rgba[..., :3].copy()
-    plt.close(fig)
-    return buf
+    header = lines[0].strip() if lines else ""
+    body = " ".join(line.strip() for line in lines[1:] if line.strip())
+
+    y = margin
+    remaining_height = height - margin
+
+    if header:
+        header_limit = max(int(remaining_height * 0.45), 18)
+        header_font = _load_font(header_limit, bold=True)
+        for size in range(header_limit, 12, -1):
+            header_font = _load_font(size, bold=True)
+            if draw.textlength(header, font=header_font) <= max_text_width:
+                break
+        header_height = _line_height(header_font)
+        if header_height > remaining_height:
+            header_height = remaining_height
+        header_width = draw.textlength(header, font=header_font)
+        if align == "left":
+            x = margin
+        elif align == "right":
+            x = max(margin, width - margin - header_width)
+        else:
+            x = (width - header_width) / 2
+        draw.text((x, y), header, font=header_font, fill=(255, 255, 255))
+        y += header_height + max(4, int(header_font.size * 0.25))
+        remaining_height = max(0, height - y - margin)
+
+    if body and remaining_height > 0:
+        max_body_size = max(int(remaining_height * 0.35), 14)
+        body_font = _load_font(max_body_size, bold=False)
+        body_lines = _wrap_text(draw, body, body_font, max_text_width)
+        for size in range(max_body_size, 10, -1):
+            body_font = _load_font(size, bold=False)
+            body_lines = _wrap_text(draw, body, body_font, max_text_width)
+            line_height = _line_height(body_font)
+            spacing = max(4, int(body_font.size * 0.25))
+            body_height = len(body_lines) * line_height + max(0, len(body_lines) - 1) * spacing
+            if body_height <= remaining_height:
+                break
+        spacing = max(4, int(body_font.size * 0.25))
+        for line in body_lines:
+            line_width = draw.textlength(line, font=body_font)
+            if align == "left":
+                x = margin
+            elif align == "right":
+                x = max(margin, width - margin - line_width)
+            else:
+                x = (width - line_width) / 2
+            draw.text((x, y), line, font=body_font, fill=(220, 220, 220))
+            y += _line_height(body_font) + spacing
+
+    return np.asarray(image)
 
 
 def annotate_clip(clip: VideoFileClip, plan: ClipPlan, cluster_id: int) -> CompositeVideoClip:
