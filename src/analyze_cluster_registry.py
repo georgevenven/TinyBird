@@ -96,6 +96,19 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable verbose logging.",
     )
+    parser.add_argument(
+        "--debug-cluster",
+        dest="debug_clusters",
+        type=int,
+        action="append",
+        help="Cluster IDs to export detailed unique-block diagnostics for. Repeat for multiple clusters.",
+    )
+    parser.add_argument(
+        "--debug-max-rows",
+        type=int,
+        default=1000,
+        help="Maximum rows per cluster to include in debug outputs; set to 0 for no limit.",
+    )
     return parser.parse_args()
 
 
@@ -491,7 +504,147 @@ def summarize_top_cluster_birds(
         summary_df["unique_files"] = top_stats["unique_files"]
     if "unique_blocks" in top_stats:
         summary_df["unique_blocks"] = top_stats["unique_blocks"]
+        summary_df["duplicate_block_assignments"] = summary_df["member_count"] - summary_df["unique_blocks"]
     return summary_df, bird_counts, top_members
+
+
+def export_unique_block_debug(
+    members_df: pd.DataFrame,
+    top_summary: pd.DataFrame,
+    output_dir: Path,
+    cluster_ids: Iterable[int],
+    row_limit: int,
+) -> None:
+    cluster_ids = [int(cid) for cid in cluster_ids if cid is not None]
+    if not cluster_ids:
+        return
+    # Preserve ordering while removing duplicates
+    seen: set[int] = set()
+    ordered_ids: list[int] = []
+    for cid in cluster_ids:
+        if cid not in seen:
+            seen.add(cid)
+            ordered_ids.append(cid)
+
+    debug_dir = output_dir / "debug"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+
+    def _format_block_key(key: object) -> str:
+        if isinstance(key, tuple) and len(key) == 4:
+            file_path, channel, start, end = key
+            start_val = f"{start:.6f}" if isinstance(start, (int, float)) and not pd.isna(start) else start
+            end_val = f"{end:.6f}" if isinstance(end, (int, float)) and not pd.isna(end) else end
+            return f"{file_path} | ch={channel} | start={start_val} | end={end_val}"
+        return str(key)
+
+    summary_rows: list[dict[str, object]] = []
+    for cluster_id in ordered_ids:
+        cluster_members = members_df[members_df["cluster_id"] == cluster_id].copy()
+        if cluster_members.empty:
+            LOG.warning("Debug requested for cluster %d but no members were found.", cluster_id)
+            continue
+        if "block_key" not in cluster_members.columns:
+            LOG.warning("Cluster %d members missing block_key column; skipping debug export.", cluster_id)
+            continue
+
+        cluster_members = cluster_members.reset_index(drop=True)
+        cluster_members["block_key_tuple"] = cluster_members["block_key"]
+        cluster_members["block_key_occurrences"] = cluster_members.groupby("block_key_tuple")["block_key_tuple"].transform("size")
+
+        block_components = cluster_members["block_key_tuple"].apply(pd.Series)
+        block_components.columns = [
+            "bk_file_path",
+            "bk_channel_index",
+            "bk_start_col_norm",
+            "bk_end_col_norm",
+        ]
+        cluster_members = pd.concat([cluster_members, block_components], axis=1)
+        cluster_members["block_key_repr"] = cluster_members["block_key_tuple"].apply(_format_block_key)
+
+        if {"file_path", "channel_index", "block_index"}.issubset(cluster_members.columns):
+            triplets = list(
+                zip(
+                    cluster_members["file_path"],
+                    cluster_members["channel_index"],
+                    cluster_members["block_index"],
+                )
+            )
+            unique_triplets = len(set(triplets))
+            cluster_members["file_channel_block"] = triplets
+        else:
+            unique_triplets = np.nan
+
+        unique_blocks = int(cluster_members["block_key_tuple"].nunique())
+        member_count = int(cluster_members.shape[0])
+        reported_unique = float("nan")
+        if "unique_blocks" in top_summary.columns and cluster_id in top_summary.index:
+            reported_value = top_summary.loc[cluster_id, "unique_blocks"]
+            if pd.notna(reported_value):
+                reported_unique = float(reported_value)
+
+        detail_path = debug_dir / f"cluster_{cluster_id}_members.csv"
+        unique_path = debug_dir / f"cluster_{cluster_id}_unique_block_keys.csv"
+
+        export_df = cluster_members.drop(columns=["block_key", "block_key_tuple"], errors="ignore")
+        truncated = False
+        if row_limit and row_limit > 0 and len(export_df) > row_limit:
+            export_df = export_df.head(row_limit)
+            truncated = True
+        export_df.to_csv(detail_path, index=False)
+
+        unique_details = (
+            cluster_members.groupby("block_key_tuple")
+            .agg(
+                assignments=pd.NamedAgg(column="cluster_id", aggfunc="size"),
+                min_block_index=pd.NamedAgg(column="block_index", aggfunc="min"),
+                max_block_index=pd.NamedAgg(column="block_index", aggfunc="max"),
+            )
+            .reset_index()
+        )
+        unique_components = unique_details["block_key_tuple"].apply(pd.Series)
+        unique_components.columns = [
+            "bk_file_path",
+            "bk_channel_index",
+            "bk_start_col_norm",
+            "bk_end_col_norm",
+        ]
+        unique_details = pd.concat(
+            [unique_components, unique_details.drop(columns=["block_key_tuple"])],
+            axis=1,
+        ).sort_values("assignments", ascending=False)
+        if row_limit and row_limit > 0 and len(unique_details) > row_limit:
+            unique_details = unique_details.head(row_limit)
+        unique_details.to_csv(unique_path, index=False)
+
+        duplicates = member_count - unique_blocks
+        summary_rows.append(
+            {
+                "cluster_id": cluster_id,
+                "member_count": member_count,
+                "unique_blocks_reported": reported_unique,
+                "unique_blocks_recomputed": unique_blocks,
+                "unique_file_channel_block_triplets": unique_triplets,
+                "duplicate_assignments": duplicates,
+                "members_csv": detail_path.name,
+                "unique_block_keys_csv": unique_path.name,
+                "truncated_members": truncated,
+            }
+        )
+        LOG.info(
+            "Debug unique-block export for cluster %d -> members=%d, unique_block_keys=%d (reported=%s); members=%s, unique_keys=%s",
+            cluster_id,
+            member_count,
+            unique_blocks,
+            "nan" if pd.isna(reported_unique) else f"{reported_unique:.0f}",
+            detail_path,
+            unique_path,
+        )
+
+    if summary_rows:
+        overview = pd.DataFrame(summary_rows)
+        overview_path = debug_dir / "unique_block_debug_index.csv"
+        overview.to_csv(overview_path, index=False)
+        LOG.info("Wrote unique block debug index to %s", overview_path)
 
 
 def plot_top_cluster_sizes(top_stats: pd.DataFrame, output_path: Path) -> None:
@@ -966,6 +1119,12 @@ def write_tables(
 def main() -> None:
     args = parse_args()
     setup_logging(args.verbose)
+    debug_clusters: list[int] = list(args.debug_clusters) if args.debug_clusters else []
+    if debug_clusters:
+        LOG.info(
+            "Unique block debugging enabled for clusters: %s",
+            ", ".join(str(cid) for cid in debug_clusters),
+        )
 
     output_dir = ensure_output_dir(args.output_dir)
     clusters_df, members_df = load_tables(args.registry)
@@ -1075,6 +1234,15 @@ def main() -> None:
         balance_df,
         artifacts,
     )
+
+    if debug_clusters:
+        export_unique_block_debug(
+            members_df,
+            top_summary,
+            output_dir,
+            debug_clusters,
+            args.debug_max_rows,
+        )
 
     metadata = {
         "registry": str(args.registry),
