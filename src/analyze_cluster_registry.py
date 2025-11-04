@@ -240,16 +240,34 @@ def compute_cluster_stats(
         p90_distance=("distance", lambda series: percentile(series, 90.0)),
         has_distance=("has_distance", "any"),
         unique_files=("file_path", pd.Series.nunique),
-        unique_blocks=("block_key", pd.Series.nunique),
     )
     stats.index.name = "cluster_id"
+
+    key_columns = ["cluster_id", "file_path", "channel_index", "start_col_norm", "end_col_norm"]
+    block_keys = members_df[key_columns].drop_duplicates()
+    unique_block_counts = (
+        block_keys.groupby("cluster_id").size().rename("unique_blocks")
+    )
+
+    triplet_columns = ["cluster_id", "file_path", "channel_index", "block_index"]
+    block_triplets = members_df[triplet_columns].drop_duplicates()
+    unique_triplet_counts = (
+        block_triplets.groupby("cluster_id").size().rename("unique_file_channel_block_triplets")
+    )
+
     clusters_meta = clusters_df.rename(columns={"id": "cluster_id", "member_count": "registry_member_count"})
     stats = stats.merge(
         clusters_meta[["cluster_id", "registry_member_count", "window"]],
         on="cluster_id",
         how="left",
     )
+    stats = stats.join(unique_block_counts, on="cluster_id")
+    stats = stats.join(unique_triplet_counts, on="cluster_id")
     stats["member_count"] = stats["samples"]
+    stats["unique_blocks"] = stats["unique_blocks"].fillna(0).astype(int)
+    stats["unique_file_channel_block_triplets"] = (
+        stats["unique_file_channel_block_triplets"].fillna(0).astype(int)
+    )
     median_lengths = stats["median_length"].fillna(0)
     stats["median_length_clamped"] = median_lengths.clip(lower=min_density_length)
     stats["density"] = stats["member_count"] / stats["median_length_clamped"]
@@ -458,6 +476,21 @@ def summarize_top_cluster_birds(
     top_members = members_df[members_df["cluster_id"].isin(cluster_ids)].copy()
     top_members["bird"] = top_members["bird"].fillna("unknown")
 
+    unique_block_counts = (
+        top_members[["cluster_id", "file_path", "channel_index", "start_col_norm", "end_col_norm"]]
+        .drop_duplicates()
+        .groupby("cluster_id")
+        .size()
+        .rename("unique_blocks")
+    )
+    unique_triplet_counts = (
+        top_members[["cluster_id", "file_path", "channel_index", "block_index"]]
+        .drop_duplicates()
+        .groupby("cluster_id")
+        .size()
+        .rename("unique_file_channel_block_triplets")
+    )
+
     bird_counts = (
         top_members.groupby(["cluster_id", "bird"])
         .size()
@@ -502,9 +535,11 @@ def summarize_top_cluster_birds(
     summary_df["window"] = top_stats["window"]
     if "unique_files" in top_stats:
         summary_df["unique_files"] = top_stats["unique_files"]
-    if "unique_blocks" in top_stats:
-        summary_df["unique_blocks"] = top_stats["unique_blocks"]
-        summary_df["duplicate_block_assignments"] = summary_df["member_count"] - summary_df["unique_blocks"]
+    summary_df["unique_blocks"] = unique_block_counts.reindex(summary_df.index).fillna(0).astype(int)
+    summary_df["unique_file_channel_block_triplets"] = (
+        unique_triplet_counts.reindex(summary_df.index).fillna(0).astype(int)
+    )
+    summary_df["duplicate_block_assignments"] = summary_df["member_count"] - summary_df["unique_blocks"]
     return summary_df, bird_counts, top_members
 
 
@@ -561,26 +596,39 @@ def export_unique_block_debug(
         cluster_members = pd.concat([cluster_members, block_components], axis=1)
         cluster_members["block_key_repr"] = cluster_members["block_key_tuple"].apply(_format_block_key)
 
+        unique_key_subset = ["file_path", "channel_index", "start_col_norm", "end_col_norm"]
+        unique_blocks = (
+            cluster_members[["cluster_id", *unique_key_subset]]
+            .drop_duplicates()
+            .shape[0]
+        )
         if {"file_path", "channel_index", "block_index"}.issubset(cluster_members.columns):
-            triplets = list(
+            triplet_subset = ["cluster_id", "file_path", "channel_index", "block_index"]
+            unique_triplets = (
+                cluster_members[triplet_subset]
+                .drop_duplicates()
+                .shape[0]
+            )
+            cluster_members["file_channel_block"] = list(
                 zip(
                     cluster_members["file_path"],
                     cluster_members["channel_index"],
                     cluster_members["block_index"],
                 )
             )
-            unique_triplets = len(set(triplets))
-            cluster_members["file_channel_block"] = triplets
         else:
             unique_triplets = np.nan
-
-        unique_blocks = int(cluster_members["block_key_tuple"].nunique())
         member_count = int(cluster_members.shape[0])
         reported_unique = float("nan")
+        reported_triplets = float("nan")
         if "unique_blocks" in top_summary.columns and cluster_id in top_summary.index:
             reported_value = top_summary.loc[cluster_id, "unique_blocks"]
             if pd.notna(reported_value):
                 reported_unique = float(reported_value)
+        if "unique_file_channel_block_triplets" in top_summary.columns and cluster_id in top_summary.index:
+            triplet_value = top_summary.loc[cluster_id, "unique_file_channel_block_triplets"]
+            if pd.notna(triplet_value):
+                reported_triplets = float(triplet_value)
 
         detail_path = debug_dir / f"cluster_{cluster_id}_members.csv"
         unique_path = debug_dir / f"cluster_{cluster_id}_unique_block_keys.csv"
@@ -624,6 +672,7 @@ def export_unique_block_debug(
                 "unique_blocks_reported": reported_unique,
                 "unique_blocks_recomputed": unique_blocks,
                 "unique_file_channel_block_triplets": unique_triplets,
+                "unique_file_channel_block_triplets_reported": reported_triplets,
                 "duplicate_assignments": duplicates,
                 "members_csv": detail_path.name,
                 "unique_block_keys_csv": unique_path.name,
