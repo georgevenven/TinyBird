@@ -62,18 +62,22 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             file_path TEXT NOT NULL,
             channel_index INTEGER NOT NULL,
             block_index INTEGER NOT NULL,
-            start_col INTEGER NOT NULL,
-            end_col INTEGER NOT NULL,
+            start_col REAL NOT NULL,
+            end_col REAL NOT NULL,
             split TEXT NOT NULL,
             distance REAL NOT NULL,
             source_pickle TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(file_path, channel_index, block_index),
+            UNIQUE(file_path, channel_index, start_col, end_col),
             FOREIGN KEY(cluster_id) REFERENCES clusters(id)
         )
         """
     )
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_members_cluster ON members(cluster_id)")
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_members_block_identity "
+        "ON members(file_path, channel_index, start_col, end_col)"
+    )
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_channel_clusters_global ON channel_clusters(global_cluster_id)")
     connection.commit()
 
@@ -248,6 +252,81 @@ def _upsert_channel_cluster(
     connection.commit()
 
 
+def _claim_member_block(
+    connection: sqlite3.Connection,
+    cluster_id: int,
+    file_path: Path,
+    channel_index: int,
+    block_index: int,
+    start_col: float,
+    end_col: float,
+    split: str,
+    distance: float,
+    source_pickle: Path,
+) -> bool:
+    cursor = connection.cursor()
+    cursor.execute(
+        """
+        SELECT id, cluster_id
+        FROM members
+        WHERE file_path = ? AND channel_index = ? AND start_col = ? AND end_col = ?
+        """,
+        (str(file_path), channel_index, float(start_col), float(end_col)),
+    )
+    existing = cursor.fetchone()
+    if existing:
+        member_id, existing_cluster = map(int, existing)
+        if existing_cluster == cluster_id:
+            cursor.execute(
+                """
+                UPDATE members
+                SET block_index = ?, split = ?, distance = ?, source_pickle = ?
+                WHERE id = ?
+                """,
+                (block_index, split, float(distance), str(source_pickle), member_id),
+            )
+            return True
+        cursor.execute("DELETE FROM members WHERE id = ?", (member_id,))
+        cursor.execute(
+            """
+            UPDATE clusters
+            SET member_count = CASE WHEN member_count > 0 THEN member_count - 1 ELSE 0 END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (existing_cluster,),
+        )
+
+    cursor.execute(
+        """
+        INSERT INTO members
+        (cluster_id, file_path, channel_index, block_index, start_col, end_col, split, distance, source_pickle)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            cluster_id,
+            str(file_path),
+            channel_index,
+            block_index,
+            float(start_col),
+            float(end_col),
+            split,
+            float(distance),
+            str(source_pickle),
+        ),
+    )
+    cursor.execute(
+        """
+        UPDATE clusters
+        SET member_count = member_count + 1,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (cluster_id,),
+    )
+    return True
+
+
 def _upsert_member_records(
     connection: sqlite3.Connection,
     cluster_id: int,
@@ -259,43 +338,27 @@ def _upsert_member_records(
     if global_assignments is None or global_assignments.shape[0] != block_cluster_ids.shape[0]:
         global_assignments = np.full(block_cluster_ids.shape, -1, dtype=np.int32)
 
-    cursor = connection.cursor()
-    members_inserted = 0
+    changed = False
     for block_index in local_cluster.member_blocks:
         start, end = map(int, local_cluster.intervals[block_index])
-        cursor.execute(
-            """
-            INSERT OR IGNORE INTO members
-            (cluster_id, file_path, channel_index, block_index, start_col, end_col, split, distance, source_pickle)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                cluster_id,
-                str(local_cluster.file_path),
-                local_cluster.channel_index,
-                int(block_index),
-                start,
-                end,
-                local_cluster.split,
-                0.0,
-                str(local_cluster.pickle_path),
-            ),
+        mutated = _claim_member_block(
+            connection=connection,
+            cluster_id=cluster_id,
+            file_path=local_cluster.file_path,
+            channel_index=local_cluster.channel_index,
+            block_index=int(block_index),
+            start_col=float(start),
+            end_col=float(end),
+            split=local_cluster.split,
+            distance=0.0,
+            source_pickle=local_cluster.pickle_path,
         )
-        if cursor.rowcount:
-            members_inserted += 1
+        changed = changed or mutated
         global_assignments[block_index] = cluster_id
 
-    if members_inserted:
-        cursor.execute(
-            """
-            UPDATE clusters
-            SET member_count = member_count + ?, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-            """,
-            (members_inserted, cluster_id),
-        )
     payload["global_assignments"] = global_assignments.astype(np.int32)
-    connection.commit()
+    if changed:
+        connection.commit()
 
 
 def _save_pickle(path: Path, payload: dict) -> None:
@@ -436,7 +499,6 @@ def command_reclassify(args: argparse.Namespace) -> None:
         split = meta.get("split", "unspecified")
 
         changed = False
-        new_members: List[tuple[int, int, int, int]] = []  # (cluster_id, block_index, start, end)
         for block_index, (cluster_id, global_id) in enumerate(zip(block_cluster_ids, global_assignments)):
             if cluster_id >= 0 or global_id >= 0:
                 continue
@@ -456,36 +518,22 @@ def command_reclassify(args: argparse.Namespace) -> None:
                     best_match = cluster.cluster_id
             if best_match is not None:
                 global_assignments[block_index] = best_match
-                new_members.append((best_match, block_index, int(start), int(end)))
-                changed = True
+                mutated = _claim_member_block(
+                    connection=connection,
+                    cluster_id=best_match,
+                    file_path=file_path,
+                    channel_index=channel_index,
+                    block_index=int(block_index),
+                    start_col=float(start),
+                    end_col=float(end),
+                    split=split,
+                    distance=best_distance if np.isfinite(best_distance) else 0.0,
+                    source_pickle=pickle_path,
+                )
+                changed = changed or mutated
         if changed:
             payload["global_assignments"] = global_assignments.astype(np.int32)
             _save_pickle(pickle_path, payload)
-            cursor = connection.cursor()
-            for cluster_id, block_index, start, end in new_members:
-                cursor.execute(
-                    """
-                    INSERT OR IGNORE INTO members
-                    (cluster_id, file_path, channel_index, block_index, start_col, end_col, split, distance, source_pickle)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        cluster_id,
-                        str(file_path),
-                        channel_index,
-                        block_index,
-                        start,
-                        end,
-                        split,
-                        0.0,
-                        str(pickle_path),
-                    ),
-                )
-                if cursor.rowcount:
-                    cursor.execute(
-                        "UPDATE clusters SET member_count = member_count + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                        (cluster_id,),
-                    )
             connection.commit()
             processed += 1
 
