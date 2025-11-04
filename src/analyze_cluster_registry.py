@@ -173,37 +173,36 @@ def assign_bird_labels(members_df: pd.DataFrame) -> pd.DataFrame:
     ]
     return members_df
 
-
 def enrich_members(members_df: pd.DataFrame) -> pd.DataFrame:
     members_df = members_df.copy()
-    int_columns = ("channel_index", "cluster_id", "block_index")
-    for column in int_columns:
-        members_df[column] = members_df[column].fillna(0).astype(np.int64)
-    float_columns = ("start_col", "end_col")
-    for column in float_columns:
-        members_df[column] = pd.to_numeric(members_df[column], errors="coerce")
+
+    # Keep channel / cluster / block indices as integers
+    for column in ("channel_index", "cluster_id", "block_index"):
+        members_df[column] = (
+            pd.to_numeric(members_df[column], errors="coerce")
+            .fillna(0)
+            .astype(np.int64)
+        )
+
+    # Preserve precise column positions as floats
+    members_df["start_col"] = pd.to_numeric(members_df["start_col"], errors="coerce")
+    members_df["end_col"] = pd.to_numeric(members_df["end_col"], errors="coerce")
+    members_df["start_col_norm"] = members_df["start_col"].round(6)
+    members_df["end_col_norm"] = members_df["end_col"].round(6)
+
     members_df["distance"] = pd.to_numeric(members_df["distance"], errors="coerce")
-    start_cols = pd.to_numeric(members_df["start_col"], errors="coerce").astype(float)
-    end_cols = pd.to_numeric(members_df["end_col"], errors="coerce").astype(float)
-    start_norm = start_cols.round(6)
-    end_norm = end_cols.round(6)
-    members_df["start_col"] = start_cols
-    members_df["end_col"] = end_cols
-    members_df["start_col_norm"] = start_norm
-    members_df["end_col_norm"] = end_norm
-    lengths = end_cols - start_cols
+    lengths = members_df["end_col"] - members_df["start_col"]
     members_df["block_length"] = lengths.clip(lower=0)
     members_df["has_distance"] = members_df["distance"].notna()
     members_df["block_key"] = list(
         zip(
             members_df["file_path"],
             members_df["channel_index"],
-            start_norm,
-            end_norm,
+            members_df["start_col_norm"],
+            members_df["end_col_norm"],
         )
     )
     return members_df
-
 
 def compute_cluster_stats(
     members_df: pd.DataFrame,
