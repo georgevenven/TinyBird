@@ -299,6 +299,33 @@ def _claim_member_block(
 
     cursor.execute(
         """
+        SELECT id, cluster_id, start_col, end_col
+        FROM members
+        WHERE file_path = ?
+          AND channel_index = ?
+          AND NOT (? <= start_col OR ? >= end_col)
+        LIMIT 1
+        """,
+        (
+            str(file_path),
+            channel_index,
+            float(end_col),
+            float(start_col),
+        ),
+    )
+    overlap = cursor.fetchone()
+    if overlap:
+        existing_id, existing_cluster, existing_start, existing_end = overlap
+        raise ValueError(
+            "Overlapping block assignment detected: "
+            f"{file_path} ch={channel_index} "
+            f"[{start_col}, {end_col}) conflicts with existing "
+            f"cluster {existing_cluster} block "
+            f"[{existing_start}, {existing_end}) (member id {existing_id})"
+        )
+
+    cursor.execute(
+        """
         INSERT INTO members
         (cluster_id, file_path, channel_index, block_index, start_col, end_col, split, distance, source_pickle)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
