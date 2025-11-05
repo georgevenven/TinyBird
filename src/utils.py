@@ -197,6 +197,74 @@ def load_audio_params(data_dir):
     
     return audio_data_json
 
+def load_audio_labels(path, filename, mode):
+    """
+      Point of this function is to load the name of the file, and then match it with the name in the json, 
+      then return either the detection labels, or the syllable classes
+    
+      mode: "detect" or "classify"
+      It should be file extension agnostic 
+    """
+    if mode not in ["detect", "classify"]:
+        raise ValueError("mode must be 'detect' or 'classify'")
+    
+    with open(path, "r") as f:
+        annotations = json.load(f)
+    
+    for rec in annotations["recordings"]:
+        rec_filename = Path(rec["recording"]["filename"]).stem
+        if rec_filename == filename:
+            if mode == "detect":
+                return [{"onset_ms": event["onset_ms"], "offset_ms": event["offset_ms"]} 
+                        for event in rec["detected_events"]]
+            else:
+                return [unit for event in rec["detected_events"] for unit in event["units"]]
+    
+    raise ValueError(f"No matching recording found for: {filename}")
+
+
+## Make this function simpler, no need for this complexity 
+def get_num_classes_from_annotations(path, mode):
+    """
+    Determine the number of classes from annotation file.
+    
+    Args:
+        path (str): Path to annotation JSON file
+        mode (str): "detect" or "classify"
+        
+    Returns:
+        int: Number of classes including silence class 0
+             - For detect: 2 (silence=0, vocalization=1)
+             - For classify: max_syllable_id + 2 (silence=0, syllables=1,2,3,...)
+    """
+    if mode not in ["detect", "classify"]:
+        raise ValueError("mode must be 'detect' or 'classify'")
+    
+    if mode == "detect":
+        return 2  # silence and vocalization
+    
+    # For classify mode, find all unique syllable IDs
+    with open(path, "r") as f:
+        annotations = json.load(f)
+    
+    all_ids = set()
+    for rec in annotations["recordings"]:
+        for event in rec["detected_events"]:
+            for unit in event["units"]:
+                all_ids.add(unit["id"])
+    
+    if not all_ids:
+        raise ValueError(f"No syllable labels found in annotation file: {path}")
+    
+    max_id = max(all_ids)
+    # +2 because: +1 for shifting syllable IDs up by 1, +1 for silence class at 0
+    num_classes = max_id + 2
+    
+    print(f"Found {len(all_ids)} unique syllable IDs (range: {min(all_ids)} to {max_id})")
+    print(f"Total classes including silence: {num_classes}")
+    
+    return num_classes
+
 def load_training_state(run_dir, eval_every=500):
     """
     Load training state from a run directory's loss log.

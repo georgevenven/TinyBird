@@ -26,7 +26,7 @@ TRAIN_COLOR = "royalblue"
 VAL_COLOR = "tomato"
 MASK_CMAP = "viridis"
 
-__all__ = ["save_reconstruction_plot", "plot_loss_curves"]
+__all__ = ["save_reconstruction_plot", "plot_loss_curves", "save_supervised_prediction_plot"]
 
 
 def _depatchify(patches: torch.Tensor, *, mels: int, timebins: int, patch_size: Sequence[int]) -> torch.Tensor:
@@ -215,3 +215,98 @@ def plot_loss_curves(
     plt.close(fig)
 
     return output_path
+
+
+def save_supervised_prediction_plot(
+    *,
+    spectrogram: np.ndarray,
+    labels: np.ndarray,
+    predictions: np.ndarray,
+    probabilities: Optional[np.ndarray],
+    filename: str,
+    mode: str,
+    num_classes: int,
+    output_dir: str,
+    step_num: int,
+    figsize: Optional[Tuple[int, int]] = None,
+) -> str:
+    """
+    Generate and persist a supervised prediction visualization.
+    
+    Args:
+        spectrogram: (H, W) spectrogram array
+        labels: (W_patches,) ground truth labels
+        predictions: (W_patches,) predicted labels
+        probabilities: (W_patches, num_classes) class probabilities (optional, used for detect mode)
+        filename: Name of the audio file
+        mode: "detect" or "classify"
+        num_classes: Total number of classes
+        output_dir: Directory to save the plot
+        step_num: Current training step
+        figsize: Optional figure size override
+        
+    Returns:
+        The file path of the saved image.
+    """
+    # Create custom colormap where class 0 is black
+    base_cmap = plt.get_cmap('tab20', num_classes)
+    colors = base_cmap(np.linspace(0, 1, num_classes))
+    colors[0] = [0, 0, 0, 1]  # Set class 0 to black
+    custom_cmap = plt.matplotlib.colors.ListedColormap(colors)
+    
+    # Create figure
+    if mode == "detect":
+        fig, axes = plt.subplots(4, 1, figsize=figsize or (12, 8), 
+                                gridspec_kw={'height_ratios': [3, 1, 0.5, 0.5]})
+    else:
+        fig, axes = plt.subplots(3, 1, figsize=figsize or (12, 7), 
+                                gridspec_kw={'height_ratios': [3, 0.5, 0.5]})
+    
+    # Plot spectrogram
+    axes[0].imshow(spectrogram, aspect='auto', origin='lower', cmap='viridis')
+    axes[0].set_ylabel('Mel Bins')
+    axes[0].set_title(f'Spectrogram - {filename}')
+    axes[0].set_xticks([])
+    
+    # Plot probability line for detect mode
+    if mode == "detect" and probabilities is not None:
+        vocal_prob = probabilities[:, 1]  # Probability of vocalization (class 1)
+        x = np.arange(len(vocal_prob))
+        axes[1].plot(x, vocal_prob, 'r-', linewidth=2)
+        axes[1].set_ylabel('Vocal Prob')
+        axes[1].set_ylim([0, 1])
+        axes[1].set_xlim([0, len(vocal_prob)])
+        axes[1].grid(True, alpha=0.3)
+        axes[1].set_xticks([])
+        
+        pred_ax_idx = 2
+        gt_ax_idx = 3
+    else:
+        pred_ax_idx = 1
+        gt_ax_idx = 2
+    
+    # Plot predicted classes as colored bar
+    pred_img = predictions.reshape(1, -1)
+    axes[pred_ax_idx].imshow(pred_img, aspect='auto', cmap=custom_cmap, 
+                             vmin=0, vmax=num_classes-1)
+    axes[pred_ax_idx].set_ylabel('Predicted')
+    axes[pred_ax_idx].set_yticks([])
+    axes[pred_ax_idx].set_xticks([])
+    
+    # Plot ground truth classes as colored bar
+    gt_img = labels.reshape(1, -1)
+    axes[gt_ax_idx].imshow(gt_img, aspect='auto', cmap=custom_cmap, 
+                           vmin=0, vmax=num_classes-1)
+    axes[gt_ax_idx].set_ylabel('Ground Truth')
+    axes[gt_ax_idx].set_yticks([])
+    axes[gt_ax_idx].set_xlabel('Time Patches')
+    
+    plt.tight_layout()
+    
+    # Save figure
+    os.makedirs(output_dir, exist_ok=True)
+    save_path = os.path.join(output_dir, f'prediction_step_{step_num:06d}.png')
+    fig.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    
+    return save_path

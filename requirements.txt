@@ -3,7 +3,7 @@ hdbscan
 huggingface-hub
 librosa
 matplotlib
-numpy
+numpy # I think less than two 
 psutil
 scikit-learn
 scipy

@@ -31,3 +31,11 @@
 
 #### 
 audio2spec.py --> compute_statistics_of_spectrograms.py --> pretrain.py --> plot_embedding.py
+
+
+####
+To Do 
+#### 
+Next SWE GOALS, INHERITANCE IN THE DATACLASS, AND TWO TRAINING SCRIPTS 
+
+Classificaiton mixes individuals if folders not serperated, fix this 
