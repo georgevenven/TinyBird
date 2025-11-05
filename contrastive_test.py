@@ -17,7 +17,7 @@ Dependencies: numpy, torch, matplotlib (optional), umap-learn (optional)
 import os
 import argparse
 import random
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -46,21 +46,157 @@ def choose_embedding_key(npz):
     raise KeyError(f"No embedding-like key found in npz. Available keys: {npz.files}")
 
 
+def flatten_to_time_major(arr: np.ndarray) -> np.ndarray:
+    """
+    Reshape an array so time is the first axis and features are in the last axis.
+    Works for arrays with trailing feature dimensions.
+    """
+    if arr.ndim == 1:
+        return arr.reshape(-1, 1)
+    if arr.ndim == 2:
+        return arr
+    leading = int(np.prod(arr.shape[:-1]))
+    return arr.reshape(leading, arr.shape[-1])
+
+
+def align_spectrogram_to_embeddings(spec: np.ndarray, expected_len: int) -> np.ndarray:
+    """
+    Try different orientation permutations so the resulting spectrogram view matches
+    the embedding timeline length. Returns a view with shape (time, features).
+    """
+    candidates = []
+
+    def add_candidate(arr: np.ndarray):
+        view = flatten_to_time_major(arr)
+        if view.shape[0] == expected_len:
+            candidates.append(view)
+
+    add_candidate(spec)
+    if spec.ndim >= 2:
+        add_candidate(np.swapaxes(spec, 0, 1))
+    if spec.ndim >= 3:
+        add_candidate(spec.transpose(1, 0, 2))
+        add_candidate(spec.transpose(0, 2, 1))
+        add_candidate(spec.transpose(2, 0, 1))
+        add_candidate(spec.transpose(1, 2, 0))
+        add_candidate(spec.transpose(2, 1, 0))
+
+    if candidates:
+        return candidates[0]
+    raise ValueError(f"Spectrogram frames {spec.shape} do not match expected length {expected_len}")
+
+
+def smooth_power_envelope(power: np.ndarray, smoothing: int) -> np.ndarray:
+    """Apply simple moving-average smoothing to the power envelope."""
+    if smoothing <= 1:
+        return power
+    kernel = np.ones(int(smoothing), dtype=np.float32)
+    kernel /= kernel.sum()
+    return np.convolve(power, kernel, mode="same")
+
+
+def compute_power_envelope_labels(spec_view: np.ndarray,
+                                  smoothing: int = 5,
+                                  percentile: Optional[float] = 70.0,
+                                  min_frames: int = 4,
+                                  pad: int = 0,
+                                  abs_threshold: Optional[float] = None) -> Tuple[np.ndarray, Dict[str, float]]:
+    """
+    Compute power envelope labels for a spectrogram view.
+    Returns (labels, stats) where labels shape (time,) has segment ids or -1.
+    """
+    if spec_view.ndim != 2:
+        raise ValueError(f"Spectrogram view must be 2D, got shape {spec_view.shape}")
+
+    power = np.square(np.asarray(spec_view, dtype=np.float32)).sum(axis=1)
+    smoothed = smooth_power_envelope(power, smoothing)
+
+    if abs_threshold is not None:
+        threshold = float(abs_threshold)
+    elif percentile is not None:
+        threshold = float(np.percentile(smoothed, percentile))
+    else:
+        threshold = float(np.percentile(smoothed, 50.0))
+
+    active = smoothed >= threshold
+    n = active.shape[0]
+    segments = []
+    idx = 0
+    while idx < n:
+        if active[idx]:
+            start = idx
+            while idx < n and active[idx]:
+                idx += 1
+            segments.append((start, idx))
+        else:
+            idx += 1
+
+    if pad > 0 and segments:
+        padded = []
+        for start, end in segments:
+            start = max(0, start - pad)
+            end = min(n, end + pad)
+            if padded and start <= padded[-1][1]:
+                padded[-1] = (padded[-1][0], max(padded[-1][1], end))
+            else:
+                padded.append((start, end))
+        segments = padded
+
+    filtered = []
+    min_frames = max(1, int(min_frames))
+    for start, end in segments:
+        if end - start >= min_frames:
+            filtered.append((start, end))
+
+    labels = np.full(n, -1, dtype=np.int64)
+    positive_frames = 0
+    for start, end in filtered:
+        labels[start:end] = 1  # use a single positive label
+        positive_frames += (end - start)
+
+    stats = {
+        "threshold": float(threshold),
+        "segments": int(len(filtered)),
+        "positive_frames": int(positive_frames),
+        "total_frames": int(n),
+        "active_ratio": float(positive_frames / n) if n > 0 else 0.0,
+    }
+    return labels, stats
+
+
 # --- Dataset: memory-mapped sliding windows metadata only ---
 class NpzSlidingWindowDataset(Dataset):
     """
     Lazily index NPZ-embedded sequences and expose sliding windows.
     Stores metadata of windows (file_path, start_index) and reads slice on __getitem__.
     """
-    def __init__(self, npz_paths: List[str], window_len: int = 256, stride: int = 128, downsample: int = 1):
+    def __init__(self,
+                 npz_paths: List[str],
+                 window_len: int = 256,
+                 stride: int = 128,
+                 downsample: int = 1,
+                 envelope_percentile: Optional[float] = 70.0,
+                 envelope_abs_threshold: Optional[float] = None,
+                 envelope_smoothing: int = 5,
+                 envelope_min_frames: int = 4,
+                 envelope_pad: int = 0):
         if downsample < 1:
             raise ValueError("downsample must be >=1")
         self.window_len = int(window_len)
         self.stride = int(stride)
         self.downsample = int(downsample)
+        self.envelope_percentile = envelope_percentile
+        self.envelope_abs_threshold = envelope_abs_threshold
+        self.envelope_smoothing = int(max(1, envelope_smoothing))
+        self.envelope_min_frames = int(max(1, envelope_min_frames))
+        self.envelope_pad = int(max(0, envelope_pad))
         self._files = []  # list of dicts: {'path', 'embedding', 'labels', 'has_labels'}
         self._meta = []   # list of tuples (file_idx, start_idx)
         self.in_dim = None
+        self.using_envelope = False
+        self._envelope_segments = 0
+        self._envelope_positive_frames = 0
+        self._files_with_envelope = 0
         # Scan files and build metadata
         for p in npz_paths:
             if not os.path.exists(p):
@@ -69,58 +205,84 @@ class NpzSlidingWindowDataset(Dataset):
             npz = np.load(p, mmap_mode='r')
             key = choose_embedding_key(npz)
             arr = npz[key]
-            
-            # Check for labels (prefer downsampled labels if available)
-            has_labels = False
-            label_key = None
-            if "labels_downsampled" in npz.files:
-                label_key = "labels_downsampled"
-                has_labels = True
-            elif "labels_original" in npz.files:
-                label_key = "labels_original"
-                has_labels = True
-            elif "labels" in npz.files:
-                label_key = "labels"
-                has_labels = True
-            # Normalize shapes: allow (N,T,D) -> flatten to (N*T, D)
-            if arr.ndim == 3:
-                T = arr.shape[0] * arr.shape[1]
-                D = arr.shape[2]
-            elif arr.ndim == 2:
-                T, D = arr.shape
-            else:
-                # flatten trailing dims to D
-                T = arr.shape[0]
-                D = int(np.prod(arr.shape[1:]))
+            embedding_full = flatten_to_time_major(arr)
+
+            embedding_dim = embedding_full.shape[1]
             if self.in_dim is None:
-                self.in_dim = D
-            elif self.in_dim != D:
-                raise ValueError(f"Inconsistent embedding dims. Found {D} but expected {self.in_dim}")
-            # Materialize a 2D view for reuse
-            if arr.ndim == 3:
-                embedding = arr.reshape(-1, arr.shape[-1])
-            elif arr.ndim == 2:
-                embedding = arr
-            else:
-                embedding = arr.reshape(arr.shape[0], -1)
-            # Load labels once if present and flatten for easy slicing
-            label_arr = None
-            if has_labels:
-                label_arr = npz[label_key]
-                if label_arr.ndim > 1:
-                    label_arr = label_arr.reshape(-1)
+                self.in_dim = embedding_dim
+            elif self.in_dim != embedding_dim:
+                raise ValueError(f"Inconsistent embedding dims. Found {embedding_dim} but expected {self.in_dim}")
+
+            # Optional labels stored inside NPZ
+            label_arr_npz = None
+            if "labels_downsampled" in npz.files:
+                label_arr_npz = np.asarray(npz["labels_downsampled"])
+            elif "labels_original" in npz.files:
+                label_arr_npz = np.asarray(npz["labels_original"])
+            elif "labels" in npz.files:
+                label_arr_npz = np.asarray(npz["labels"])
+            if label_arr_npz is not None and label_arr_npz.ndim > 1:
+                label_arr_npz = label_arr_npz.reshape(-1)
+
+            # Align spectrograms if available for envelope computation
+            spec_view = None
+            if "spectrograms" in npz.files:
+                try:
+                    spec_view = align_spectrogram_to_embeddings(npz["spectrograms"], embedding_full.shape[0])
+                    self._files_with_envelope += 1
+                except ValueError as exc:
+                    print(f"Warning: {p} spectrogram alignment failed: {exc}")
+                    spec_view = None
+
+            # Apply downsampling consistently
             if self.downsample > 1:
-                embedding_view = embedding[::self.downsample]
-                if label_arr is not None:
-                    label_arr = label_arr[::self.downsample]
+                embedding_view = embedding_full[::self.downsample]
+                if label_arr_npz is not None:
+                    label_arr_npz = label_arr_npz[::self.downsample]
+                if spec_view is not None:
+                    spec_view = spec_view[::self.downsample]
             else:
-                embedding_view = embedding
+                embedding_view = embedding_full
+
+            # Derive envelope-based labels if spectrogram available
+            envelope_labels = None
+            envelope_stats = None
+            if spec_view is not None:
+                envelope_labels, envelope_stats = compute_power_envelope_labels(
+                    spec_view,
+                    smoothing=self.envelope_smoothing,
+                    percentile=self.envelope_percentile,
+                    min_frames=self.envelope_min_frames,
+                    pad=self.envelope_pad,
+                    abs_threshold=self.envelope_abs_threshold,
+                )
+                self._envelope_segments += envelope_stats["segments"]
+                self._envelope_positive_frames += envelope_stats["positive_frames"]
+                if envelope_stats["segments"] > 0:
+                    self.using_envelope = True
+
+            label_arr = None
+            label_source = None
+            if envelope_labels is not None:
+                if envelope_labels.shape[0] != embedding_view.shape[0]:
+                    raise ValueError(f"Envelope label length {envelope_labels.shape[0]} mismatch with embeddings {embedding_view.shape[0]}")
+                label_arr = envelope_labels
+                label_source = "power_envelope"
+            elif label_arr_npz is not None:
+                if label_arr_npz.shape[0] != embedding_view.shape[0]:
+                    raise ValueError(f"Label length {label_arr_npz.shape[0]} mismatch with embeddings {embedding_view.shape[0]}")
+                label_arr = label_arr_npz.astype(np.int64, copy=False)
+                label_source = "npz_labels"
+
+            has_labels = label_arr is not None
             file_index = len(self._files)
             self._files.append({
                 "path": p,
                 "embedding": embedding_view,
                 "has_labels": has_labels,
                 "labels": label_arr,
+                "label_source": label_source,
+                "envelope_stats": envelope_stats,
             })
             # compute effective length after downsample
             eff_T = embedding_view.shape[0]
@@ -131,6 +293,12 @@ class NpzSlidingWindowDataset(Dataset):
             npz.close()
         if len(self._meta) == 0:
             raise RuntimeError("No windows collected. Reduce window_len or add files.")
+        self.envelope_summary = {
+            "using_envelope": bool(self.using_envelope),
+            "segments": int(self._envelope_segments),
+            "positive_frames": int(self._envelope_positive_frames),
+            "files_with_envelope": int(self._files_with_envelope),
+        }
     def __len__(self):
         return len(self._meta)
     def __getitem__(self, idx):
@@ -202,13 +370,50 @@ def nnclr_loss(proj: torch.Tensor, temperature: float = 0.07, distractors: Optio
     return loss
 
 
+def envelope_contrastive_loss(proj: torch.Tensor,
+                              labels: torch.Tensor,
+                              temperature: float = 0.07) -> Tuple[Optional[torch.Tensor], int]:
+    """
+    Contrastive loss where positives share the same power-envelope label.
+    labels: (N,) with -1 for distractors. Returns (loss, positive_pairs).
+    """
+    device = proj.device
+    labels = labels.to(device)
+    valid = labels >= 0
+    if torch.count_nonzero(valid) <= 1:
+        return None, 0
+
+    features = nn.functional.normalize(proj, dim=1)
+    logits = features @ features.t() / float(temperature)
+    logits = logits.masked_fill(torch.eye(logits.shape[0], device=device, dtype=torch.bool), -1e9)
+
+    same_label = labels.unsqueeze(0) == labels.unsqueeze(1)
+    positive_mask = same_label & valid.unsqueeze(0) & valid.unsqueeze(1)
+    positive_mask.fill_diagonal_(False)
+
+    positives_per_anchor = positive_mask.sum(dim=1)
+    valid_anchors = positives_per_anchor > 0
+    if not torch.any(valid_anchors):
+        return None, 0
+
+    log_prob = logits - torch.logsumexp(logits, dim=1, keepdim=True)
+    positive_mask_f = positive_mask.float()
+    losses = -(log_prob * positive_mask_f).sum(dim=1) / positives_per_anchor.clamp(min=1)
+    loss = losses[valid_anchors].mean()
+    positive_pairs = int(positives_per_anchor[valid_anchors].sum().item())
+    return loss, positive_pairs
+
+
 # --- Training logic ---
 def collate_windows(batch):
     # batch: list of (window_np, labels, meta)
     windows = [item[0] for item in batch]
     arr = np.stack(windows, axis=0)
-    # Labels might be None for some windows, so we just pass them through
-    labels = [item[1] for item in batch]
+    label_list = [item[1] for item in batch]
+    if all(lbl is not None for lbl in label_list):
+        labels = np.stack(label_list, axis=0)
+    else:
+        labels = None
     metas = [item[2] for item in batch]
     return arr, labels, metas
 
@@ -221,6 +426,7 @@ def train_loop(dataset: Dataset,
                batch_windows: int = 12,
                lr: float = 1e-3,
                distractors: Optional[int] = None,
+               temperature: float = 0.07,
                save_every_epoch: bool = True):
     os.makedirs(out_dir, exist_ok=True)
     loader = DataLoader(dataset, batch_size=batch_windows, shuffle=True,
@@ -238,14 +444,25 @@ def train_loop(dataset: Dataset,
             B, W, D = batch_t.shape
             seq = batch_t.view(B * W, D)  # flatten in time order
             proj = head(seq)  # (N, out_dim)
-            loss = nnclr_loss(proj, distractors=distractors)
+            positive_pairs = None
+            if labels is not None:
+                labels_np = np.asarray(labels, dtype=np.int64)
+                labels_t = torch.from_numpy(labels_np).to(device)
+                labels_flat = labels_t.view(-1)
+                loss_tuple = envelope_contrastive_loss(proj, labels_flat, temperature=temperature)
+                if loss_tuple[0] is None:
+                    continue
+                loss, positive_pairs = loss_tuple
+            else:
+                loss = nnclr_loss(proj, temperature=temperature, distractors=distractors)
             opt.zero_grad()
             loss.backward()
             opt.step()
             step += 1
             history.append(float(loss.item()))
             if step % 20 == 0:
-                print(f"[ep {ep+1}/{epochs}] step {step} loss {loss.item():.4f}")
+                extra = f" pos_pairs={positive_pairs}" if positive_pairs is not None else ""
+                print(f"[ep {ep+1}/{epochs}] step {step} loss {loss.item():.4f}{extra}")
         if save_every_epoch:
             ckpt = os.path.join(out_dir, f"head_epoch{ep+1}.pt")
             torch.save({"state_dict": head.state_dict(), "opt": opt.state_dict(), "history": history}, ckpt)
@@ -341,6 +558,18 @@ def parse_args():
     p.add_argument("--batch_windows", type=int, default=12)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--distractors", type=int, default=8, nargs="?")
+    p.add_argument("--temperature", type=float, default=0.07,
+                   help="Softmax temperature for contrastive loss.")
+    p.add_argument("--envelope_percentile", type=float, default=70.0,
+                   help="Percentile of power used to define active envelope regions (ignored if envelope_threshold is provided).")
+    p.add_argument("--envelope_threshold", type=float, default=None,
+                   help="Absolute power threshold overriding percentile for envelope segmentation.")
+    p.add_argument("--envelope_smoothing", type=int, default=5,
+                   help="Moving-average window (frames) for power envelope smoothing before segmentation.")
+    p.add_argument("--envelope_min_frames", type=int, default=4,
+                   help="Minimum consecutive frames (after downsampling) for a positive envelope segment.")
+    p.add_argument("--envelope_pad", type=int, default=0,
+                   help="Pad (frames) applied to both sides of detected envelope segments before merging.")
     p.add_argument("--outdir", type=str, default="./results/contrastive_out")
     p.add_argument("--device", type=str, default='cuda:0',
                    help="Device string like 'cuda:0' or 'cpu'. Default auto.")
@@ -359,16 +588,33 @@ def main():
     print("Device:", device)
 
     print("Building dataset metadata from NPZ files...")
-    dataset = NpzSlidingWindowDataset(args.npz, window_len=args.window_len, stride=args.stride, downsample=args.downsample)
+    dataset = NpzSlidingWindowDataset(
+        args.npz,
+        window_len=args.window_len,
+        stride=args.stride,
+        downsample=args.downsample,
+        envelope_percentile=args.envelope_percentile,
+        envelope_abs_threshold=args.envelope_threshold,
+        envelope_smoothing=args.envelope_smoothing,
+        envelope_min_frames=args.envelope_min_frames,
+        envelope_pad=args.envelope_pad,
+    )
     print("Windows collected:", len(dataset))
     in_dim = dataset.get_in_dim()
     print("Embedding dim:", in_dim)
+    if getattr(dataset, "envelope_summary", None):
+        summary = dataset.envelope_summary
+        if summary["using_envelope"]:
+            print(f"Power envelope positives: {summary['segments']} segments, {summary['positive_frames']} frames across {summary['files_with_envelope']} files")
+            if summary["positive_frames"] == 0:
+                print("Warning: no positive frames found with current envelope settings.")
 
     head, history = train_loop(dataset, in_dim, args.outdir, device,
                                epochs=args.epochs,
                                batch_windows=args.batch_windows,
                                lr=args.lr,
-                               distractors=args.distractors)
+                               distractors=args.distractors,
+                               temperature=args.temperature)
 
     projs, labels = collect_timestep_projections(head, dataset, device, n_steps=args.umap_n_steps)
     umap_path = os.path.join(args.outdir, "umap_windows.png")
