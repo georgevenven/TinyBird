@@ -36,6 +36,9 @@ audio2spec.py --> compute_statistics_of_spectrograms.py --> pretrain.py --> plot
 ####
 To Do 
 #### 
-Next SWE GOALS, INHERITANCE IN THE DATACLASS, AND TWO TRAINING SCRIPTS 
-
-Classificaiton mixes individuals if folders not serperated, fix this 
+[] Next SWE GOALS, INHERITANCE IN THE DATACLASS, AND TWO TRAINING SCRIPTS 
+[] Classificaiton mixes individuals if folders not serperated, fix this 
+[] Breaking apart song for inference context length should be its own script
+[] Collate by song length to not do extreme padding
+[] Settings to set root? 
+[] At ability to add song detector to song2spec.py 
