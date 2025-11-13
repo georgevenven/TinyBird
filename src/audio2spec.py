@@ -143,6 +143,32 @@ def process_audio_file(obj, dst_dir, sr, n_fft, step, use_mel, n_mels, min_len_m
         return f"{stem}: {e}"
 
 
+def merge_overlapping_intervals(intervals):
+    """
+    Merge overlapping time intervals.
+    Args:
+        intervals: List of [start, end] pairs
+    Returns:
+        List of merged [start, end] pairs
+    """
+    if not intervals:
+        return []
+    
+    # Sort by start time
+    sorted_intervals = sorted(intervals, key=lambda x: x[0])
+    merged = [sorted_intervals[0]]
+    
+    for current in sorted_intervals[1:]:
+        last = merged[-1]
+        # If current overlaps with last, merge them
+        if current[0] <= last[1]:
+            merged[-1] = [last[0], max(last[1], current[1])]
+        else:
+            merged.append(current)
+    
+    return merged
+
+
 def calculate_optimal_workers(total_files, avg_file_size_mb=50):
     """
     Calculate optimal number of workers based on available memory and CPU cores.
@@ -174,7 +200,7 @@ def calculate_optimal_workers(total_files, avg_file_size_mb=50):
 class WavToSpec:
     """Convert audio files into spectrogram .npy dumps."""
 
-    def __init__(self, src_dir, dst_dir, *, file_list=None, birdset=None, birdset_split="train", step_size=160, n_fft=1024, sr=32_000, take_n_random=None, single_threaded=True, min_len_ms=25, min_timebins=25, mel=True, n_mels=128, max_workers=None):
+    def __init__(self, src_dir, dst_dir, *, file_list=None, birdset=None, birdset_split="train", birdset_detections="human", step_size=160, n_fft=1024, sr=32_000, take_n_random=None, single_threaded=True, min_len_ms=25, min_timebins=25, mel=True, n_mels=128, max_workers=None):
         self.src_dir = Path(src_dir) if src_dir is not None else None
         self.dst_dir = Path(dst_dir)
         self.dst_dir.mkdir(parents=True, exist_ok=True)
@@ -182,6 +208,7 @@ class WavToSpec:
         self.file_list = Path(file_list) if file_list else None
         self.birdset = birdset
         self.birdset_split = birdset_split
+        self.birdset_detections = birdset_detections
         self.step = step_size
         self.n_fft = n_fft
         self.sr = sr
@@ -196,10 +223,10 @@ class WavToSpec:
         self._setup_logging()
         # Remove unpicklable Manager().Value - will create in run() if needed
 
-        self.audio_files = self._gather_files()
-        
-        # Save audio parameters to destination directory
+        # Save audio parameters to destination directory at the start
         self._save_audio_params()
+        
+        self.audio_files = self._gather_files()
 
     # ──────────────────────────────────────────────────────────────────────
     # misc
@@ -272,13 +299,14 @@ class WavToSpec:
         processed_samples = 0
         skipped_count = 0
         
+        # Collect annotations for JSON output - group by filename
+        annotations_by_file = {}  # filename -> {recording: ..., detected_events: [...]}
+        
         for idx, sample in enumerate(ds):
-            processed_samples += 1
-            
             # Print progress every 250 samples
-            if processed_samples % 250 == 0:
+            if (idx + 1) % 250 == 0:
                 elapsed = time.time() - start_time
-                print(f"Processed {processed_samples} samples → {processed_spectrograms} spectrograms in {elapsed:.1f}s")
+                print(f"Processed {idx + 1} samples → {processed_spectrograms} spectrograms ({skipped_count} skipped) in {elapsed:.1f}s")
             
             # Safety limit for testing
             if self.take_n_random and processed_spectrograms >= self.take_n_random:
@@ -298,6 +326,8 @@ class WavToSpec:
             if waveform is None:
                 skipped_count += 1
                 continue
+            
+            processed_samples += 1
 
             # Event information is available in sample.get("detected_events", [])
             # Each event is a tuple of (start_time, end_time) in seconds
@@ -305,24 +335,16 @@ class WavToSpec:
             # for event_idx, event in enumerate(detected_events):
             #     start, end = event  # start and end times in seconds
             
-            # Get label if available, otherwise use 0
-            try:
-                label_idx = int(sample.get("ebird_code", 0))
-            except (TypeError, ValueError):
-                label_idx = 0
-
             # Extract recording ID from filepath for naming
             filepath = sample.get("filepath", "")
             
-            # Create base name - ebird_code + recording ID
+            # Create base name from recording ID
             if filepath:
-                recording_id = Path(filepath).stem  # e.g., "XC1229031"
-                name = f"{label_idx}_{recording_id}"
+                name = Path(filepath).stem  # e.g., "XC1229031"
             elif audio_path:
-                recording_id = Path(audio_path).stem
-                name = f"{label_idx}_{recording_id}"
+                name = Path(audio_path).stem
             else:
-                name = f"{label_idx}_sample_{idx:06d}"
+                name = f"sample_{idx:06d}"
 
             # Handle missing or None audio_path
             if audio_path is None:
@@ -342,12 +364,62 @@ class WavToSpec:
             result = self._safe_process(audio_event)
             if result is None:
                 processed_spectrograms += 1
+                
+                # Collect annotation data based on detection mode
+                if self.birdset_detections != "none":
+                    # Create or update entry for this file
+                    if filepath not in annotations_by_file:
+                        annotations_by_file[filepath] = {
+                            "recording": {
+                                "filename": filepath,
+                                "ebird_code": sample.get("ebird_code", None),
+                                "ebird_code_multilabel": sample.get("ebird_code_multilabel", []),
+                                "lat": sample.get("lat", None),
+                                "long": sample.get("long", None),
+                                "source": sample.get("source", "xenocanto"),
+                                "quality": sample.get("quality", None),
+                                "recordist": sample.get("recordist", None),
+                                "license": sample.get("license", None)
+                            },
+                            "detected_events": []
+                        }
+                    
+                    # Add detected events based on mode
+                    if self.birdset_detections == "human":
+                        start_time_s = sample.get("start_time", None)
+                        end_time_s = sample.get("end_time", None)
+                        if start_time_s is not None and end_time_s is not None:
+                            annotations_by_file[filepath]["detected_events"].append({
+                                "onset_ms": float(start_time_s) * 1000.0,
+                                "offset_ms": float(end_time_s) * 1000.0
+                            })
+                    
+                    elif self.birdset_detections == "bambird":
+                        detected_events = sample.get("detected_events", [])
+                        if detected_events:
+                            # Merge overlapping intervals
+                            merged_events = merge_overlapping_intervals(detected_events)
+                            for event in merged_events:
+                                annotations_by_file[filepath]["detected_events"].append({
+                                    "onset_ms": float(event[0]) * 1000.0,
+                                    "offset_ms": float(event[1]) * 1000.0
+                                })
+                    
+                    # Save annotations after each sample
+                    annotations = {
+                        "metadata": {"units": "ms"},
+                        "recordings": list(annotations_by_file.values())
+                    }
+                    annotations_path = self.dst_dir / f"{self.birdset}_{self.birdset_split}_annotations.json"
+                    with open(annotations_path, 'w') as f:
+                        json.dump(annotations, f, indent=2)
             else:
                 skipped_count += 1
-
+        
         # Final statistics
         elapsed = time.time() - start_time
-        print(f"BirdSet processing complete: {processed_spectrograms} spectrograms created from {processed_samples} samples, {skipped_count} skipped in {elapsed:.1f}s")
+        total_examined = processed_spectrograms + skipped_count
+        print(f"BirdSet processing complete: {processed_spectrograms} spectrograms created, {skipped_count} skipped (examined {total_examined} samples) in {elapsed:.1f}s")
 
 
 
@@ -566,6 +638,8 @@ def cli():
                    help="Where outputs go.")
     p.add_argument("--birdset_split", type=str, default="train",
                    help="Dataset split to use with --birdset (default: train) for XCL that is the only one")
+    p.add_argument("--birdset_detections", type=str, default="human", choices=["none", "human", "bambird"],
+                   help="BirdSet detection mode: none (no annotations), human (start_time/end_time), bambird (detected_events with merging)")
     p.add_argument("--sr", type=int, default=32_000,
                    help="Sample rate in Hz (default: 32000).")
     p.add_argument("--step_size", type=int, default=64,
@@ -591,7 +665,7 @@ def cli():
 
     single = args.single_threaded.lower() in {"true", "1", "yes"}
 
-    converter = WavToSpec(src_dir=args.src_dir, dst_dir=args.dst_dir, file_list=args.file_list, birdset=args.birdset, birdset_split=args.birdset_split, step_size=args.step_size, n_fft=args.nfft, sr=args.sr, take_n_random=args.take_n_random, single_threaded=single, mel=not args.linear, n_mels=args.n_mels, max_workers=args.max_workers)
+    converter = WavToSpec(src_dir=args.src_dir, dst_dir=args.dst_dir, file_list=args.file_list, birdset=args.birdset, birdset_split=args.birdset_split, birdset_detections=args.birdset_detections, step_size=args.step_size, n_fft=args.nfft, sr=args.sr, take_n_random=args.take_n_random, single_threaded=single, mel=not args.linear, n_mels=args.n_mels, max_workers=args.max_workers)
     converter.run()
 
 

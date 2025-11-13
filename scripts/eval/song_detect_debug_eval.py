@@ -37,7 +37,23 @@ def calculate_frame_accuracy(predictions, labels):
     accuracy = 100.0 * correct / total
     return accuracy
 
-def plot_detection(spec, labels, predictions, smoothed, filename, output_dir, raw_acc, smoothed_acc):
+def calculate_f1_score(predictions, labels):
+    """Calculate F1 score for binary classification"""
+    # Positive class is 1 (vocalization detected)
+    tp = np.sum((predictions == 1) & (labels == 1))
+    fp = np.sum((predictions == 1) & (labels == 0))
+    fn = np.sum((predictions == 0) & (labels == 1))
+    
+    # Compute precision and recall
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    
+    # Compute F1 score
+    f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+    
+    return f1 * 100.0  # Convert to percentage
+
+def plot_detection(spec, labels, predictions, smoothed, filename, output_dir, raw_acc, smoothed_acc, raw_f1, smoothed_f1):
     """Visualize spectrogram with ground truth and predictions"""
     binary_cmap = ListedColormap(["#1f2933", "#38bdf8"])
     fig = plt.figure(figsize=(16, 7))
@@ -46,13 +62,13 @@ def plot_detection(spec, labels, predictions, smoothed, filename, output_dir, ra
     spec_ax = fig.add_subplot(gs[0, 0])
     spec_ax.imshow(spec, aspect='auto', origin='lower', cmap='viridis')
     spec_ax.set_ylabel('Frequency')
-    spec_ax.set_title(f'{filename} | Raw Acc: {raw_acc:.2f}% | Smoothed Acc: {smoothed_acc:.2f}%')
+    spec_ax.set_title(f'{filename} | Raw Acc: {raw_acc:.2f}% F1: {raw_f1:.2f}% | Smoothed Acc: {smoothed_acc:.2f}% F1: {smoothed_f1:.2f}%')
     spec_ax.set_xticks([])
     
     strip_data = [
         ("Ground Truth", labels),
-        (f'Raw Pred ({raw_acc:.2f}%)', predictions),
-        (f'Smoothed ({smoothed_acc:.2f}%)', smoothed),
+        (f'Raw Pred (Acc:{raw_acc:.2f}% F1:{raw_f1:.2f}%)', predictions),
+        (f'Smoothed (Acc:{smoothed_acc:.2f}% F1:{smoothed_f1:.2f}%)', smoothed),
     ]
     
     strip_axes = []
@@ -98,6 +114,22 @@ def main(args):
     with open(config_path, 'r') as f:
         config = json.load(f)
     
+    # Determine annotation file path
+    if args["annotation_file"]:
+        annotation_file = args["annotation_file"]
+    else:
+        # Look for annotation JSON in spec_dir
+        spec_dir_path = Path(args["spec_dir"])
+        annotation_files = list(spec_dir_path.glob("*_annotations.json"))
+        if len(annotation_files) == 0:
+            raise ValueError(f"No annotation JSON found in {args['spec_dir']}. Please specify --annotation_file")
+        elif len(annotation_files) > 1:
+            print(f"Warning: Multiple annotation files found in {args['spec_dir']}: {[f.name for f in annotation_files]}")
+            print(f"Using: {annotation_files[0].name}")
+        annotation_file = str(annotation_files[0])
+    
+    print(f"Using annotation file: {annotation_file}")
+    
     # Load pretrained encoder config for model architecture
     pretrained_config_path = os.path.join(config["pretrained_run"], "config.json")
     with open(pretrained_config_path, 'r') as f:
@@ -139,7 +171,7 @@ def main(args):
     # Load dataset with full spectrograms (no cropping)
     dataset = SupervisedSpectogramDataset(
         dir=args["spec_dir"],
-        annotation_file_path=config["annotation_file"],
+        annotation_file_path=annotation_file,
         n_timebins=None,  # Load full files
         mode=config["mode"]
     )
@@ -193,9 +225,19 @@ def main(args):
         with torch.no_grad():
             for batch_idx in range(batch_size):
                 chunk = spec_batched[batch_idx:batch_idx+1]  # (1, 1, H, model_num_timebins)
-                logits = model(chunk)  # (1, W_patches, num_classes)
-                preds = torch.argmax(logits, dim=-1)  # (1, W_patches)
-                logits_list.append(preds[0])
+                logits = model(chunk)  # (1, W_patches, num_classes) or (1, W_patches, 1) for binary
+                
+                # Handle binary vs multi-class classification
+                if config["num_classes"] == 2:
+                    # Binary classification with BCE: logits shape (1, W_patches, 1)
+                    logits_flat = logits.reshape(-1)  # (W_patches,)
+                    probs = torch.sigmoid(logits_flat)  # (W_patches,)
+                    preds = (probs > 0.5).long()  # (W_patches,)
+                else:
+                    # Multi-class classification: logits shape (1, W_patches, num_classes)
+                    preds = torch.argmax(logits, dim=-1)[0]  # (W_patches,)
+                
+                logits_list.append(preds)
         
         # Concatenate predictions from all chunks
         preds_all = torch.cat(logits_list, dim=0).cpu().numpy()  # (total_patches,)
@@ -215,19 +257,39 @@ def main(args):
         # Apply sliding window smoothing
         smoothed = sliding_window_max_vote(preds_upsampled, window_size=window_size)
         
-        # Calculate frame accuracy
-        raw_acc = calculate_frame_accuracy(preds_upsampled, labels_np)
-        smoothed_acc = calculate_frame_accuracy(smoothed, labels_np)
+        # Split into chunks of model_num_timebins and save separately
+        num_chunks = (rounded_spec_length + model_num_timebins - 1) // model_num_timebins
         
-        # Plot full song
-        save_path = plot_detection(spec_full, labels_np, preds_upsampled, smoothed, 
-                                   filename[0], output_dir, raw_acc, smoothed_acc)
-        print(f"Saved: {save_path} | Raw Acc: {raw_acc:.2f}% | Smoothed Acc: {smoothed_acc:.2f}%")
+        for chunk_idx in range(num_chunks):
+            start_idx = chunk_idx * model_num_timebins
+            end_idx = min(start_idx + model_num_timebins, rounded_spec_length)
+            
+            # Extract chunk
+            spec_chunk = spec_full[:, start_idx:end_idx]
+            labels_chunk = labels_np[start_idx:end_idx]
+            preds_chunk = preds_upsampled[start_idx:end_idx]
+            smoothed_chunk = smoothed[start_idx:end_idx]
+            
+            # Calculate accuracy and F1 for this chunk
+            chunk_raw_acc = calculate_frame_accuracy(preds_chunk, labels_chunk)
+            chunk_smoothed_acc = calculate_frame_accuracy(smoothed_chunk, labels_chunk)
+            chunk_raw_f1 = calculate_f1_score(preds_chunk, labels_chunk)
+            chunk_smoothed_f1 = calculate_f1_score(smoothed_chunk, labels_chunk)
+            
+            # Create chunk filename
+            chunk_filename = f"{filename[0]}_chunk{chunk_idx}"
+            
+            # Plot and save
+            save_path = plot_detection(spec_chunk, labels_chunk, preds_chunk, smoothed_chunk,
+                                       chunk_filename, output_dir, chunk_raw_acc, chunk_smoothed_acc,
+                                       chunk_raw_f1, chunk_smoothed_f1)
+            print(f"Saved: {save_path} | Raw Acc: {chunk_raw_acc:.2f}% F1: {chunk_raw_f1:.2f}% | Smoothed Acc: {chunk_smoothed_acc:.2f}% F1: {chunk_smoothed_f1:.2f}%")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate supervised detection model")
     parser.add_argument("--run_dir", type=str, required=True, help="Supervised training run directory")
     parser.add_argument("--spec_dir", type=str, required=True, help="Directory of specs to evaluate")
+    parser.add_argument("--annotation_file", type=str, default=None, help="Path to annotation JSON (default: auto-detect in spec_dir)")
     parser.add_argument("--checkpoint", type=str, default=None, help="Checkpoint filename (default: latest)")
     parser.add_argument("--num_samples", type=int, default=10, help="Number of samples to visualize")
     parser.add_argument("--window_size", type=int, default=100, help="Sliding window size for smoothing")

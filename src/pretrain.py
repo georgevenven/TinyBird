@@ -194,6 +194,10 @@ class Trainer():
 
     def save_reconstruction(self, batch, step_num):
         """Save reconstruction visualization comparing input and output spectrograms."""
+        # Select a sample from the batch (cycle through to show variety)
+        batch_size = batch[0].shape[0]  # spectrograms is first element of batch tuple
+        sample_idx = (step_num // self.config["eval_every"]) % batch_size
+        
         save_reconstruction_plot(
             self.tinybird,
             batch,
@@ -202,6 +206,7 @@ class Trainer():
             use_amp=self.use_amp,
             output_dir=self.imgs_path,
             step_num=step_num,
+            sample_idx=sample_idx,
         )
 
     def train(self):

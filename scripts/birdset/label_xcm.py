@@ -487,8 +487,8 @@ class SpectrogramLabeler:
         display_image = Image.alpha_composite(display_image, mask_rgba)
         display_image = display_image.convert('RGB')
         
-        # Scale up 2x for better visibility
-        scale_factor = 2
+        # Scale up 4x for better visibility (was 2x)
+        scale_factor = 4
         scaled_width = display_image.width * scale_factor
         scaled_height = display_image.height * scale_factor
         display_image = display_image.resize((scaled_width, scaled_height), Image.Resampling.NEAREST)

@@ -50,15 +50,21 @@ class SupervisedTinyBird(nn.Module):
         
         # Simple MLP classifier: input -> hidden -> output
         hidden_dim = 256
+        # For binary classification (2 classes), output 1 logit (BCE)
+        # For multi-class, output num_classes logits (CrossEntropy)
+        output_dim = 1 if num_classes == 2 else num_classes
         self.classifier = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, num_classes)
+            nn.Linear(hidden_dim, output_dim)
         )
         
-        # Loss function - cross-entropy for both detect and classify modes
+        # Loss function - BCE for binary (2 classes), cross-entropy for multi-class
         # Class 0 is silence in both cases, explicitly trained
-        self.loss_fn = nn.CrossEntropyLoss()
+        if num_classes == 2:
+            self.loss_fn = nn.BCEWithLogitsLoss()
+        else:
+            self.loss_fn = nn.CrossEntropyLoss()
     
     def forward(self, x):
         """
@@ -68,7 +74,8 @@ class SupervisedTinyBird(nn.Module):
             x: Input spectrogram (B, 1, H, W) where W is n_timebins
             
         Returns:
-            logits: (B, W_patches, num_classes) - classification logits per time patch
+            logits: (B, W_patches, 1) for binary classification or (B, W_patches, num_classes) for multi-class
+                   - classification logits per time patch
         """
         B, _, H, W = x.shape
         
@@ -94,29 +101,35 @@ class SupervisedTinyBird(nn.Module):
     
     def compute_loss(self, logits, labels):
         """
-        Compute cross-entropy loss between predictions and labels.
+        Compute loss between predictions and labels.
         
         Args:
-            logits: (B, W_patches, num_classes)
+            logits: (B, W_patches, 1) for binary or (B, W_patches, num_classes) for multi-class
             labels: (B, W) where W is n_timebins
                     Class 0 = silence, Class 1+ = vocalizations/syllables
             
         Returns:
             loss: scalar loss value
         """
-        B, W_patches, num_classes = logits.shape
         B_label, W = labels.shape
         
         # Downsample labels to match patch width
         # Each patch covers patch_width timebins
         labels_downsampled = labels[:, ::self.patch_width]  # (B, W_patches)
         
-        # Reshape logits to (B * W_patches, num_classes) and labels to (B * W_patches)
-        logits_flat = logits.reshape(-1, num_classes)
-        labels_flat = labels_downsampled.reshape(-1)
-        
-        # Compute cross-entropy loss
-        loss = self.loss_fn(logits_flat, labels_flat)
+        if self.num_classes == 2:
+            # Binary classification: BCE loss
+            # logits shape: (B, W_patches, 1)
+            logits_flat = logits.reshape(-1)  # (B * W_patches,)
+            labels_flat = labels_downsampled.reshape(-1).float()  # (B * W_patches,) as float for BCE
+            loss = self.loss_fn(logits_flat, labels_flat)
+        else:
+            # Multi-class classification: CrossEntropy loss
+            # logits shape: (B, W_patches, num_classes)
+            B, W_patches, num_classes = logits.shape
+            logits_flat = logits.reshape(-1, num_classes)  # (B * W_patches, num_classes)
+            labels_flat = labels_downsampled.reshape(-1)  # (B * W_patches,)
+            loss = self.loss_fn(logits_flat, labels_flat)
         
         return loss
     
@@ -125,27 +138,76 @@ class SupervisedTinyBird(nn.Module):
         Compute per-timebin accuracy.
         
         Args:
-            logits: (B, W_patches, num_classes)
+            logits: (B, W_patches, 1) for binary or (B, W_patches, num_classes) for multi-class
             labels: (B, W) where W is n_timebins
             
         Returns:
             accuracy: scalar accuracy value (0-100%)
         """
-        B, W_patches, num_classes = logits.shape
         B_label, W = labels.shape
         
         # Downsample labels to match patch width
         labels_downsampled = labels[:, ::self.patch_width]
         
-        # Get predictions
-        preds = torch.argmax(logits, dim=-1)  # (B, W_patches)
+        if self.num_classes == 2:
+            # Binary classification: use sigmoid + threshold at 0.5
+            # logits shape: (B, W_patches, 1)
+            logits_flat = logits.reshape(-1)  # (B * W_patches,)
+            probs = torch.sigmoid(logits_flat)  # (B * W_patches,)
+            preds = (probs > 0.5).long().reshape(labels_downsampled.shape)  # (B, W_patches)
+        else:
+            # Multi-class classification: use argmax
+            # logits shape: (B, W_patches, num_classes)
+            B, W_patches, num_classes = logits.shape
+            preds = torch.argmax(logits, dim=-1)  # (B, W_patches)
         
         # Compute accuracy
         correct = (preds == labels_downsampled).sum().item()
-        total = B * W_patches
+        total = labels_downsampled.numel()
         accuracy = 100.0 * correct / total
         
         return accuracy
+    
+    def compute_f1_score(self, logits, labels):
+        """
+        Compute F1 score for detection (binary classification only).
+        
+        Args:
+            logits: (B, W_patches, 1) for binary or (B, W_patches, num_classes) for multi-class
+            labels: (B, W) where W is n_timebins
+            
+        Returns:
+            f1: F1 score (0-100%), or None if not in binary detection mode
+        """
+        if self.num_classes != 2:
+            return None
+        
+        B_label, W = labels.shape
+        
+        # Downsample labels to match patch width
+        labels_downsampled = labels[:, ::self.patch_width]
+        
+        # Binary classification: use sigmoid + threshold at 0.5
+        # logits shape: (B, W_patches, 1)
+        logits_flat = logits.reshape(-1)  # (B * W_patches,)
+        probs = torch.sigmoid(logits_flat)  # (B * W_patches,)
+        preds = (probs > 0.5).long()  # (B * W_patches,)
+        labels_flat = labels_downsampled.reshape(-1)  # (B * W_patches,)
+        
+        # Calculate TP, FP, FN
+        # Positive class is 1 (vocalization detected)
+        tp = ((preds == 1) & (labels_flat == 1)).sum().item()
+        fp = ((preds == 1) & (labels_flat == 0)).sum().item()
+        fn = ((preds == 0) & (labels_flat == 1)).sum().item()
+        
+        # Compute precision and recall
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        
+        # Compute F1 score
+        f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+        
+        return f1 * 100.0  # Convert to percentage
 
 
 SRC_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -204,18 +266,27 @@ class Trainer():
         # Initialize cosine annealing scheduler
         self.scheduler = CosineAnnealingLR(self.optimizer, T_max=config["steps"])
         
+        # Initialize AMP scaler if AMP is enabled
+        self.use_amp = config.get("amp", False)
+        self.scaler = torch.cuda.amp.GradScaler() if self.use_amp else None
+        
         # Loss history for tracking
         self.train_loss_history = []
         self.val_loss_history = []
         self.train_acc_history = []
         self.val_acc_history = []
+        self.train_f1_history = []
+        self.val_f1_history = []
         self.train_steps = []
         self.val_steps = []
         
         # Setup loss logging file
         self.loss_log_path = os.path.join(self.run_path, "loss_log.txt")
         with open(self.loss_log_path, 'w') as f:
-            f.write("step,train_loss,val_loss,train_acc,val_acc,samples_processed,steps_per_sec,samples_per_sec\n")
+            if config["mode"] == "detect":
+                f.write("step,train_loss,val_loss,train_acc,val_acc,train_f1,val_f1,samples_processed,steps_per_sec,samples_per_sec\n")
+            else:
+                f.write("step,train_loss,val_loss,train_acc,val_acc,samples_processed,steps_per_sec,samples_per_sec\n")
     
     def step(self, batch, is_training=True):
         """
@@ -228,6 +299,7 @@ class Trainer():
         Returns:
             loss: Scalar loss value
             accuracy: Accuracy percentage
+            f1: F1 score (only for detection mode, else None)
             logits: Model predictions (for visualization)
         """
         spectrograms, labels, _ = batch
@@ -242,17 +314,30 @@ class Trainer():
         
         # Forward pass
         with torch.set_grad_enabled(is_training):
-            logits = self.model(x)
-            loss = self.model.compute_loss(logits, labels)
-            accuracy = self.model.compute_accuracy(logits, labels)
+            if self.use_amp:
+                with torch.cuda.amp.autocast():
+                    logits = self.model(x)
+                    loss = self.model.compute_loss(logits, labels)
+                    accuracy = self.model.compute_accuracy(logits, labels)
+                    f1 = self.model.compute_f1_score(logits, labels)
+            else:
+                logits = self.model(x)
+                loss = self.model.compute_loss(logits, labels)
+                accuracy = self.model.compute_accuracy(logits, labels)
+                f1 = self.model.compute_f1_score(logits, labels)
         
         # Backward pass only for training
         if is_training:
-            loss.backward()
-            self.optimizer.step()
+            if self.use_amp:
+                self.scaler.scale(loss).backward()
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                loss.backward()
+                self.optimizer.step()
             self.scheduler.step()
         
-        return loss.item(), accuracy, logits
+        return loss.item(), accuracy, f1, logits
     
     def save_prediction_visualization(self, batch, logits, step_num):
         """
@@ -260,21 +345,34 @@ class Trainer():
         
         Args:
             batch: Input batch (spectrograms, labels, filenames)
-            logits: Model predictions (B, W_patches, num_classes)
+            logits: Model predictions (B, W_patches, 1) for binary or (B, W_patches, num_classes) for multi-class
             step_num: Current training step
         """
         from plotting_utils import save_supervised_prediction_plot
         
         spectrograms, labels, filenames = batch
         
+        # Select a sample from the batch (cycle through to show variety)
+        batch_size = spectrograms.shape[0]
+        sample_idx = (step_num // self.config["eval_every"]) % batch_size
+        
         # Move to CPU and convert to numpy
-        spec = spectrograms[0, 0].cpu().numpy()  # First sample, remove channel dim
-        labels_np = labels[0].cpu().numpy()  # (W,)
-        logits_np = logits[0].cpu().numpy()  # (W_patches, num_classes)
+        spec = spectrograms[sample_idx, 0].cpu().numpy()  # Selected sample, remove channel dim
+        labels_np = labels[sample_idx].cpu().numpy()  # (W,)
+        logits_np = logits[sample_idx].cpu().numpy()  # (W_patches, 1) or (W_patches, num_classes)
         
         # Get predictions and probabilities
-        preds = np.argmax(logits_np, axis=-1)  # (W_patches,)
-        probs = torch.softmax(torch.from_numpy(logits_np), dim=-1).numpy()  # (W_patches, num_classes)
+        if self.model.num_classes == 2:
+            # Binary classification: use sigmoid + threshold
+            logits_flat = logits_np.reshape(-1)  # (W_patches,)
+            probs_flat = torch.sigmoid(torch.from_numpy(logits_flat)).numpy()  # (W_patches,)
+            preds = (probs_flat > 0.5).astype(int)  # (W_patches,)
+            # For visualization, create 2-class probability array
+            probs = np.stack([1 - probs_flat, probs_flat], axis=-1)  # (W_patches, 2)
+        else:
+            # Multi-class classification: use argmax and softmax
+            preds = np.argmax(logits_np, axis=-1)  # (W_patches,)
+            probs = torch.softmax(torch.from_numpy(logits_np), dim=-1).numpy()  # (W_patches, num_classes)
         
         # Downsample labels to match predictions
         labels_downsampled = labels_np[::self.config["patch_width"]]
@@ -285,7 +383,7 @@ class Trainer():
             labels=labels_downsampled,
             predictions=preds,
             probabilities=probs if self.config["mode"] == "detect" else None,
-            filename=filenames[0],
+            filename=filenames[sample_idx],
             mode=self.config["mode"],
             num_classes=self.model.num_classes,
             output_dir=self.imgs_path,
@@ -355,11 +453,13 @@ class Trainer():
                 train_batch = next(train_iter)
             
             # Training step
-            train_loss, train_acc, _ = self.step(train_batch, is_training=True)
+            train_loss, train_acc, train_f1, _ = self.step(train_batch, is_training=True)
             
             # Store training loss and accuracy every step
             self.train_loss_history.append(train_loss)
             self.train_acc_history.append(train_acc)
+            if train_f1 is not None:
+                self.train_f1_history.append(train_f1)
             self.train_steps.append(step_num)
             
             # Evaluation and checkpointing
@@ -371,11 +471,13 @@ class Trainer():
                     val_batch = next(val_iter)
                 
                 # Validation step (no gradients)
-                val_loss, val_acc, val_logits = self.step(val_batch, is_training=False)
+                val_loss, val_acc, val_f1, val_logits = self.step(val_batch, is_training=False)
                 
                 # Store validation loss and accuracy
                 self.val_loss_history.append(val_loss)
                 self.val_acc_history.append(val_acc)
+                if val_f1 is not None:
+                    self.val_f1_history.append(val_f1)
                 self.val_steps.append(step_num)
                 
                 # Calculate samples processed
@@ -397,17 +499,30 @@ class Trainer():
                 
                 # Print progress
                 current_lr = self.scheduler.get_last_lr()[0]
-                print(f"Step {step_num} ({progress_pct:.1f}%): "
-                      f"Train Loss = {train_loss:.6f}, Val Loss = {val_loss:.6f}, "
-                      f"Train Acc = {train_acc:.2f}%, Val Acc = {val_acc:.2f}%, "
-                      f"Samples = {samples_processed}, "
-                      f"LR = {current_lr:.2e}, "
-                      f"Steps/sec = {steps_per_sec:.2f}, "
-                      f"Samples/sec = {samples_per_sec:.1f}")
+                if self.config["mode"] == "detect":
+                    print(f"Step {step_num} ({progress_pct:.1f}%): "
+                          f"Train Loss = {train_loss:.6f}, Val Loss = {val_loss:.6f}, "
+                          f"Train Acc = {train_acc:.2f}%, Val Acc = {val_acc:.2f}%, "
+                          f"Train F1 = {train_f1:.2f}%, Val F1 = {val_f1:.2f}%, "
+                          f"Samples = {samples_processed}, "
+                          f"LR = {current_lr:.2e}, "
+                          f"Steps/sec = {steps_per_sec:.2f}, "
+                          f"Samples/sec = {samples_per_sec:.1f}")
+                else:
+                    print(f"Step {step_num} ({progress_pct:.1f}%): "
+                          f"Train Loss = {train_loss:.6f}, Val Loss = {val_loss:.6f}, "
+                          f"Train Acc = {train_acc:.2f}%, Val Acc = {val_acc:.2f}%, "
+                          f"Samples = {samples_processed}, "
+                          f"LR = {current_lr:.2e}, "
+                          f"Steps/sec = {steps_per_sec:.2f}, "
+                          f"Samples/sec = {samples_per_sec:.1f}")
                 
                 # Log losses and accuracies to file
                 with open(self.loss_log_path, 'a') as f:
-                    f.write(f"{step_num},{train_loss:.6f},{val_loss:.6f},{train_acc:.2f},{val_acc:.2f},{samples_processed},{steps_per_sec:.2f},{samples_per_sec:.1f}\n")
+                    if self.config["mode"] == "detect":
+                        f.write(f"{step_num},{train_loss:.6f},{val_loss:.6f},{train_acc:.2f},{val_acc:.2f},{train_f1:.2f},{val_f1:.2f},{samples_processed},{steps_per_sec:.2f},{samples_per_sec:.1f}\n")
+                    else:
+                        f.write(f"{step_num},{train_loss:.6f},{val_loss:.6f},{train_acc:.2f},{val_acc:.2f},{samples_processed},{steps_per_sec:.2f},{samples_per_sec:.1f}\n")
                 
                 # Save model weights
                 weight_path = os.path.join(self.weights_path, f"model_step_{step_num:06d}.pth")
@@ -445,6 +560,7 @@ if __name__ == "__main__":
     
     # Model configuration
     parser.add_argument("--freeze_encoder", action="store_true", help="freeze encoder weights (linear probe mode)")
+    parser.add_argument("--amp", action="store_true", help="enable automatic mixed precision training")
     
     args = parser.parse_args()
     

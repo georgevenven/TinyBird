@@ -98,11 +98,15 @@ def save_reconstruction_plot(
     use_amp: bool,
     output_dir: str,
     step_num: int,
+    sample_idx: int = 0,
     figsize: Optional[Tuple[int, int]] = None,
     cmap: str = MASK_CMAP,
 ) -> str:
     """
     Generate and persist the reconstruction comparison plot for a batch.
+    
+    Args:
+        sample_idx: Index of the sample to visualize from the batch (default: 0)
 
     Returns:
         The file path of the saved image.
@@ -134,9 +138,9 @@ def save_reconstruction_plot(
 
     overlay_img = _depatchify(overlay_patches, mels=config["mels"], timebins=config["num_timebins"], patch_size=patch_size)
 
-    x_img = x[0, 0].detach().cpu().numpy()
-    overlay_img_np = overlay_img[0, 0].detach().cpu().numpy()
-    mask_flat_np = bool_mask[0].detach().cpu().numpy().astype(bool)
+    x_img = x[sample_idx, 0].detach().cpu().numpy()
+    overlay_img_np = overlay_img[sample_idx, 0].detach().cpu().numpy()
+    mask_flat_np = bool_mask[sample_idx].detach().cpu().numpy().astype(bool)
     mask_img_np = _mask_flat_to_image(mask_flat_np, patch_size=patch_size, spec_shape=spec_shape)
 
     masked_display = x_img.copy()

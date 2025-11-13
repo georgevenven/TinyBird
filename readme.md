@@ -23,10 +23,8 @@
 }
 ```
 
-- Times are milliseconds; `plot_embedding_bf.py` converts them to 2 ms timebins.
+- Times are milliseconds
 - all values are relative to the absolute start and end of files 
-
-
 
 
 #### 
@@ -34,11 +32,15 @@ audio2spec.py --> compute_statistics_of_spectrograms.py --> pretrain.py --> plot
 
 
 ####
-To Do 
+To Do Next SWE GOALS
 #### 
-[] Next SWE GOALS, INHERITANCE IN THE DATACLASS, AND TWO TRAINING SCRIPTS 
+[] INHERITANCE IN THE DATACLASS, AND TWO TRAINING SCRIPTS (also inheritance)
 [] Classificaiton mixes individuals if folders not serperated, fix this 
 [] Breaking apart song for inference context length should be its own script
 [] Collate by song length to not do extreme padding
-[] Settings to set root? 
-[] At ability to add song detector to song2spec.py 
+[] Settings to set root? for path 
+[] At ability to add song detector to audio2spec.py 
+[] a "dataloader" util for birdset iteration 
+[] audio2spec needs to be refactored and simplfied 
+[] standardize the data fields that are saved into the json files 
+[] discrepency in VRAM usage between 
