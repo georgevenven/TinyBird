@@ -54,6 +54,7 @@ def _fit_umap(embeddings, args):
         "n_components": 2,
         "n_neighbors": args.umap_neighbors,
         "metric": "cosine",
+        "min_dist": 0.01,
     }
     if args.deterministic:
         reducer_kwargs["random_state"] = 42
@@ -115,7 +116,7 @@ def main():
     parser.add_argument("--num_timebins", type=int, default=12400, help="Maximum number of timebins to accumulate during extraction")
     parser.add_argument("--json_path", default=None, help="Event JSON path (optional)")
     parser.add_argument("--bird", default=None, help="Optional bird identifier to filter JSON")
-    parser.add_argument("--umap_neighbors", type=int, default=50, help="Number of neighbors for UMAP")
+    parser.add_argument("--umap_neighbors", type=int, default=200, help="Number of neighbors for UMAP")
     parser.add_argument("--max_spectrograms", type=int, default=5, help="Maximum number of event spectrograms to save")
     parser.add_argument("--deterministic", action="store_true", help="Use deterministic UMAP with random_state")
     args = parser.parse_args()

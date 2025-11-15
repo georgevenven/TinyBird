@@ -24,8 +24,8 @@ def depatchify(pred_patches, H, W, patch_size):
 def masked_original(x_patches, bool_mask):
     # x_patches: (B, T, P), bool_mask: (B, T)
     masked = x_patches.clone()
-    min_val = masked.min()
-    masked[bool_mask] = min_val - 1.0
+    # Set masked values very low to render as black in viridis colormap
+    masked[bool_mask] = -10.0
     return masked
 
 
@@ -55,7 +55,6 @@ def main():
     # Dataset and loader (val-style), batch size = 1
     dataset = SpectogramDataset(
         dir=args.spec_dir,
-        n_mels=config["mels"],
         n_timebins=config["num_timebins"]
     )
     loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=4, pin_memory=True)
@@ -80,7 +79,7 @@ def main():
         json.dump(meta, f, indent=2)
 
     patch_size = tuple(config["patch_size"])
-    H = int(config["mels"])
+    H = int(dataset.n_mels)
     W = int(config["num_timebins"])
 
     unfold = nn.Unfold(kernel_size=patch_size, stride=patch_size)
@@ -114,10 +113,11 @@ def main():
             # Prepare patches of target
             x_patches = unfold(x).transpose(1, 2)  # (1, T, P)
 
-            # Denormalize predictions to original patch scale
-            target_mean = x_patches.mean(dim=-1, keepdim=True)
-            target_std = x_patches.std(dim=-1, keepdim=True)
-            pred_denorm = pred * (target_std + 1e-6) + target_mean  # (1, T, P)
+            # Disable per-patch denormalization so we visualise raw decoder outputs.
+            # target_mean = x_patches.mean(dim=-1, keepdim=True)
+            # target_std = x_patches.std(dim=-1, keepdim=True)
+            # pred_denorm = pred * (target_std + 1e-6) + target_mean  # (1, T, P)
+            pred_denorm = pred.to(dtype=x_patches.dtype)
 
             # Full-seq reconstruction image
             recon_full = depatchify(pred_denorm, H=H, W=W, patch_size=patch_size)  # (1, 1, H, W)
@@ -125,7 +125,13 @@ def main():
             # Overlay image: original for unmasked, prediction for masked
             overlay_patches = x_patches.clone()
             overlay_patches[bool_mask] = pred_denorm[bool_mask]
-            overlay_img = depatchify(overlay_patches, H=H, W=W, patch_size=patch_size)
+            
+            # Normalize all patches patch-wise for consistent visualization
+            overlay_mean = overlay_patches.mean(dim=-1, keepdim=True)
+            overlay_std = overlay_patches.std(dim=-1, keepdim=True)
+            overlay_patches_normalized = (overlay_patches - overlay_mean) / (overlay_std + 1e-6)
+            
+            overlay_img = depatchify(overlay_patches_normalized, H=H, W=W, patch_size=patch_size)
 
             # Masked-original image for visualization
             masked_patches = masked_original(x_patches, bool_mask)
@@ -152,14 +158,14 @@ def main():
             masked_img_np = masked_img[0, 0].detach().cpu().numpy()
             overlay_np = overlay_img[0, 0].detach().cpu().numpy()
 
-            fig = plt.figure(figsize=(16, 6))
+            fig = plt.figure(figsize=(8, 6))
             ax1 = plt.subplot(3, 1, 1)
             ax1.imshow(x_img, origin="lower", aspect="auto")
             ax1.set_title("Input Spectrogram", fontsize=16, fontweight='bold')
             ax1.axis("off")
 
             ax2 = plt.subplot(3, 1, 2)
-            ax2.imshow(masked_img_np, origin="lower", aspect="auto", cmap="viridis")
+            ax2.imshow(masked_img_np, origin="lower", aspect="auto")
             ax2.set_title("Input Spectrogram With Mask", fontsize=16, fontweight='bold')
             ax2.axis("off")
 

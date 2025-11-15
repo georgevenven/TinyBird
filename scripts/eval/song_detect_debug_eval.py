@@ -182,6 +182,7 @@ def main(args):
     patch_width = config["patch_width"]
     model_num_timebins = config["num_timebins"]
     window_size = args["window_size"]
+    threshold = args["threshold"]
     
     for i, (spec, labels, filename) in enumerate(loader):
         if i >= args["num_samples"]:
@@ -232,7 +233,7 @@ def main(args):
                     # Binary classification with BCE: logits shape (1, W_patches, 1)
                     logits_flat = logits.reshape(-1)  # (W_patches,)
                     probs = torch.sigmoid(logits_flat)  # (W_patches,)
-                    preds = (probs > 0.5).long()  # (W_patches,)
+                    preds = (probs > threshold).long()  # (W_patches,)
                 else:
                     # Multi-class classification: logits shape (1, W_patches, num_classes)
                     preds = torch.argmax(logits, dim=-1)[0]  # (W_patches,)
@@ -293,6 +294,7 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint", type=str, default=None, help="Checkpoint filename (default: latest)")
     parser.add_argument("--num_samples", type=int, default=10, help="Number of samples to visualize")
     parser.add_argument("--window_size", type=int, default=100, help="Sliding window size for smoothing")
+    parser.add_argument("--threshold", type=float, default=0.5, help="Detection probability threshold (default: 0.5)")
     
     args = parser.parse_args()
     main(vars(args))
