@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""Assemble a composite video for a given global cluster identifier."""
+"""Assemble a composite video for a given motif using matches from the registry.
+
+Expands short motif matches to a minimum clip duration (without moving the
+start) and merges overlapping matches so that repeated padding does not create
+duplicate clips.
+"""
 
 from __future__ import annotations
 
 import argparse
 import logging
+import math
 import pickle
 import re
 import sqlite3
@@ -15,6 +21,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 import numpy as np
+import torch
 
 import matplotlib
 
@@ -113,31 +120,37 @@ def _with_audio(clip, audio_clip):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cluster-id", type=int, required=True, help="Global cluster identifier.")
+    parser.add_argument("--motif-id", type=int, required=True, help="Motif identifier to visualize.")
     parser.add_argument(
         "--registry",
         type=Path,
-        default=Path("cluster_registry.sqlite"),
-        help="SQLite registry containing cluster membership.",
+        default=Path("motif_registry.sqlite"),
+        help="SQLite registry containing motif metadata and matches.",
     )
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("results") / "cluster_videos",
+        default=Path("results") / "motif_videos",
         help="Directory where the composite video will be written.",
     )
     parser.add_argument(
         "--filename",
         type=str,
         default=None,
-        help="Optional filename for the output clip (defaults to cluster_<id>.mp4).",
+        help="Optional filename for the output clip (defaults to motif_<id>.mp4).",
     )
-    parser.add_argument("--max-clips", type=int, default=16, help="Limit number of clips sampled per cluster.")
+    parser.add_argument("--max-clips", type=int, default=16, help="Limit number of clips sampled per motif.")
     parser.add_argument(
         "--clip-duration",
         type=float,
         default=4.0,
         help="Maximum duration (seconds) to extract per block (defaults to 4.0).",
+    )
+    parser.add_argument(
+        "--min-clip-duration",
+        type=float,
+        default=2.0,
+        help="Minimum duration (seconds) for clips (extends matches by padding).",
     )
     parser.add_argument(
         "--min-duration",
@@ -199,52 +212,123 @@ def resolve_bird_label(channel_index: int, bird0: str | None, bird1: str | None)
     return birds or "unknown"
 
 
-def fetch_members(registry_path: Path, cluster_id: int) -> list[MemberRecord]:
+def _load_column_map(blob: bytes | memoryview | None) -> np.ndarray:
+    if not blob:
+        return np.asarray([], dtype=np.int64)
+    try:
+        data = pickle.loads(bytes(blob))
+        return np.asarray(data, dtype=np.int64)
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("failed to decode column_map (%s)", exc)
+        return np.asarray([], dtype=np.int64)
+
+
+def _lookup_valid_column(column_map: np.ndarray, index: int, *, forward: bool) -> Optional[int]:
+    if column_map.size == 0:
+        return None
+    index = max(0, min(int(index), column_map.size - 1))
+    step = 1 if forward else -1
+    while 0 <= index < column_map.size:
+        value = int(column_map[index])
+        if value >= 0:
+            return value
+        index += step
+    return None
+
+
+def _project_match_columns(column_map: np.ndarray, start_idx: int, length: int) -> Optional[tuple[float, float]]:
+    if length <= 0:
+        return None
+    if column_map.size == 0:
+        return float(start_idx), float(start_idx + length)
+    start_col = _lookup_valid_column(column_map, start_idx, forward=True)
+    end_col = _lookup_valid_column(column_map, start_idx + length - 1, forward=False)
+    if start_col is None or end_col is None:
+        return None
+    return float(start_col), float(end_col + 1)
+
+
+def fetch_members(registry_path: Path, motif_id: int, min_clip_duration: float) -> list[MemberRecord]:
     if not registry_path.exists():
         raise FileNotFoundError(f"registry not found: {registry_path}")
     query = """
-        SELECT file_path,
-               channel_index,
-               start_col,
-               end_col,
-               split,
-               distance,
-               source_pickle
-        FROM members
-        WHERE cluster_id = ?
+        SELECT c.file_path,
+               c.channel_index,
+               c.split,
+               c.column_map,
+               mm.seed_distance,
+               mm.starts,
+               m.length
+        FROM motifs AS m
+        JOIN motif_matches AS mm ON mm.motif_id = m.id
+        JOIN channels AS c ON c.dataset_id = mm.dataset_id
+        WHERE m.id = ?
         ORDER BY
-            CASE WHEN distance IS NULL THEN 1 ELSE 0 END ASC,
-            distance ASC,
-            start_col ASC
+            CASE WHEN mm.seed_distance IS NULL THEN 1 ELSE 0 END ASC,
+            mm.seed_distance ASC,
+            c.file_path ASC
     """
     connection = sqlite3.connect(registry_path)
     try:
         cursor = connection.cursor()
-        cursor.execute(query, (int(cluster_id),))
+        cursor.execute(query, (int(motif_id),))
         rows = cursor.fetchall()
     finally:
         connection.close()
     records: list[MemberRecord] = []
+    active_spans: dict[tuple[str, int], MemberRecord] = {}
     for (
         file_path,
         channel_index,
-        start_col,
-        end_col,
         split,
-        distance,
-        source_pickle,
+        column_map_blob,
+        seed_distance,
+        starts_blob,
+        motif_length,
     ) in rows:
-        records.append(
-            MemberRecord(
+        column_map = _load_column_map(column_map_blob)
+        try:
+            starts = sorted(int(val) for val in pickle.loads(bytes(starts_blob)))
+        except Exception as exc:  # noqa: BLE001
+            logging.warning("failed to decode motif starts for %s (%s)", file_path, exc)
+            continue
+        frame_step = load_frame_step(file_path)
+        min_cols = 0
+        if min_clip_duration > 0 and frame_step > 0:
+            min_cols = int(math.ceil(min_clip_duration / frame_step))
+        target_length = max(int(motif_length), min_cols)
+        key = (file_path, int(channel_index))
+        for start in starts:
+            projection = _project_match_columns(column_map, int(start), target_length)
+            if projection is None:
+                logging.debug(
+                    "skipping start %s for %s channel %s (unable to map to source columns)",
+                    start,
+                    file_path,
+                    channel_index,
+                )
+                continue
+            start_col, end_col = projection
+            existing = active_spans.get(key)
+            if existing and start_col <= existing.end_col:
+                existing.end_col = max(existing.end_col, end_col)
+                if seed_distance is not None:
+                    if existing.distance is None:
+                        existing.distance = float(seed_distance)
+                    else:
+                        existing.distance = min(existing.distance, float(seed_distance))
+                continue
+            record = MemberRecord(
                 file_path=file_path,
                 channel_index=int(channel_index),
-                start_col=float(start_col),
-                end_col=float(end_col),
+                start_col=start_col,
+                end_col=end_col,
                 split=split or "",
-                distance=float(distance) if distance is not None else None,
-                source_pickle=source_pickle,
+                distance=float(seed_distance) if seed_distance is not None else None,
+                source_pickle=file_path,
             )
-        )
+            records.append(record)
+            active_spans[key] = record
     return records
 
 
@@ -293,13 +377,24 @@ def find_mp4_for_member(
 def load_frame_step(pickle_path: str) -> float:
     path = Path(pickle_path)
     if not path.exists():
-        logging.warning("source pickle not found: %s", pickle_path)
+        logging.warning("source tensor not found: %s", pickle_path)
         return 0.0
-    try:
-        with path.open("rb") as fh:
-            payload = pickle.load(fh)
-    except Exception as exc:  # noqa: BLE001
-        logging.warning("failed to load pickle %s (%s)", pickle_path, exc)
+    payload: Optional[dict] = None
+    load_error: Exception | None = None
+    if path.suffix in {".pt", ".pth"}:
+        try:
+            payload = torch.load(path, map_location="cpu")
+        except Exception as exc:  # noqa: BLE001
+            load_error = exc
+    if payload is None:
+        try:
+            with path.open("rb") as fh:
+                payload = pickle.load(fh)
+        except Exception as exc:  # noqa: BLE001
+            load_error = exc
+            payload = None
+    if payload is None:
+        logging.warning("failed to load metadata %s (%s)", pickle_path, load_error)
         return 0.0
 
     meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
@@ -329,6 +424,7 @@ def compute_clip_plan(
     member: MemberRecord,
     video_path: Path,
     clip_duration: float,
+    min_clip_duration: float,
     min_duration: float,
 ) -> Optional[ClipPlan]:
     frame_step = load_frame_step(member.source_pickle)
@@ -360,7 +456,11 @@ def compute_clip_plan(
         )
         return None
 
-    desired_duration = min(full_duration, clip_duration) if clip_duration > 0 else full_duration
+    desired_duration = full_duration
+    if min_clip_duration > 0:
+        desired_duration = max(desired_duration, min_clip_duration)
+    if clip_duration > 0:
+        desired_duration = min(desired_duration, clip_duration)
     if desired_duration < min_duration:
         desired_duration = full_duration
         if desired_duration < min_duration:
@@ -563,7 +663,7 @@ def generate_label_array(
     return np.asarray(image)
 
 
-def annotate_clip(clip: VideoFileClip, plan: ClipPlan, cluster_id: int) -> CompositeVideoClip:
+def annotate_clip(clip: VideoFileClip, plan: ClipPlan, motif_id: int) -> CompositeVideoClip:
     width = clip.w
     height = clip.h
     label_width = max(int(width * 0.45), 320)
@@ -582,7 +682,7 @@ def annotate_clip(clip: VideoFileClip, plan: ClipPlan, cluster_id: int) -> Compo
     label_clip = _with_clip_attribute(label_clip, "position", (pos_x, pos_y))
 
     title_height = max(60, int(width * 0.05))
-    title_text = f"Cluster {cluster_id}"
+    title_text = f"Motif {motif_id}"
     title_img = generate_label_array(title_text, width, height=title_height, align="center")
     title_clip = ImageClip(title_img, is_mask=False)
     title_clip = _with_clip_attribute(title_clip, "duration", clip.duration)
@@ -661,7 +761,7 @@ def concatenate_clips(clips: list[CompositeVideoClip]) -> CompositeVideoClip:
 def assemble_video(
     plans: list[ClipPlan],
     output_path: Path,
-    cluster_id: int,
+    motif_id: int,
     fps: Optional[float],
     min_duration: float,
 ) -> None:
@@ -691,7 +791,7 @@ def assemble_video(
 
             subclip = _subclip_video(base_clip, clip_start, clip_end)
             opened_clips.append(subclip)
-            annotated = annotate_clip(subclip, plan, cluster_id)
+            annotated = annotate_clip(subclip, plan, motif_id)
             logging.debug(
                 "annotated clip for %s: %s (audio=%s)",
                 plan.file_name,
@@ -701,7 +801,7 @@ def assemble_video(
             annotated_clips.append(annotated)
 
         if not annotated_clips:
-            raise RuntimeError("no usable clips were gathered for the requested cluster.")
+            raise RuntimeError("no usable clips were gathered for the requested motif.")
 
         annotated_clips.sort(key=lambda clip: float(clip.duration or 0.0))
         logging.debug(
@@ -795,6 +895,7 @@ def select_plans(
             member,
             mp4_path,
             args.clip_duration,
+            args.min_clip_duration,
             args.min_duration,
         )
         if not plan:
@@ -812,27 +913,27 @@ def main() -> None:
     setup_logging(args.verbose)
 
     try:
-        members = fetch_members(args.registry, args.cluster_id)
+        members = fetch_members(args.registry, args.motif_id, args.min_clip_duration)
     except Exception as exc:  # noqa: BLE001
-        logging.error("failed to fetch cluster members: %s", exc)
+        logging.error("failed to fetch motif matches: %s", exc)
         sys.exit(1)
 
     if not members:
-        logging.error("cluster %s has no registered members.", args.cluster_id)
+        logging.error("motif %s has no registered matches.", args.motif_id)
         sys.exit(1)
 
     plans = select_plans(members, args)
     if not plans:
-        logging.error("no usable video clips found for cluster %s.", args.cluster_id)
+        logging.error("no usable video clips found for motif %s.", args.motif_id)
         sys.exit(1)
 
     output_dir = args.output
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_filename = args.filename or f"cluster_{args.cluster_id}.mp4"
+    output_filename = args.filename or f"motif_{args.motif_id}.mp4"
     output_path = output_dir / output_filename
 
     try:
-        assemble_video(plans, output_path, args.cluster_id, args.fps, args.min_duration)
+        assemble_video(plans, output_path, args.motif_id, args.fps, args.min_duration)
     except Exception as exc:  # noqa: BLE001
         logging.error("failed to assemble video: %s", exc)
         sys.exit(1)

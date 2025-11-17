@@ -17,12 +17,12 @@ echo "==> Switching to repository: ${REPO_DIR}"
 cd "${REPO_DIR}"
 
 echo "==> Step 1: per-channel clustering (training set)"
-# uv run python src/audio2cluster.py \
+# uv run python src/audio2motif.py \
 #   --src_dir "${TRAIN_AUDIO}" \
 #   --dst_dir "${TRAIN_OUT}"
 
 echo "==> Step 1: per-channel clustering (validation set)"
-# uv run python src/audio2cluster.py \
+# uv run python src/audio2motif.py \
 #   --src_dir "${VAL_AUDIO}" \
 #   --dst_dir "${VAL_OUT}"
 
@@ -57,4 +57,3 @@ uv run python src/cluster_regsitry.py info \
   --registry "${REGISTRY_DB}"
 
 echo "==> Pipeline complete."
-
