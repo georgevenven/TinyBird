@@ -466,10 +466,10 @@ def find_motifs(T, m, n_new_motifs=3, max_seed_distance=3.5, dataset_id="T", mot
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def _iter_pt_files(root: Path, split: str) -> Iterator[Path]:
-    base = Path(root) / split
+def _iter_pt_files(root: Path) -> Iterator[Path]:
+    base = Path(root)
     if not base.exists():
-        raise FileNotFoundError(f"split directory does not exist: {base}")
+        raise FileNotFoundError(f"data directory does not exist: {base}")
     for path in sorted(base.glob("**/*.pt")):
         if path.is_file():
             yield path
@@ -579,6 +579,26 @@ def _build_dataset_id(file_path: Path, channel_index: int) -> str:
     return f"{file_path}|ch{channel_index}"
 
 
+def _resolve_split(meta: Optional[dict], file_path: Path, fallback: str) -> str:
+    if isinstance(meta, dict):
+        for key in ("split", "partition", "subset"):
+            value = meta.get(key)
+            if isinstance(value, str) and value:
+                lower = value.lower()
+                if lower.startswith("train"):
+                    return "train"
+                if lower.startswith("val"):
+                    return "validation"
+    path = Path(file_path)
+    for part in path.parts:
+        lower = part.lower()
+        if lower.startswith("train"):
+            return "train"
+        if lower.startswith("val"):
+            return "validation"
+    return fallback
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Main pipeline
 # ──────────────────────────────────────────────────────────────────────────────
@@ -586,7 +606,7 @@ def _build_dataset_id(file_path: Path, channel_index: int) -> str:
 
 def process_pt_file(
     file_path: Path,
-    split: str,
+    split_label: str,
     registry: MotifRegistry,
     motif_length: int,
     n_new_motifs: int,
@@ -604,6 +624,7 @@ def process_pt_file(
 
     channels = spectrogram.shape[0]
     for channel_index in range(channels):
+        split = _resolve_split(meta, file_path, split_label)
         channel_spec = spectrogram[channel_index]
         intervals = _channel_intervals(payload, channel_index)
         if intervals.size == 0:
@@ -644,9 +665,9 @@ def process_pt_file(
 def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build or update motif registry from spectrogram tensors.")
     parser.add_argument(
-        "--data_dir", type=Path, required=True, help="Root directory containing train/validation splits."
+        "--data_dir", type=Path, required=True, help="Directory containing .pt files for a single split."
     )
-    parser.add_argument("--split", type=str, choices=("train", "validation"), required=True, help="Split to process.")
+    parser.add_argument("--split", type=str, choices=("train", "validation"), required=True, help="Split label to apply.")
     parser.add_argument(
         "--registry", type=Path, default=Path("../motif_registry.sqlite"), help="Registry database path."
     )
@@ -670,7 +691,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     if not motif_state:
         motif_state = None
 
-    for pt_file in _iter_pt_files(args.data_dir, args.split):
+    for pt_file in _iter_pt_files(args.data_dir):
         try:
             motif_state = process_pt_file(
                 pt_file,
