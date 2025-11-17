@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 """
-Plot a spectrogram stored in a .pt file (as produced by audio2spec.py) into a single PNG,
+Plot a spectrogram stored in a .pt file (as produced by audio2motif.py/audio2spec.py) into a single PNG,
 stacked as 30-second windows vertically. Time resolution per frame is configurable.
 
 Example:
@@ -18,13 +18,11 @@ import math
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy import ndimage
 
 
-def load_spectrogram(pt_path: Path) -> np.ndarray:
-    """Load spectrogram array 's' from a .pt file and return as numpy (F, T)."""
+def load_spectrogram(pt_path: Path, channel: int | None = None) -> tuple[np.ndarray, np.ndarray, float]:
+    """Load spectrogram array 's' and chirp intervals from a .pt file."""
     data = torch.load(pt_path, map_location="cpu", weights_only=False)
-    print(data.keys())
 
     if 's' not in data:
         raise KeyError(f"Key 's' not found in {pt_path}")
@@ -32,15 +30,42 @@ def load_spectrogram(pt_path: Path) -> np.ndarray:
     if 'chirp_intervals' not in data:
         raise KeyError(f"Key 'chirp_intervals' not found in {pt_path}")
 
-    spec = data['s'].detach().cpu().numpy()
+    spec = data['s']
+    chirps = data['chirp_intervals']
+    if isinstance(spec, torch.Tensor):
+        spec = spec.detach().cpu().numpy()
+    if isinstance(chirps, torch.Tensor):
+        chirps = chirps.detach().cpu().numpy()
+
     if spec.ndim == 3:
-        if spec.shape[0] == 1:
-            spec = spec[0]
-        else:
-            # average stereo channels for visualization
+        if channel is None:
             spec = np.mean(spec, axis=0)
-    chirps = data['chirp_intervals'].detach().cpu().numpy()
-    return spec, chirps
+        else:
+            if channel < 0 or channel >= spec.shape[0]:
+                raise ValueError(f"Channel {channel} out of range for spectrogram with {spec.shape[0]} channels.")
+            spec = spec[channel]
+
+    if chirps.ndim == 3:
+        if channel is None:
+            chirps = np.vstack([arr for arr in chirps if arr.size]).astype(np.int64)
+        else:
+            if channel < 0 or channel >= chirps.shape[0]:
+                raise ValueError(f"Channel {channel} out of range for chirp intervals with {chirps.shape[0]} channels.")
+            chirps = chirps[channel]
+    chirps = np.asarray(chirps, dtype=np.int64).reshape(-1, 2)
+    chirps = chirps[(chirps[:, 0] >= 0) & (chirps[:, 1] > chirps[:, 0])]
+
+    meta = data.get("meta") or {}
+    frame_step = meta.get("frame_step")
+    if frame_step is None:
+        sr = meta.get("sr") or meta.get("sample_rate")
+        hop = meta.get("hop_length") or meta.get("step_size")
+        if sr and hop:
+            frame_step = float(hop) / float(sr)
+    if frame_step is None:
+        frame_step = 0.01  # 10ms fallback
+
+    return spec, chirps, float(frame_step * 1000.0)
 
 
 def compute_windows(num_frames: int, frames_per_window: int) -> list[tuple[int, int]]:
@@ -147,10 +172,6 @@ def plot_stacked_windows(spec_db: np.ndarray,\
             ax2.set_ylabel('Loudness', color='yellow')
             ax2.tick_params(axis='y', labelcolor='yellow')
         
-        # Add colored overlay windows using low/chirp intervals
-        # - low_ints tinted blue
-        # - chirp_intervals tinted red
-        # Also mark interval boundaries with white vertical lines
         def _draw_intervals(intervals: list[tuple[int, int]], color: str) -> None:
             for (s, e) in intervals:
                 s_clamped = max(s, start)
@@ -191,12 +212,14 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Plot .pt spectrogram into stacked 30s windows")
     p.add_argument('--pt', required=True, type=str, help='Path to .pt spectrogram file')
     p.add_argument('--out', required=True, type=str, help='Output PNG path')
-    p.add_argument('--frame_ms', type=float, default=10.0,
-                   help='Frame duration in milliseconds (default: 10)')
+
     p.add_argument('--window_s', type=float, default=30.0,
                    help='Window size in seconds per panel (default: 30)')
     p.add_argument('--cmap', type=str, default='viridis', help='Matplotlib colormap')
     p.add_argument('--dpi', type=int, default=200, help='Output PNG DPI')
+    p.add_argument('--channel', type=int, default=None, help='Optional channel index to visualize.')
+    p.add_argument('--frame_ms', type=float, default=None,
+                   help='Override frame duration in milliseconds (default: auto from metadata).')
     args = p.parse_args()
 
     pt_path = Path(args.pt)
@@ -204,16 +227,19 @@ def main() -> None:
 
     if not pt_path.exists():
         raise FileNotFoundError(f".pt file not found: {pt_path}")
-    if args.frame_ms <= 0:
-        raise ValueError("--frame_ms must be > 0")
     if args.window_s <= 0:
         raise ValueError("--window_s must be > 0")
 
-    spec_db, chirp_intervals = load_spectrogram(pt_path)
+    spec_db, chirp_intervals, meta_frame_ms = load_spectrogram(pt_path, channel=args.channel)
+    frame_ms = meta_frame_ms
+    if args.frame_ms is not None:
+        if args.frame_ms <= 0:
+            raise ValueError("--frame_ms must be > 0 when provided")
+        frame_ms = args.frame_ms
     
     plot_stacked_windows(spec_db,
                          chirp_intervals=chirp_intervals,
-                         frame_ms=float(args.frame_ms),
+                         frame_ms=float(frame_ms),
                          window_s=float(args.window_s),
                          out_path=out_path,
                          cmap=args.cmap,
