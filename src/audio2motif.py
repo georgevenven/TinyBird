@@ -165,7 +165,24 @@ class SingleChannelProcessor:
         thr = otsu_threshold_lower(loudness)
         chirp_intervals = intervals_from_mask(loudness > thr)
 
-        self.chirp_intervals = np.asarray(chirp_intervals, dtype=np.int32).reshape(-1, 2)
+        intervals = np.asarray(chirp_intervals, dtype=np.int32).reshape(-1, 2)
+
+        frame_ms = float(self.args.hop_length) / float(self.args.sr) * 1000.0 if self.args.sr > 0 else 0.0
+        if frame_ms > 0 and merge_ms > 0:
+            gap_frames = max(1, int(round(merge_ms / frame_ms)))
+            merged: list[list[int]] = []
+            for start, end in intervals:
+                if not merged:
+                    merged.append([int(start), int(end)])
+                    continue
+                prev_start, prev_end = merged[-1]
+                if int(start) - prev_end <= gap_frames:
+                    merged[-1][1] = max(prev_end, int(end))
+                else:
+                    merged.append([int(start), int(end)])
+            intervals = np.asarray(merged, dtype=np.int32) if merged else intervals
+
+        self.chirp_intervals = intervals
 
         self._initialize_block_metadata()
 
