@@ -46,3 +46,7 @@ audio2spec.py --> compute_statistics_of_spectrograms.py --> pretrain.py --> plot
 - [ ] Reconstructions should all be noramlized patch wise (if used during training) to precent jarring viz 
 - [ ] We need a central util for managing the json format ... this will make life so much easier 
 - [ ] snippification of datasets (for easy upload and faster training)
+- [ ] remove spec subfolder when sbatch audio2spec
+
+#### Bugs
+- [] irregularity with number of specs made in log for XCM vs HSN_test
