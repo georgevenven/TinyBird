@@ -9,6 +9,7 @@ class TinyBird(nn.Module):
         self.max_seq = config["max_seq"]
         self.mask_p = config["mask_p"]
         self.mask_c = config["mask_c"]
+        self.normalize_patches = config.get("normalize_patches", True)
 
         self.patch_projection = nn.Conv2d(
             in_channels = 1,
@@ -187,10 +188,11 @@ class TinyBird(nn.Module):
         unfold = nn.Unfold(kernel_size=self.patch_size, stride=self.patch_size)
         target = unfold(x).transpose(1, 2)                            # (B, T, P)
         
-        # Normalize target patches
-        target_mean = target.mean(dim=-1, keepdim=True)
-        target_std = target.std(dim=-1, keepdim=True)
-        target = (target - target_mean) / (target_std + 1e-6)
+        # Optionally normalize target patches
+        if self.normalize_patches:
+            target_mean = target.mean(dim=-1, keepdim=True)
+            target_std = target.std(dim=-1, keepdim=True)
+            target = (target - target_mean) / (target_std + 1e-6)
         
         loss = ((pred - target) ** 2)[bool_mask].mean()
         return loss

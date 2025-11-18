@@ -366,6 +366,7 @@ if __name__ == "__main__":
     parser.add_argument("--eval_every", type=int, default=500, help="evaluate every N steps")
     parser.add_argument("--amp", action="store_true", help="enable automatic mixed precision training")
     parser.add_argument("--weight_decay", type=float, default=0.1, help="weight decay")
+    parser.add_argument("--no_normalize_patches", action="store_false", dest="normalize_patches", help="disable patch-level normalization in loss computation (enabled by default)")
     parser.add_argument("--continue_from", type=str, help="continue training from existing run directory (path to run dir)")
 
     # Encoder 
@@ -394,6 +395,7 @@ if __name__ == "__main__":
         config['continue_from'] = resolved_continue
         config['is_continuing'] = True
         config.setdefault("mask_c", args.mask_c)
+        config.setdefault("normalize_patches", True)  # Default to True for backward compatibility
 
     else:
         # New training mode - validate required args

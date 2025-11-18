@@ -6,6 +6,7 @@ import glob
 from collections import defaultdict
 from itertools import combinations
 from tqdm import tqdm
+import random
 
 def calculate_ms(detected_events):
     """Calculate total milliseconds in detected_events"""
@@ -13,6 +14,65 @@ def calculate_ms(detected_events):
     for event in detected_events:
         total_ms += event['offset_ms'] - event['onset_ms']
     return total_ms
+
+def split_data_random(input_file, spec_dir, train_dir, test_dir, train_percent=80):
+    """Randomly split recordings without considering bird_id"""
+    
+    # Create output directories
+    os.makedirs(train_dir, exist_ok=True)
+    os.makedirs(test_dir, exist_ok=True)
+    
+    # Load data
+    with open(input_file, 'r') as f:
+        data = json.load(f)
+    
+    # Get all recordings and shuffle them
+    recordings = data['recordings'].copy()
+    random.shuffle(recordings)
+    
+    # Calculate split point
+    split_idx = int(len(recordings) * (train_percent / 100))
+    train_recordings = recordings[:split_idx]
+    test_recordings = recordings[split_idx:]
+    
+    # Calculate statistics
+    train_ms = sum(calculate_ms(r['detected_events']) for r in train_recordings)
+    test_ms = sum(calculate_ms(r['detected_events']) for r in test_recordings)
+    total_ms = train_ms + test_ms
+    
+    # Copy train spec files
+    print("Copying train files...")
+    for recording in tqdm(train_recordings):
+        filename = recording['recording']['filename']
+        base_name = os.path.splitext(filename)[0]
+        matches = glob.glob(os.path.join(spec_dir, f"{base_name}.*"))
+        for src in matches:
+            dst = os.path.join(train_dir, os.path.basename(src))
+            shutil.copy2(src, dst)
+    
+    # Copy test spec files
+    print("Copying test files...")
+    for recording in tqdm(test_recordings):
+        filename = recording['recording']['filename']
+        base_name = os.path.splitext(filename)[0]
+        matches = glob.glob(os.path.join(spec_dir, f"{base_name}.*"))
+        for src in matches:
+            dst = os.path.join(test_dir, os.path.basename(src))
+            shutil.copy2(src, dst)
+    
+    # Copy audio_params.json to both directories
+    audio_params = os.path.join(spec_dir, "audio_params.json")
+    if os.path.exists(audio_params):
+        shutil.copy2(audio_params, os.path.join(train_dir, "audio_params.json"))
+        shutil.copy2(audio_params, os.path.join(test_dir, "audio_params.json"))
+    
+    # Print stats
+    print(f"\n=== Split Statistics (Random) ===")
+    print(f"Total MS: {total_ms:.2f}")
+    print(f"Train MS: {train_ms:.2f} ({train_ms/total_ms*100:.1f}%)")
+    print(f"Test MS: {test_ms:.2f} ({test_ms/total_ms*100:.1f}%)")
+    print(f"Train recordings: {len(train_recordings)}")
+    print(f"Test recordings: {len(test_recordings)}")
 
 def split_data(input_file, spec_dir, train_dir, test_dir, train_percent=80):
     """Split recordings by bird_id, aiming for train_percent of ms in train set"""
@@ -116,7 +176,12 @@ if __name__ == '__main__':
     parser.add_argument('--test_dir', required=True)
     parser.add_argument('--annotation_json', required=True)
     parser.add_argument('--train_percent', type=float, default=80)
+    parser.add_argument('--ignore_bird_id', action='store_true', 
+                        help='Randomly split files without grouping by bird_id')
     args = parser.parse_args()
     
-    split_data(args.annotation_json, args.spec_dir, args.train_dir, args.test_dir, args.train_percent)
+    if args.ignore_bird_id:
+        split_data_random(args.annotation_json, args.spec_dir, args.train_dir, args.test_dir, args.train_percent)
+    else:
+        split_data(args.annotation_json, args.spec_dir, args.train_dir, args.test_dir, args.train_percent)
 

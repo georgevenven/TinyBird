@@ -44,3 +44,5 @@ audio2spec.py --> compute_statistics_of_spectrograms.py --> pretrain.py --> plot
 - [ ] Discrepancy in VRAM usage between 
 - [ ] Rename to SongMAE everywhere 
 - [ ] Reconstructions should all be noramlized patch wise (if used during training) to precent jarring viz 
+- [ ] We need a central util for managing the json format ... this will make life so much easier 
+- [ ] snippification of datasets (for easy upload and faster training)
