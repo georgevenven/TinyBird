@@ -11,6 +11,7 @@ other data tool for charting. It produces:
 * file_summary_<stem>.csv / file_matches_<stem>.csv – optional per-channel file
   analytics when --file_path is supplied.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -26,8 +27,12 @@ import numpy as np
 
 def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Analyze motif registry and export analytics as CSV files.")
-    parser.add_argument("--registry", type=Path, default=Path("motif_registry.sqlite"), help="Path to the motif registry DB.")
-    parser.add_argument("--output_dir", type=Path, default=Path("results/motif_analytics"), help="Directory for generated CSVs.")
+    parser.add_argument(
+        "--registry", type=Path, default=Path("../motif_registry.sqlite"), help="Path to the motif registry DB."
+    )
+    parser.add_argument(
+        "--output_dir", type=Path, default=Path("../results/motif_analytics"), help="Directory for generated CSVs."
+    )
     parser.add_argument("--motif_id", type=int, help="Optional motif ID for detailed analytics CSVs.")
     parser.add_argument("--file_path", type=Path, help="Optional .pt file path for per-channel analytics CSVs.")
     return parser.parse_args(argv)
@@ -98,9 +103,7 @@ def _format_starts(starts: list[int], max_items: int = 25) -> str:
 
 
 def build_motif_summary(
-    motifs: list[dict[str, Any]],
-    matches: list[dict[str, Any]],
-    channels: list[dict[str, Any]],
+    motifs: list[dict[str, Any]], matches: list[dict[str, Any]], channels: list[dict[str, Any]]
 ) -> tuple[list[list[Any]], dict[int, list[dict[str, Any]]], dict[str, dict[str, Any]]]:
     dataset_meta = {row["dataset_id"]: row for row in channels}
     matches_by_motif: dict[int, list[dict[str, Any]]] = {}
@@ -108,17 +111,21 @@ def build_motif_summary(
         matches_by_motif.setdefault(match["motif_id"], []).append(match)
 
     rows: list[list[Any]] = [
-        ["motif_id", "pattern_dataset_id", "dim_index", "length", "total_occurrences", "datasets_with_match", "birds_with_match"]
+        [
+            "motif_id",
+            "pattern_dataset_id",
+            "dim_index",
+            "length",
+            "total_occurrences",
+            "datasets_with_match",
+            "birds_with_match",
+        ]
     ]
     for motif in motifs:
         motif_id = motif["motif_id"]
         motif_matches = matches_by_motif.get(motif_id, [])
         dataset_ids = {m["dataset_id"] for m in motif_matches}
-        birds = {
-            dataset_meta.get(ds, {}).get("bird")
-            for ds in dataset_ids
-            if dataset_meta.get(ds, {}).get("bird")
-        }
+        birds = {dataset_meta.get(ds, {}).get("bird") for ds in dataset_ids if dataset_meta.get(ds, {}).get("bird")}
         rows.append(
             [
                 motif_id,
@@ -146,11 +153,7 @@ def build_motif_detail(
 
     motif_matches = matches_by_motif.get(motif_id, [])
     dataset_ids = {m["dataset_id"] for m in motif_matches}
-    birds = {
-        dataset_meta.get(ds, {}).get("bird")
-        for ds in dataset_ids
-        if dataset_meta.get(ds, {}).get("bird")
-    }
+    birds = {dataset_meta.get(ds, {}).get("bird") for ds in dataset_ids if dataset_meta.get(ds, {}).get("bird")}
     overview_rows = [
         ["metric", "value"],
         ["motif_id", motif_id],
@@ -162,9 +165,7 @@ def build_motif_detail(
         ["total_occurrences", sum(len(m["starts"]) for m in motif_matches)],
     ]
 
-    detail_rows = [
-        ["dataset_id", "bird", "seed_index", "seed_distance", "occurrences", "start_positions"]
-    ]
+    detail_rows = [["dataset_id", "bird", "seed_index", "seed_distance", "occurrences", "start_positions"]]
     for match in sorted(motif_matches, key=lambda m: (m["dataset_id"], m["seed_distance"])):
         meta = dataset_meta.get(match["dataset_id"], {})
         detail_rows.append(
@@ -195,9 +196,7 @@ def _count_segments(column_map: np.ndarray) -> int:
 
 
 def build_file_overview(
-    file_path: Path,
-    channels: list[dict[str, Any]],
-    matches: list[dict[str, Any]],
+    file_path: Path, channels: list[dict[str, Any]], matches: list[dict[str, Any]]
 ) -> tuple[list[list[Any]], list[list[Any]]]:
     resolved = str(file_path.resolve())
     matches_by_dataset: dict[str, list[dict[str, Any]]] = {}
@@ -227,9 +226,7 @@ def build_file_overview(
             "avg_seed_distance",
         ]
     ]
-    detail_rows = [
-        ["dataset_id", "motif_id", "seed_index", "seed_distance", "occurrences", "start_positions"]
-    ]
+    detail_rows = [["dataset_id", "motif_id", "seed_index", "seed_distance", "occurrences", "start_positions"]]
 
     for row in sorted(channel_rows, key=lambda r: r["channel_index"]):
         dataset_id = row["dataset_id"]
