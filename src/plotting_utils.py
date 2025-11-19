@@ -136,6 +136,12 @@ def save_reconstruction_plot(
     pred_denorm = pred.to(dtype=x_patches.dtype)
     overlay_patches = _create_overlay(x_patches, pred_denorm, bool_mask)
 
+    # Renormalize if normalize_patches is active (or default)
+    if config.get("normalize_patches", True):
+        overlay_mean = overlay_patches.mean(dim=-1, keepdim=True)
+        overlay_std = overlay_patches.std(dim=-1, keepdim=True)
+        overlay_patches = (overlay_patches - overlay_mean) / (overlay_std + 1e-6)
+
     overlay_img = _depatchify(overlay_patches, mels=config["mels"], timebins=config["num_timebins"], patch_size=patch_size)
 
     x_img = x[sample_idx, 0].detach().cpu().numpy()
