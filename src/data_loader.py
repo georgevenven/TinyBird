@@ -78,9 +78,10 @@ class SpectogramDataset(Dataset):
         return len(self.file_dirs)
 
 class SupervisedSpectogramDataset(Dataset):
-    def __init__(self, dir, annotation_file_path, n_timebins=1024, mode="detect"):
+    def __init__(self, dir, annotation_file_path, n_timebins=1024, mode="detect", white_noise=0.0):
         """
         n_timebins = None means no cropping
+        white_noise: standard deviation of white noise to add after normalization (0.0 = no noise)
         """
         self.file_dirs = sorted(list(Path(dir).glob("*.npy")))
 
@@ -99,6 +100,7 @@ class SupervisedSpectogramDataset(Dataset):
 
         self.mode = mode ## if classify, means classify syllable labels, if detect, means detect onset offset of vocalizations 
         self.annotation_file_path = annotation_file_path
+        self.white_noise = white_noise
         
         # Automatically determine number of classes from annotations
         from utils import get_num_classes_from_annotations
@@ -185,6 +187,11 @@ class SupervisedSpectogramDataset(Dataset):
         # Apply z-score normalization in-place
         arr -= self.mean
         arr /= self.std
+
+        # Apply white noise augmentation if enabled
+        if self.white_noise > 0.0:
+            noise = np.random.normal(0, self.white_noise, arr.shape).astype(np.float32)
+            arr += noise
 
         spec = torch.from_numpy(arr).unsqueeze(0)
         labels = torch.from_numpy(labels)

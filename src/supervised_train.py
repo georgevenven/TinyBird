@@ -1,4 +1,4 @@
-### For Linear probe, or supervised detection and classification tasks ###
+### For MLP classifier, or supervised detection and classification tasks ###
 
 import argparse
 import os
@@ -22,7 +22,7 @@ class SupervisedTinyBird(nn.Module):
             pretrained_model: Pretrained TinyBird model
             config: Configuration dict with patch_size, etc.
             num_classes: Number of output classes (2 for detection, N for classification)
-            freeze_encoder: If True, freeze encoder weights (linear probe mode)
+            freeze_encoder: If True, freeze encoder weights (train MLP classifier only)
             mode: "detect" for binary detection, "classify" for multi-class classification
         """
         super().__init__()
@@ -35,11 +35,11 @@ class SupervisedTinyBird(nn.Module):
         self.mels = config["mels"]
         self.mode = mode
         
-        # Freeze encoder if in linear probe mode
+        # Freeze encoder if in MLP classifier mode
         if freeze_encoder:
             for param in self.encoder.parameters():
                 param.requires_grad = False
-            print("Encoder frozen - training linear probe only")
+            print("Encoder frozen - training MLP classifier only")
         else:
             print("Encoder unfrozen - finetuning entire model")
         
@@ -399,14 +399,16 @@ class Trainer():
             dir=self.config["train_dir"],
             annotation_file_path=self.config["annotation_file"],
             n_timebins=self.config["num_timebins"],
-            mode=self.config["mode"]
+            mode=self.config["mode"],
+            white_noise=self.config.get("white_noise", 0.0)
         )
         
         val_dataset = SupervisedSpectogramDataset(
             dir=self.config["val_dir"],
             annotation_file_path=self.config["annotation_file"],
             n_timebins=self.config["num_timebins"],
-            mode=self.config["mode"]
+            mode=self.config["mode"],
+            white_noise=0.0  # No augmentation on validation set
         )
         
         # Verify num_classes matches dataset
@@ -559,8 +561,11 @@ if __name__ == "__main__":
     parser.add_argument("--eval_every", type=int, default=500, help="evaluate every N steps")
     
     # Model configuration
-    parser.add_argument("--freeze_encoder", action="store_true", help="freeze encoder weights (linear probe mode)")
+    parser.add_argument("--freeze_encoder", action="store_true", help="freeze encoder weights (train MLP classifier only)")
     parser.add_argument("--amp", action="store_true", help="enable automatic mixed precision training")
+    
+    # Data augmentation
+    parser.add_argument("--white_noise", type=float, default=0.0, help="standard deviation of white noise to add after normalization (0.0 = no noise)")
     
     args = parser.parse_args()
     

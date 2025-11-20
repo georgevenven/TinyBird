@@ -28,6 +28,8 @@ def main():
     parser.add_argument("--snippet_size", type=int, required=True, help="Snippet size in time bins")
     parser.add_argument("--noise_std", type=float, default=1.0, help="Noise std to apply")
     parser.add_argument("--num_files", type=int, default=100, help="Number of synthetic files to generate")
+    parser.add_argument("--output_length", type=int, default=5000, help="Output length in time bins")
+    parser.add_argument("--fg_proportion", type=float, default=0.1, help="Proportion of output that is foreground (0.0-1.0)")
     args = parser.parse_args()
 
     # Load audio params from both directories
@@ -58,151 +60,211 @@ def main():
         fg_filename = Path(rec["recording"]["filename"]).stem
         fg_recordings.append((fg_filename, rec["detected_events"]))
 
+    # Build lightweight index of foreground chunks (don't load data yet)
+    fg_chunk_index = []  # List of (fg_filename, chunk_idx, events)
+    for fg_filename, events in fg_recordings:
+        # Load just to get the shape
+        fg_spec_shape = np.load(fg_spec_paths[fg_filename], mmap_mode='r').shape
+        num_chunks = fg_spec_shape[1] // args.snippet_size
+        
+        for chunk_idx in range(num_chunks):
+            chunk_start = chunk_idx * args.snippet_size
+            chunk_end = chunk_start + args.snippet_size
+            
+            # Find events that overlap with this chunk
+            chunk_start_ms = chunk_start * ms_per_frame
+            chunk_end_ms = chunk_end * ms_per_frame
+            
+            chunk_events = []
+            for event in events:
+                if event["offset_ms"] > chunk_start_ms and event["onset_ms"] < chunk_end_ms:
+                    # Clip event to chunk boundaries
+                    event_onset_clipped = max(event["onset_ms"], chunk_start_ms)
+                    event_offset_clipped = min(event["offset_ms"], chunk_end_ms)
+                    
+                    # Store event relative to chunk start
+                    relative_event = {
+                        "onset_ms": event_onset_clipped - chunk_start_ms,
+                        "offset_ms": event_offset_clipped - chunk_start_ms
+                    }
+                    
+                    # Check if original event has units
+                    if "units" in event:
+                        relative_units = []
+                        for unit in event["units"]:
+                            if unit["offset_ms"] > chunk_start_ms and unit["onset_ms"] < chunk_end_ms:
+                                unit_onset_clipped = max(unit["onset_ms"], chunk_start_ms)
+                                unit_offset_clipped = min(unit["offset_ms"], chunk_end_ms)
+                                
+                                relative_units.append({
+                                    "onset_ms": unit_onset_clipped - chunk_start_ms,
+                                    "offset_ms": unit_offset_clipped - chunk_start_ms,
+                                    "id": unit["id"]
+                                })
+                        
+                        if relative_units:
+                            relative_event["units"] = relative_units
+                            chunk_events.append(relative_event)
+                    else:
+                        chunk_events.append(relative_event)
+            
+            # Only add chunks that have detected events
+            if chunk_events:
+                fg_chunk_index.append((fg_filename, chunk_idx, chunk_events))
+    
+    print(f"Found {len(fg_chunk_index)} foreground chunks with detected events")
+    
+    if len(fg_chunk_index) == 0:
+        print("ERROR: No foreground chunks with events found. Check your annotations JSON.")
+        return
+    
+    def load_fg_chunk(fg_filename, chunk_idx):
+        """Load and process a foreground chunk on-demand."""
+        fg_spec = np.load(fg_spec_paths[fg_filename])
+        
+        # Z-score foreground independently
+        fg_mean_local = fg_spec.mean()
+        fg_std_local = fg_spec.std()
+        fg_spec_zscore = (fg_spec - fg_mean_local) / fg_std_local
+        
+        # Extract chunk
+        chunk_start = chunk_idx * args.snippet_size
+        chunk_end = chunk_start + args.snippet_size
+        return fg_spec_zscore[:, chunk_start:chunk_end]
+    
     # Generate synthetic data
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
     synthetic_recordings = []
-    synthetic_idx = 0
     
     # For computing statistics on the fly
     total_sum = 0.0
     total_sq_sum = 0.0
     total_values = 0
     
-    # Count total chunks we'll generate
-    total_chunks = 0
-    for fg_filename, _ in fg_recordings:
-        fg_spec = np.load(fg_spec_paths[fg_filename])
-        num_chunks = fg_spec.shape[1] // args.snippet_size
-        total_chunks += num_chunks
-    
-    # Limit to num_files if specified
-    chunks_to_generate = min(total_chunks, args.num_files)
-    
-    with tqdm(total=chunks_to_generate, desc="Generating synthetic specs") as pbar:
-        for fg_filename, events in fg_recordings:
-            if synthetic_idx >= args.num_files:
-                break
+    with tqdm(total=args.num_files, desc="Generating synthetic specs") as pbar:
+        for synthetic_idx in range(args.num_files):
+            # Pick random background that's large enough
+            attempts = 0
+            max_attempts = 50
+            while attempts < max_attempts:
+                bg_name = np.random.choice(bg_names)
+                bg_spec = np.load(bg_spec_paths[bg_name])
                 
-            # Load foreground
-            fg_spec = np.load(fg_spec_paths[fg_filename])
-            
-            # Z-score foreground independently
-            fg_mean_local = fg_spec.mean()
-            fg_std_local = fg_spec.std()
-            fg_spec_zscore = (fg_spec - fg_mean_local) / fg_std_local
-            
-            # Split into chunks
-            num_chunks = fg_spec.shape[1] // args.snippet_size
-            
-            for chunk_idx in range(num_chunks):
-                if synthetic_idx >= args.num_files:
+                if bg_spec.shape[1] >= args.output_length:
                     break
-                    
-                # Extract chunk
-                chunk_start = chunk_idx * args.snippet_size
-                chunk_end = chunk_start + args.snippet_size
-                fg_chunk_zscore = fg_spec_zscore[:, chunk_start:chunk_end]
+                attempts += 1
+            
+            # Skip if no suitable background found
+            if bg_spec.shape[1] < args.output_length:
+                print(f"\nWarning: No background large enough for output_length={args.output_length}")
+                continue
+            
+            # Get number of mel bins from background
+            n_mels = bg_spec.shape[0]
+            
+            # Extract a segment of background at random position
+            max_bg_start = bg_spec.shape[1] - args.output_length
+            bg_start = np.random.randint(0, max_bg_start + 1) if max_bg_start > 0 else 0
+            bg_segment = bg_spec[:, bg_start:bg_start + args.output_length].copy()
+            
+            # Free up background spec memory
+            del bg_spec
+            
+            # Compute background stats
+            bg_mean_local = bg_segment.mean()
+            bg_std_local = bg_segment.std()
+            
+            # Calculate how many timebins should be foreground
+            total_fg_bins = int(args.output_length * args.fg_proportion)
+            
+            # Track which positions are already occupied and collect events
+            occupied = np.zeros(args.output_length, dtype=bool)
+            all_events = []
+            fg_sources = []
+            
+            # Keep adding foreground chunks until we reach desired proportion
+            bins_placed = 0
+            while bins_placed < total_fg_bins and len(fg_chunk_index) > 0:
+                # Pick random foreground chunk
+                chunk_idx_in_list = np.random.randint(0, len(fg_chunk_index))
+                fg_filename, chunk_idx, chunk_events = fg_chunk_index[chunk_idx_in_list]
                 
-                # Pick random background that's large enough
-                attempts = 0
-                max_attempts = 50
-                while attempts < max_attempts:
-                    bg_name = np.random.choice(bg_names)
-                    bg_spec = np.load(bg_spec_paths[bg_name])
-                    
-                    if bg_spec.shape[1] >= fg_chunk_zscore.shape[1]:
-                        break
-                    attempts += 1
+                # Load chunk on-demand
+                fg_chunk_zscore = load_fg_chunk(fg_filename, chunk_idx)
+                chunk_width = fg_chunk_zscore.shape[1]
                 
-                # Skip if no suitable background found
-                if bg_spec.shape[1] < fg_chunk_zscore.shape[1]:
-                    continue
+                # Find available positions
+                available_positions = []
+                for pos in range(args.output_length - chunk_width + 1):
+                    if not occupied[pos:pos + chunk_width].any():
+                        available_positions.append(pos)
                 
-                # Compute background stats
-                bg_mean_local = bg_spec.mean()
-                bg_std_local = bg_spec.std()
+                if not available_positions:
+                    break
+                
+                # Pick random position
+                insert_pos = available_positions[np.random.randint(0, len(available_positions))]
                 
                 # Re-zscore foreground chunk wrt background
                 fg_chunk_renorm = fg_chunk_zscore * bg_std_local + bg_mean_local
                 
-                # Place chunk at random location in background
-                max_start = bg_spec.shape[1] - fg_chunk_renorm.shape[1]
-                if max_start > 0:
-                    insert_pos = np.random.randint(0, max_start)
-                else:
-                    insert_pos = 0
+                # Place chunk
+                bg_segment[:, insert_pos:insert_pos + chunk_width] = fg_chunk_renorm
+                occupied[insert_pos:insert_pos + chunk_width] = True
+                bins_placed += chunk_width
+                fg_sources.append(fg_filename)
                 
-                bg_spec[:, insert_pos:insert_pos + fg_chunk_renorm.shape[1]] = fg_chunk_renorm
+                # Free up chunk memory
+                del fg_chunk_zscore, fg_chunk_renorm
                 
-                # Add noise
-                noise = np.random.randn(*bg_spec.shape) * args.noise_std * bg_std_local
-                synthetic_spec = bg_spec + noise
-                
-                # Save synthetic spectrogram
-                synthetic_name = f"synthetic_{synthetic_idx:05d}"
-                np.save(output_dir / f"{synthetic_name}.npy", synthetic_spec)
-                
-                # Update statistics
-                total_sum += synthetic_spec.sum()
-                total_sq_sum += np.square(synthetic_spec).sum()
-                total_values += synthetic_spec.size
-                
-                # Find events that overlap with this chunk
-                chunk_start_ms = chunk_start * ms_per_frame
-                chunk_end_ms = chunk_end * ms_per_frame
-                
-                chunk_events = []
-                for event in events:
-                    # Check if event overlaps with chunk (not just entirely within)
-                    if event["offset_ms"] > chunk_start_ms and event["onset_ms"] < chunk_end_ms:
-                        # Clip event to chunk boundaries
-                        event_onset_clipped = max(event["onset_ms"], chunk_start_ms)
-                        event_offset_clipped = min(event["offset_ms"], chunk_end_ms)
-                        
-                        # Adjust event times to new position in background
-                        new_onset_ms = (insert_pos * ms_per_frame) + (event_onset_clipped - chunk_start_ms)
-                        new_offset_ms = (insert_pos * ms_per_frame) + (event_offset_clipped - chunk_start_ms)
-                        
-                        # Process units within this event
+                # Adjust event times to new position
+                for event in chunk_events:
+                    new_event = {
+                        "onset_ms": (insert_pos * ms_per_frame) + event["onset_ms"],
+                        "offset_ms": (insert_pos * ms_per_frame) + event["offset_ms"]
+                    }
+                    
+                    if "units" in event:
                         new_units = []
-                        for unit in event.get("units", []):
-                            # Check if unit overlaps with chunk
-                            if unit["offset_ms"] > chunk_start_ms and unit["onset_ms"] < chunk_end_ms:
-                                # Clip unit to chunk boundaries
-                                unit_onset_clipped = max(unit["onset_ms"], chunk_start_ms)
-                                unit_offset_clipped = min(unit["offset_ms"], chunk_end_ms)
-                                
-                                # Adjust unit times to new position
-                                new_unit_onset = (insert_pos * ms_per_frame) + (unit_onset_clipped - chunk_start_ms)
-                                new_unit_offset = (insert_pos * ms_per_frame) + (unit_offset_clipped - chunk_start_ms)
-                                
-                                new_units.append({
-                                    "onset_ms": new_unit_onset,
-                                    "offset_ms": new_unit_offset,
-                                    "id": unit["id"]
-                                })
-                        
-                        # Only add event if it has units
-                        if new_units:
-                            chunk_events.append({
-                                "onset_ms": new_onset_ms,
-                                "offset_ms": new_offset_ms,
-                                "units": new_units
+                        for unit in event["units"]:
+                            new_units.append({
+                                "onset_ms": (insert_pos * ms_per_frame) + unit["onset_ms"],
+                                "offset_ms": (insert_pos * ms_per_frame) + unit["offset_ms"],
+                                "id": unit["id"]
                             })
-                
-                synthetic_recordings.append({
-                    "recording": {
-                        "filename": f"{synthetic_name}.npy",
-                        "source_fg": fg_filename,
-                        "source_bg": bg_name
-                    },
-                    "detected_events": chunk_events
-                })
-                
-                synthetic_idx += 1
-                pbar.update(1)
+                        new_event["units"] = new_units
+                    
+                    all_events.append(new_event)
+            
+            # Add noise
+            noise = np.random.randn(*bg_segment.shape) * args.noise_std * bg_std_local
+            synthetic_spec = bg_segment + noise
+            
+            # Save synthetic spectrogram
+            synthetic_name = f"synthetic_{synthetic_idx:05d}"
+            np.save(output_dir / f"{synthetic_name}.npy", synthetic_spec)
+            
+            # Update statistics
+            total_sum += synthetic_spec.sum()
+            total_sq_sum += np.square(synthetic_spec).sum()
+            total_values += synthetic_spec.size
+            
+            # Sort events by onset time
+            all_events.sort(key=lambda e: e["onset_ms"])
+            
+            synthetic_recordings.append({
+                "recording": {
+                    "filename": f"{synthetic_name}.npy",
+                    "source_fg": list(set(fg_sources)),
+                    "source_bg": bg_name,
+                    "fg_proportion_actual": bins_placed / args.output_length
+                },
+                "detected_events": all_events
+            })
+            
+            pbar.update(1)
     
     # Save annotations
     output_json = {
@@ -231,7 +293,9 @@ def main():
     with open(output_dir / "audio_params.json", "w") as f:
         json.dump(audio_params_output, f, indent=2)
     
-    print(f"Generated {synthetic_idx} synthetic spectrograms in {output_dir}")
+    print(f"Generated {len(synthetic_recordings)} synthetic spectrograms in {output_dir}")
+    print(f"Output length: {args.output_length} timebins")
+    print(f"Target FG proportion: {args.fg_proportion:.2%}")
     print(f"Synthetic data stats - Mean: {synthetic_mean:.4f}, Std: {synthetic_std:.4f}")
 
 
