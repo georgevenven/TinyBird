@@ -47,6 +47,7 @@ audio2spec.py --> compute_statistics_of_spectrograms.py --> pretrain.py --> plot
 - [ ] We need a central util for managing the json format ... this will make life so much easier 
 - [ ] snippification of datasets (for easy upload and faster training)
 - [ ] remove spec subfolder when sbatch audio2spec
+- [ ] early stopping for supervised train and maybe pretrain
 
 #### Bugs
 - [] irregularity with number of specs made in log for XCM vs HSN_test

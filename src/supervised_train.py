@@ -14,7 +14,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
 class SupervisedTinyBird(nn.Module):
-    def __init__(self, pretrained_model, config, num_classes=2, freeze_encoder=True, mode="detect"):
+    def __init__(self, pretrained_model, config, num_classes=2, freeze_encoder=True, mode="detect", linear_probe=False):
         """
         Supervised classification/detection model built on top of pretrained TinyBird encoder.
         
@@ -24,6 +24,7 @@ class SupervisedTinyBird(nn.Module):
             num_classes: Number of output classes (2 for detection, N for classification)
             freeze_encoder: If True, freeze encoder weights (train MLP classifier only)
             mode: "detect" for binary detection, "classify" for multi-class classification
+            linear_probe: If True, use a single linear layer instead of MLP
         """
         super().__init__()
         
@@ -39,7 +40,7 @@ class SupervisedTinyBird(nn.Module):
         if freeze_encoder:
             for param in self.encoder.parameters():
                 param.requires_grad = False
-            print("Encoder frozen - training MLP classifier only")
+            print("Encoder frozen - training classifier only")
         else:
             print("Encoder unfrozen - finetuning entire model")
         
@@ -53,11 +54,17 @@ class SupervisedTinyBird(nn.Module):
         # For binary classification (2 classes), output 1 logit (BCE)
         # For multi-class, output num_classes logits (CrossEntropy)
         output_dim = 1 if num_classes == 2 else num_classes
-        self.classifier = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, output_dim)
-        )
+        
+        if linear_probe:
+            print("Using Linear Probe (single linear layer)")
+            self.classifier = nn.Linear(input_dim, output_dim)
+        else:
+            print("Using MLP Classifier")
+            self.classifier = nn.Sequential(
+                nn.Linear(input_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, output_dim)
+            )
         
         # Loss function - BCE for binary (2 classes), cross-entropy for multi-class
         # Class 0 is silence in both cases, explicitly trained
@@ -558,10 +565,11 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=256, help="batch size")
     parser.add_argument("--num_workers", type=int, default=8, help="number of DataLoader worker processes")
     parser.add_argument("--weight_decay", type=float, default=0.1, help="weight decay")
-    parser.add_argument("--eval_every", type=int, default=500, help="evaluate every N steps")
+    parser.add_argument("--eval_every", type=int, default=10, help="evaluate every N steps")
     
     # Model configuration
-    parser.add_argument("--freeze_encoder", action="store_true", help="freeze encoder weights (train MLP classifier only)")
+    parser.add_argument("--freeze_encoder", action="store_true", help="freeze encoder weights (train classifier only)")
+    parser.add_argument("--linear_probe", action="store_true", help="use single linear layer instead of MLP")
     parser.add_argument("--amp", action="store_true", help="enable automatic mixed precision training")
     
     # Data augmentation
@@ -599,7 +607,8 @@ if __name__ == "__main__":
         config=config,
         num_classes=num_classes,
         freeze_encoder=config["freeze_encoder"],
-        mode=config["mode"]
+        mode=config["mode"],
+        linear_probe=config.get("linear_probe", False)
     )
     
     # Create trainer and train

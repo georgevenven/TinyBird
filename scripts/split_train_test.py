@@ -169,19 +169,95 @@ def split_data(input_file, spec_dir, train_dir, test_dir, train_percent=80):
     print(f"Train birds: {train_birds}")
     print(f"Test birds: {test_birds}")
 
+def filter_by_bird(input_file, spec_dir, output_dir, bird_id):
+    """Copy all files for a specific bird_id from spec_dir to output_dir"""
+    os.makedirs(output_dir, exist_ok=True)
+    with open(input_file, 'r') as f:
+        data = json.load(f)
+    
+    files_to_copy = []
+    for recording in data['recordings']:
+        if recording['recording']['bird_id'] == bird_id:
+            filename = recording['recording']['filename']
+            base_name = os.path.splitext(filename)[0]
+            files_to_copy.append(base_name)
+    
+    print(f"Found {len(files_to_copy)} recordings for bird {bird_id}")
+    
+    count = 0
+    for base_name in tqdm(files_to_copy):
+        matches = glob.glob(os.path.join(spec_dir, f"{base_name}.*"))
+        for src in matches:
+            dst = os.path.join(output_dir, os.path.basename(src))
+            shutil.copy2(src, dst)
+            count += 1
+            
+    # Copy audio_params if exists
+    audio_params = os.path.join(spec_dir, "audio_params.json")
+    if os.path.exists(audio_params):
+        shutil.copy2(audio_params, os.path.join(output_dir, "audio_params.json"))
+        
+    print(f"Copied {count} files to {output_dir}")
+
+def sample_files(spec_dir, output_dir, n_samples):
+    """Randomly sample n_samples .npy files from spec_dir and copy to output_dir"""
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Find all .npy files
+    all_files = glob.glob(os.path.join(spec_dir, "*.npy"))
+    if len(all_files) < n_samples:
+        print(f"Warning: Requested {n_samples} samples but only found {len(all_files)}")
+        selected_files = all_files
+    else:
+        selected_files = random.sample(all_files, n_samples)
+        
+    print(f"Sampling {len(selected_files)} files...")
+    
+    for src in tqdm(selected_files):
+        dst = os.path.join(output_dir, os.path.basename(src))
+        shutil.copy2(src, dst)
+        
+    # Copy audio_params if exists
+    audio_params = os.path.join(spec_dir, "audio_params.json")
+    if os.path.exists(audio_params):
+        shutil.copy2(audio_params, os.path.join(output_dir, "audio_params.json"))
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--spec_dir', required=True)
-    parser.add_argument('--train_dir', required=True)
-    parser.add_argument('--test_dir', required=True)
-    parser.add_argument('--annotation_json', required=True)
+    parser.add_argument('--train_dir') # Optional depending on mode
+    parser.add_argument('--test_dir') # Optional depending on mode
+    parser.add_argument('--annotation_json') # Optional depending on mode
     parser.add_argument('--train_percent', type=float, default=80)
     parser.add_argument('--ignore_bird_id', action='store_true', 
                         help='Randomly split files without grouping by bird_id')
+    
+    # New arguments
+    parser.add_argument('--mode', type=str, default='split', choices=['split', 'filter_bird', 'sample'],
+                        help='Mode: split (default), filter_bird, sample')
+    parser.add_argument('--bird_id', type=str, help='Bird ID for filter_bird mode')
+    parser.add_argument('--n_samples', type=int, help='Number of samples for sample mode')
+    
     args = parser.parse_args()
     
-    if args.ignore_bird_id:
-        split_data_random(args.annotation_json, args.spec_dir, args.train_dir, args.test_dir, args.train_percent)
-    else:
-        split_data(args.annotation_json, args.spec_dir, args.train_dir, args.test_dir, args.train_percent)
-
+    if args.mode == 'split':
+        if not args.train_dir or not args.test_dir or not args.annotation_json:
+             parser.error("--mode split requires --train_dir, --test_dir, and --annotation_json")
+        if args.ignore_bird_id:
+            split_data_random(args.annotation_json, args.spec_dir, args.train_dir, args.test_dir, args.train_percent)
+        else:
+            split_data(args.annotation_json, args.spec_dir, args.train_dir, args.test_dir, args.train_percent)
+            
+    elif args.mode == 'filter_bird':
+        if not args.train_dir:
+             parser.error("--mode filter_bird requires --train_dir (as output)")
+        if not args.annotation_json or not args.bird_id:
+             parser.error("--mode filter_bird requires --annotation_json and --bird_id")
+        filter_by_bird(args.annotation_json, args.spec_dir, args.train_dir, args.bird_id)
+        
+    elif args.mode == 'sample':
+        if not args.train_dir:
+             parser.error("--mode sample requires --train_dir (as output)")
+        if not args.n_samples:
+             parser.error("--mode sample requires --n_samples")
+        sample_files(args.spec_dir, args.train_dir, args.n_samples)

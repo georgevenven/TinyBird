@@ -26,7 +26,7 @@ TRAIN_COLOR = "royalblue"
 VAL_COLOR = "tomato"
 MASK_CMAP = "viridis"
 
-__all__ = ["save_reconstruction_plot", "plot_loss_curves", "save_supervised_prediction_plot"]
+__all__ = ["save_reconstruction_plot", "plot_loss_curves", "save_supervised_prediction_plot", "plot_benchmark_results"]
 
 
 def _depatchify(patches: torch.Tensor, *, mels: int, timebins: int, patch_size: Sequence[int]) -> torch.Tensor:
@@ -320,3 +320,110 @@ def save_supervised_prediction_plot(
     plt.close(fig)
     
     return save_path
+
+def plot_benchmark_results(results_csv: str, output_dir: str):
+    """
+    Plot benchmark results.
+    Expected CSV format: task,species,individual,samples,metric_value
+    """
+    import csv
+    
+    data = []
+    try:
+        with open(results_csv, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                row['samples'] = int(row['samples'])
+                row['metric_value'] = float(row['metric_value'])
+                data.append(row)
+    except FileNotFoundError:
+        print(f"Results file not found: {results_csv}")
+        return
+
+    if not data:
+        print("No data found in results CSV.")
+        return
+            
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Helper to get color map
+    species_list = sorted(list(set(d['species'] for d in data)))
+    # Use tab10 or viridis if more than 10 species
+    if len(species_list) <= 10:
+        colors = plt.cm.tab10(np.linspace(0, 1, 10))[:len(species_list)]
+    else:
+        colors = plt.cm.viridis(np.linspace(0, 1, len(species_list)))
+        
+    species_color = dict(zip(species_list, colors))
+    
+    # Detection Plot
+    detect_data = [d for d in data if d['task'] == 'detect']
+    if detect_data:
+        plt.figure(figsize=(10, 6), dpi=SPEC_DPI)
+        for species in species_list:
+            sp_data = [d for d in detect_data if d['species'] == species]
+            if not sp_data: continue
+            
+            # Sort by samples
+            sp_data.sort(key=lambda x: x['samples'])
+            x = [d['samples'] for d in sp_data]
+            y = [d['metric_value'] for d in sp_data]
+            
+            plt.plot(x, y, marker='o', label=species, color=species_color[species], linewidth=2)
+            
+        plt.xscale('log')
+        plt.xlabel('Training Samples')
+        plt.ylabel('F1 Score (%)')
+        plt.title('Detection Performance vs Training Size')
+        plt.grid(True, which="both", ls="-", alpha=0.2)
+        plt.legend()
+        plt.savefig(os.path.join(output_dir, 'detection_benchmark.png'), bbox_inches='tight')
+        plt.close()
+        
+    # Classification Plot
+    classify_data = [d for d in data if d['task'] == 'classify']
+    if classify_data:
+        plt.figure(figsize=(10, 6), dpi=SPEC_DPI)
+        
+        # Group by individual
+        individuals = sorted(list(set(d['individual'] for d in classify_data)))
+        
+        for ind in individuals:
+            ind_data = [d for d in classify_data if d['individual'] == ind]
+            if not ind_data: continue
+            
+            species = ind_data[0]['species']
+            color = species_color[species]
+            
+            ind_data.sort(key=lambda x: x['samples'])
+            x = [d['samples'] for d in ind_data]
+            y = [d['metric_value'] for d in ind_data]
+            
+            # Plot individual lines faintly
+            plt.plot(x, y, marker='o', color=color, alpha=0.3, linewidth=1)
+            
+        # Plot species averages
+        for species in species_list:
+            sp_data = [d for d in classify_data if d['species'] == species]
+            if not sp_data: continue
+            
+            # Group by samples to average
+            sample_map = {}
+            for d in sp_data:
+                s = d['samples']
+                if s not in sample_map: sample_map[s] = []
+                sample_map[s].append(d['metric_value'])
+            
+            samples = sorted(sample_map.keys())
+            avgs = [np.mean(sample_map[s]) for s in samples]
+            
+            plt.plot(samples, avgs, marker='o', label=species, color=species_color[species], linewidth=3)
+            
+        plt.xscale('log')
+        plt.xlabel('Training Samples')
+        plt.ylabel('Frame Error Rate (%)')
+        plt.title('Classification Performance vs Training Size')
+        plt.grid(True, which="both", ls="-", alpha=0.2)
+        plt.legend()
+        plt.savefig(os.path.join(output_dir, 'classification_benchmark.png'), bbox_inches='tight')
+        plt.close()
