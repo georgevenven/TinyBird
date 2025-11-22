@@ -34,6 +34,6 @@ if [ "$workers" -lt 1 ]; then workers=1; fi
 cd "$HOME/TinyBird"
 
 # change to src/compute_statistics_of_spectrograms.py if you want to use the original script
-python -u src/compute_statistics_of_spectrograms.py "$SPEC_DIR"
+python -u src/compute_statistics_of_spectrograms.py --spec_dir "$SPEC_DIR"
 
 echo "Done. Stats under: $SPEC_DIR/audio_params.json"
