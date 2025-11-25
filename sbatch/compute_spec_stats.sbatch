@@ -18,7 +18,7 @@ conda activate /home/georgev/.conda/envs/tinybird
 # --- scratch on Talapas is /scratch/<PIRG>/<USER>
 PIRG=${PIRG:-gardnerlab}
 MY_SCRATCH=/scratch/${PIRG}/${USER}
-SPEC_DIR="$MY_SCRATCH/specs"
+SPEC_DIR="$MY_SCRATCH/XCM_Bambird"
 chmod -R g+rwX "$MY_SCRATCH"
 
 # --- keep libraries from oversubscribing threads

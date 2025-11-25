@@ -1,0 +1,64 @@
+Loading BirdSet dataset: PER, split: test
+Starting to process samples...
+Processed 250 samples → 249 spectrograms (0 skipped) in 601.9s
+Processed 500 samples → 499 spectrograms (0 skipped) in 1164.5s
+Processed 750 samples → 749 spectrograms (0 skipped) in 1724.9s
+Processed 1000 samples → 999 spectrograms (0 skipped) in 2298.6s
+Processed 1250 samples → 1249 spectrograms (0 skipped) in 2844.1s
+Processed 1500 samples → 1499 spectrograms (0 skipped) in 3409.7s
+Processed 1750 samples → 1749 spectrograms (0 skipped) in 3956.3s
+Processed 2000 samples → 1999 spectrograms (0 skipped) in 4524.0s
+Processed 2250 samples → 2249 spectrograms (0 skipped) in 5106.2s
+Processed 2500 samples → 2499 spectrograms (0 skipped) in 5651.6s
+Processed 2750 samples → 2749 spectrograms (0 skipped) in 6201.5s
+Processed 3000 samples → 2999 spectrograms (0 skipped) in 6753.0s
+Processed 3250 samples → 3249 spectrograms (0 skipped) in 7320.6s
+Processed 3500 samples → 3499 spectrograms (0 skipped) in 7853.5s
+Processed 3750 samples → 3749 spectrograms (0 skipped) in 8385.3s
+Processed 4000 samples → 3999 spectrograms (0 skipped) in 8943.2s
+Processed 4250 samples → 4249 spectrograms (0 skipped) in 9488.2s
+Processed 4500 samples → 4499 spectrograms (0 skipped) in 10054.5s
+Processed 4750 samples → 4749 spectrograms (0 skipped) in 10598.1s
+Processed 5000 samples → 4999 spectrograms (0 skipped) in 11144.3s
+Processed 5250 samples → 5249 spectrograms (0 skipped) in 11711.0s
+Processed 5500 samples → 5499 spectrograms (0 skipped) in 12252.2s
+Processed 5750 samples → 5749 spectrograms (0 skipped) in 12794.0s
+Processed 6000 samples → 5999 spectrograms (0 skipped) in 13358.0s
+Processed 6250 samples → 6249 spectrograms (0 skipped) in 13906.7s
+Processed 6500 samples → 6499 spectrograms (0 skipped) in 14455.8s
+Processed 6750 samples → 6749 spectrograms (0 skipped) in 15005.3s
+Processed 7000 samples → 6999 spectrograms (0 skipped) in 15556.8s
+Processed 7250 samples → 7249 spectrograms (0 skipped) in 16129.0s
+Processed 7500 samples → 7499 spectrograms (0 skipped) in 16674.7s
+Processed 7750 samples → 7749 spectrograms (0 skipped) in 17221.1s
+Processed 8000 samples → 7999 spectrograms (0 skipped) in 17769.0s
+Processed 8250 samples → 8249 spectrograms (0 skipped) in 18332.2s
+Processed 8500 samples → 8499 spectrograms (0 skipped) in 18872.4s
+Processed 8750 samples → 8749 spectrograms (0 skipped) in 19412.4s
+Processed 9000 samples → 8999 spectrograms (0 skipped) in 19968.6s
+Processed 9250 samples → 9249 spectrograms (0 skipped) in 20500.5s
+Processed 9500 samples → 9499 spectrograms (0 skipped) in 21032.7s
+Processed 9750 samples → 9749 spectrograms (0 skipped) in 21595.2s
+Processed 10000 samples → 9999 spectrograms (0 skipped) in 22142.2s
+Processed 10250 samples → 10249 spectrograms (0 skipped) in 22711.0s
+Processed 10500 samples → 10499 spectrograms (0 skipped) in 23255.1s
+Processed 10750 samples → 10749 spectrograms (0 skipped) in 23800.7s
+Processed 11000 samples → 10999 spectrograms (0 skipped) in 24344.7s
+Processed 11250 samples → 11249 spectrograms (0 skipped) in 24912.8s
+Processed 11500 samples → 11499 spectrograms (0 skipped) in 25482.1s
+Processed 11750 samples → 11749 spectrograms (0 skipped) in 26030.6s
+Processed 12000 samples → 11999 spectrograms (0 skipped) in 26604.3s
+Processed 12250 samples → 12249 spectrograms (0 skipped) in 27154.4s
+Processed 12500 samples → 12499 spectrograms (0 skipped) in 27705.0s
+Processed 12750 samples → 12749 spectrograms (0 skipped) in 28273.8s
+Processed 13000 samples → 12999 spectrograms (0 skipped) in 28819.2s
+Processed 13250 samples → 13249 spectrograms (0 skipped) in 29382.9s
+Processed 13500 samples → 13499 spectrograms (0 skipped) in 29922.2s
+Processed 13750 samples → 13749 spectrograms (0 skipped) in 30461.3s
+Processed 14000 samples → 13999 spectrograms (0 skipped) in 31032.1s
+Processed 14250 samples → 14249 spectrograms (0 skipped) in 31585.2s
+Processed 14500 samples → 14499 spectrograms (0 skipped) in 32154.9s
+Processed 14750 samples → 14749 spectrograms (0 skipped) in 32702.2s
+BirdSet processing complete: 14798 spectrograms created, 0 skipped (examined 14798 samples) in 32807.5s
+BirdSet processing completed.
+Done. Specs under: /scratch/gardnerlab/georgev/specs

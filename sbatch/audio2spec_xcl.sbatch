@@ -1,7 +1,7 @@
 #!/bin/bash -l
 #SBATCH --account=gardnerlab
 #SBATCH --partition=computelong
-#SBATCH --job-name=tinybird-xcl
+#SBATCH --job-name=tinybird-per
 #SBATCH --time=7-00:00:00
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=100G
@@ -37,10 +37,10 @@ cd "$HOME/TinyBird"
 
 # Run all splits; change list if XCL only has some splits
 python -u src/audio2spec.py \
---birdset "XCM" \
---birdset_split "train" \
---dst_dir "$MY_SCRATCH/specs/" \
---format pt \
+--birdset "PER" \
+--birdset_split "test" \
+--birdset_detections "human" \
+--dst_dir "$MY_SCRATCH/PER_test_human/" \
 --single_threaded false \
 --max_workers "$workers"
 

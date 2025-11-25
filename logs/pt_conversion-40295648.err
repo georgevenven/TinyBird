@@ -1,0 +1,4 @@
+usage: compute_statistics_of_spectrograms.py [-h] [--spec_dir SPEC_DIR]
+                                             [--sample_fraction SAMPLE_FRACTION]
+                                             [--seed SEED]
+compute_statistics_of_spectrograms.py: error: unrecognized arguments: /scratch/gardnerlab/georgev/XCM_Bambird

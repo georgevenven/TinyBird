@@ -23,7 +23,7 @@ export MKL_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 cd "$SLURM_SUBMIT_DIR"
 
 MY_SCRATCH="/scratch/gardnerlab/georgev"
-SPEC_DIR="${MY_SCRATCH}/specs_XCM"
+SPEC_DIR="${MY_SCRATCH}/XCM_Bambird"
 mkdir -p "${SPEC_DIR}" logs
 
 RUN_NAME=tinybird_pretrain_$(date +%Y%m%d_%H%M%S)
@@ -34,4 +34,6 @@ python -u src/pretrain.py \
   --run_name  "$RUN_NAME" \
   --steps 1_000_000 \
   --num_workers 32 \
-  --amp
+  --lr 2e-4\
+  --amp\
+  --no_normalize_patches

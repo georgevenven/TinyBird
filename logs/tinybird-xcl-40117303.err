@@ -1,0 +1,2 @@
+'(ReadTimeoutError("HTTPSConnectionPool(host='cas-bridge.xethub.hf.co', port=443): Read timed out. (read timeout=10)"), '(Request ID: c383317e-9d3d-4060-ae52-dca6e901a1f7)')' thrown while requesting GET https://huggingface.co/datasets/DBD-research-group/BirdSet/resolve/data/XCM/XCM_shard_0128.tar.gz
+Retrying in 1s [Retry 1/5].
