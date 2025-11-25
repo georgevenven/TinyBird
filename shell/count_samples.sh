@@ -10,7 +10,7 @@ cd "$(dirname "$0")/.."
 
 # ================= CONFIGURATION =================
 # Using same config structure as benchmark script
-ANNOTATION_ROOT="files"
+ANNOTATION_ROOT="/Users/georgev/Documents/data/SongMAE_Bench_Data"
 
 SPECIES_LIST=(
     "BengaleseFinch:bf_annotations.json"

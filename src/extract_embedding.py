@@ -124,14 +124,16 @@ def main(args):
     
     model.eval()
 
-    pos_ids = []          # absolute time index per patch within its clip (0..W-1)
-    total_timebins = 0
-    i = 0
-    
+    # Lists to store results
     latent_list = []
     patch_list = []
-    label_list = []
+    label_list_original = []
+    label_list_downsampled = []
     spec_list = []
+    pos_ids_list = []
+
+    total_timebins = 0
+    i = 0
 
     while i < len(embedding_dataset) and total_timebins < args["num_timebins"]:
         spec, file_name = embedding_dataset[i]
@@ -166,95 +168,140 @@ def main(args):
                 spec_detected = spec[:,:,matched_event["on_timebins"]:matched_event["off_timebins"]]
                 # since the labels are based off the rounded spec, but not based off the detected event, we crop it further to match the dim of spec
                 labels = labels[matched_event["on_timebins"]:matched_event["off_timebins"]]                
-                # reshape spec into batches to fit into context window
-
-                # if spec longer than the context 
-                if spec_detected.shape[-1] > model_num_timebins:
-                    batch_size = (spec_detected.shape[-1] // model_num_timebins) + 1 # +1 to account for the padding creating an additional batch (important)
-                    pad_amnt = model_num_timebins - (spec_detected.shape[-1] % model_num_timebins)
-
-                elif spec_detected.shape[-1] < model_num_timebins:
-                    pad_amnt = model_num_timebins - spec_detected.shape[-1]
-                    batch_size = 1 
-
-                # context equal exactly to spec size 
-                else:
-                    pad_amnt = 0
-                    batch_size = 1 
                 
+                if spec_detected.shape[-1] == 0:
+                    continue
+
+                # reshape spec into batches to fit into context window
+                # Calculate batch size and padding to avoid omitting data
+                num_full_batches = spec_detected.shape[-1] // model_num_timebins
+                remainder_bins = spec_detected.shape[-1] % model_num_timebins
+                
+                if remainder_bins > 0:
+                    batch_size = num_full_batches + 1
+                    pad_amnt = model_num_timebins - remainder_bins
+                else:
+                    batch_size = num_full_batches
+                    pad_amnt = 0
+                    
+                if batch_size == 0:
+                    batch_size = 1
+                    pad_amnt = model_num_timebins - spec_detected.shape[-1]
+
+                # Pad if necessary
                 if pad_amnt > 0: 
                     spec_detected = torch.nn.functional.pad(spec_detected, (0, pad_amnt), mode='constant', value=0)
-                    labels = torch.nn.functional.pad(labels, (0, pad_amnt), mode='constant', value=-1) # we gotta pad this shi to match abv
-
+                    labels = torch.nn.functional.pad(labels, (0, pad_amnt), mode='constant', value=-1)
                 
                 channel, mel, time = spec_detected.shape
+                
                 # Correctly batch by slicing along time dimension
-                # spec_detected shape: (channel, mel, time)
-                # We want: (batch_size, channel, mel, model_num_timebins)
                 batched_spec_detected = spec_detected.reshape(channel, mel, batch_size, model_num_timebins)
                 batched_spec_detected = batched_spec_detected.permute(2, 0, 1, 3)  # (batch_size, channel, mel, model_num_timebins)
+                
                 with torch.no_grad():
                     h, z_seq = model.forward_encoder_inference(batched_spec_detected)
-                    # h: encoded embeddings [B,S,D]
-                    # z_seq: patch embeddings [B,S,D]
-                    B, NP, D = h.shape # batch, num patches, dim
-                
-                # reshape encoded embeddings into grid
-                h_grid = h.permute(0, 2, 1) # now batch, d, s 
-                h_grid = h_grid.reshape(B, D, num_patches_height, num_patches_time)
-                
-                # reshape patch embeddings into grid
-                z_grid = z_seq.permute(0, 2, 1) # now batch, d, s 
-                z_grid = z_grid.reshape(B, D, num_patches_height, num_patches_time)
+                    # h: encoded embeddings [B, NP, D]
+                    # z_seq: patch embeddings [B, NP, D]
+                    B, NP, D = h.shape
 
-                latent_list.append(h_grid)
-                patch_list.append(z_grid)
-                label_list.append(labels)
-                spec_list.append(batched_spec_detected)
-                total_timebins+=batched_spec_detected.shape[0] * batched_spec_detected.shape[-1] # add the number of timebins 
+                # Reshape and process embeddings
+                # Reconstruct grid [B, D, H, W]
+                h_grid = h.permute(0, 2, 1).reshape(B, D, num_patches_height, num_patches_time)
+                z_grid = z_seq.permute(0, 2, 1).reshape(B, D, num_patches_height, num_patches_time)
+
+                # Permute to [B, W, H, D] to align with time
+                h_time = h_grid.permute(0, 3, 2, 1) 
+                z_time = z_grid.permute(0, 3, 2, 1)
+
+                # Flatten batch and time dimensions: [B*W, H, D] -> flatten H -> [B*W, H*D]
+                # We flatten B and W first to easily trim padding
+                h_flat = h_time.reshape(-1, num_patches_height * D)
+                z_flat = z_time.reshape(-1, num_patches_height * D)
+                
+                # Prepare spectrograms for saving: flatten B and T -> [B*T, M]
+                # batched_spec_detected: [B, C, M, T]
+                spec_flat = batched_spec_detected.squeeze(1).permute(0, 2, 1).reshape(-1, mel)
+
+                # Prepare labels
+                # labels is currently [B*T] (since it was padded to match spec)
+                
+                # Generate Pos IDs
+                # 0..W-1 repeated B times
+                current_pos_ids = torch.arange(0, num_patches_time).repeat(batch_size)
+
+                # TRIM PADDING
+                if pad_amnt > 0:
+                    # Trim embeddings (patches)
+                    pad_patches = pad_amnt // patch_width
+                    h_flat = h_flat[:-pad_patches]
+                    z_flat = z_flat[:-pad_patches]
+                    current_pos_ids = current_pos_ids[:-pad_patches]
+                    
+                    # Trim spectrograms and labels (timebins)
+                    spec_flat = spec_flat[:-pad_amnt]
+                    labels = labels[:-pad_amnt]
+
+                # Downsample labels to patch resolution
+                # We do this after trimming to ensure alignment
+                # labels is 1D [Timebins]
+                labels_reshaped = labels.float().view(1, 1, -1)
+                labels_down = F.max_pool1d(labels_reshaped, kernel_size=patch_width, stride=patch_width).view(-1).long()
+
+                # Append to lists
+                latent_list.append(h_flat.cpu())
+                patch_list.append(z_flat.cpu())
+                label_list_original.append(labels.cpu())
+                label_list_downsampled.append(labels_down.cpu())
+                spec_list.append(spec_flat.cpu())
+                pos_ids_list.append(current_pos_ids.cpu())
+                
+                total_timebins += spec_flat.shape[0]
+
         i += 1
 
     # Process encoded embeddings (h)
-    h = torch.cat(latent_list, dim=0)  # shape is batch, d , h, w 
-    batches = h.shape[0]
-    h = h.permute(0,3,1,2) # now batch, w, h, d 
-    h = h.flatten(0,1) # samples x h, w
-    # stack height patches onto temporal patches 
-    h = h.flatten(1,2)
+    h = torch.cat(latent_list, dim=0)  # [TotalPatches, H*D]
     
     # Process patch embeddings (z_seq)
-    z_seq = torch.cat(patch_list, dim=0)  # shape is batch, d , h, w 
-    z_seq = z_seq.permute(0,3,1,2) # now batch, w, h, d 
-    z_seq = z_seq.flatten(0,1) # samples x h, w
-    # stack height patches onto temporal patches 
-    z_seq = z_seq.flatten(1,2)
+    z_seq = torch.cat(patch_list, dim=0) # [TotalPatches, H*D]
     
     # Process labels
-    syllable_labels = torch.cat(label_list, dim=0)  # samples, labels
-    labels_original = syllable_labels.cpu().numpy()
-
-    # syllable labels are currently in the total timebins (spec) x label_id 
-    # we want to pool the labels to the same dimensionality as patches, so if patches are 2 timebins wide it would be a downsample of 2x 
-    downsample_factor = patch_width
-    syllable_labels = F.max_pool1d(syllable_labels.unsqueeze(0).unsqueeze(0).float(), kernel_size=downsample_factor, stride=downsample_factor).squeeze(0).squeeze(0).long()
+    labels_original = torch.cat(label_list_original, dim=0).numpy()
+    syllable_labels_downsampled = torch.cat(label_list_downsampled, dim=0).numpy()
     
     # Process spectrograms
-    spectrograms = torch.cat(spec_list, dim=0)  # shape is batch, channel, mel, time
-    # Reshape to 2D: (timebins, mels)
-    # Remove channel dimension and concatenate time dimension
-    spectrograms = spectrograms.squeeze(1)  # shape: (batch, mel, time)
-    spectrograms = spectrograms.permute(0, 2, 1)  # shape: (batch, time, mel)
-    spectrograms = spectrograms.reshape(-1, spectrograms.shape[-1])  # shape: (total_timebins, mel)
-    spectrograms_np = spectrograms.cpu().numpy()
+    spectrograms = torch.cat(spec_list, dim=0) # [TotalTimebins, Mel]
+    spectrograms_np = spectrograms.numpy()
     
-    # positional subtraction indexes 
-    pos_ids = torch.arange(0, 1024).repeat(batches)
-    pos_ids = np.asarray(pos_ids, dtype=int)[:h.shape[0]]
+    # Process pos_ids
+    pos_ids = torch.cat(pos_ids_list, dim=0)
+    pos_ids = np.asarray(pos_ids.numpy(), dtype=int)
     
-    # convert to NP FORMAT 
-    syllable_labels_downsampled = syllable_labels.cpu().numpy()
+    # Convert embeddings to NP
     h_np = h.numpy()
     z_seq_np = z_seq.numpy()
+    
+    # Save embeddings before position removal
+    encoded_embeddings_before_pos_removal = h_np.copy()
+    patch_embeddings_before_pos_removal = z_seq_np.copy()
+    
+    # removal of average vector per position for encoded embeddings
+    uniq = np.unique(pos_ids)
+    means_h = np.zeros((uniq.max()+1, h_np.shape[1]), dtype=np.float32)
+    for p in uniq:
+        means_h[p] = h_np[pos_ids == p].mean(axis=0)
+    h_np = h_np - means_h[pos_ids]
+    
+    # removal of average vector per position for patch embeddings
+    means_z = np.zeros((uniq.max()+1, z_seq_np.shape[1]), dtype=np.float32)
+    for p in uniq:
+        means_z[p] = z_seq_np[pos_ids == p].mean(axis=0)
+    z_seq_np = z_seq_np - means_z[pos_ids]
+
+    # Save embeddings after position removal
+    encoded_embeddings_after_pos_removal = h_np.copy()
+    patch_embeddings_after_pos_removal = z_seq_np.copy()
     
     # Save embeddings before position removal
     encoded_embeddings_before_pos_removal = h_np.copy()

@@ -48,6 +48,7 @@ audio2spec.py --> compute_statistics_of_spectrograms.py --> pretrain.py --> plot
 - [ ] snippification of datasets (for easy upload and faster training)
 - [ ] remove spec subfolder when sbatch audio2spec
 - [ ] early stopping for supervised train and maybe pretrain
+- [ ] revert to the old extract embedding and figure out a way to exlude padding 
 
 #### Bugs
 - [] irregularity with number of specs made in log for XCM vs HSN_test

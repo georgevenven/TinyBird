@@ -31,6 +31,61 @@ PROBE_MODE="finetune"
 # Task Selection: "both", "detect", or "classify"
 TASK_MODE="classify"
 
+# ================= ARGUMENT PARSING =================
+while [[ $# -gt 0 ]]; do
+    key="$1"
+    case $key in
+        --spec_root)
+        SPEC_ROOT="$2"
+        shift 2
+        ;;
+        --annotation_root)
+        ANNOTATION_ROOT="$2"
+        shift 2
+        ;;
+        --results_dir)
+        RESULTS_DIR="$2"
+        shift 2
+        ;;
+        --pretrained_run)
+        PRETRAINED_RUN="$2"
+        shift 2
+        ;;
+        --probe_mode)
+        PROBE_MODE="$2"
+        shift 2
+        ;;
+        --task_mode)
+        TASK_MODE="$2"
+        shift 2
+        ;;
+        --steps)
+        STEPS="$2"
+        shift 2
+        ;;
+        --batch_size)
+        BATCH_SIZE="$2"
+        shift 2
+        ;;
+        --num_workers)
+        NUM_WORKERS="$2"
+        shift 2
+        ;;
+        *)
+        echo "Unknown argument: $1"
+        shift 1
+        ;;
+    esac
+done
+
+echo " Configuration:"
+echo "   SPEC_ROOT: $SPEC_ROOT"
+echo "   RESULTS_DIR: $RESULTS_DIR"
+echo "   PRETRAINED_RUN: $PRETRAINED_RUN"
+echo "   TASK_MODE: $TASK_MODE"
+echo "   PROBE_MODE: $PROBE_MODE"
+
+
 # Species Map: "SpeciesName:AnnotationFile:SpecSubDir"
 # SpecSubDir is the folder name inside SPEC_ROOT containing .npy files
 SPECIES_LIST=(

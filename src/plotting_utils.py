@@ -327,6 +327,7 @@ def plot_benchmark_results(results_csv: str, output_dir: str):
     Expected CSV format: task,species,individual,samples,metric_value
     """
     import csv
+    import matplotlib.ticker as ticker
     
     data = []
     try:
@@ -356,74 +357,90 @@ def plot_benchmark_results(results_csv: str, output_dir: str):
         
     species_color = dict(zip(species_list, colors))
     
-    # Detection Plot
-    detect_data = [d for d in data if d['task'] == 'detect']
-    if detect_data:
-        plt.figure(figsize=(10, 6), dpi=SPEC_DPI)
-        for species in species_list:
-            sp_data = [d for d in detect_data if d['species'] == species]
-            if not sp_data: continue
-            
-            # Sort by samples
-            sp_data.sort(key=lambda x: x['samples'])
-            x = [d['samples'] for d in sp_data]
-            y = [d['metric_value'] for d in sp_data]
-            
-            plt.plot(x, y, marker='o', label=species, color=species_color[species], linewidth=2)
-            
-        plt.xscale('log')
-        plt.xlabel('Training Samples')
-        plt.ylabel('F1 Score (%)')
-        plt.title('Detection Performance vs Training Size')
-        plt.grid(True, which="both", ls="-", alpha=0.2)
-        plt.legend()
-        plt.savefig(os.path.join(output_dir, 'detection_benchmark.png'), bbox_inches='tight')
-        plt.close()
+    # Apply style changes via context
+    with plt.rc_context({'font.size': 14, 'font.weight': 'bold', 'axes.labelweight': 'bold', 'axes.titleweight': 'bold'}):
         
-    # Classification Plot
-    classify_data = [d for d in data if d['task'] == 'classify']
-    if classify_data:
-        plt.figure(figsize=(10, 6), dpi=SPEC_DPI)
-        
-        # Group by individual
-        individuals = sorted(list(set(d['individual'] for d in classify_data)))
-        
-        for ind in individuals:
-            ind_data = [d for d in classify_data if d['individual'] == ind]
-            if not ind_data: continue
+        # Detection Plot
+        detect_data = [d for d in data if d['task'] == 'detect']
+        if detect_data:
+            plt.figure(figsize=(10, 6), dpi=SPEC_DPI)
+            for species in species_list:
+                sp_data = [d for d in detect_data if d['species'] == species]
+                if not sp_data: continue
+                
+                # Sort by samples
+                sp_data.sort(key=lambda x: x['samples'])
+                x = [d['samples'] for d in sp_data]
+                y = [d['metric_value'] for d in sp_data]
+                
+                plt.plot(x, y, marker='o', label=species, color=species_color[species], linewidth=2)
+                
+            plt.xscale('log')
+            plt.xlabel('Training Samples')
+            plt.ylabel('F1 Score (%)')
+            plt.title('Detection Performance vs Training Size')
+            plt.legend()
+            plt.savefig(os.path.join(output_dir, 'detection_benchmark.png'), bbox_inches='tight')
+            plt.close()
             
-            species = ind_data[0]['species']
-            color = species_color[species]
+        # Classification Plot
+        classify_data = [d for d in data if d['task'] == 'classify']
+        if classify_data:
+            fig, ax = plt.subplots(figsize=(8, 8), dpi=SPEC_DPI)
             
-            ind_data.sort(key=lambda x: x['samples'])
-            x = [d['samples'] for d in ind_data]
-            y = [d['metric_value'] for d in ind_data]
+            # Get unique sample sizes from data and create position mapping
+            all_samples = sorted(list(set(d['samples'] for d in classify_data)))
+            sample_to_pos = {s: i for i, s in enumerate(all_samples)}
             
-            # Plot individual lines faintly
-            plt.plot(x, y, marker='o', color=color, alpha=0.3, linewidth=1)
+            # Group by individual
+            individuals = sorted(list(set(d['individual'] for d in classify_data)))
             
-        # Plot species averages
-        for species in species_list:
-            sp_data = [d for d in classify_data if d['species'] == species]
-            if not sp_data: continue
+            for ind in individuals:
+                ind_data = [d for d in classify_data if d['individual'] == ind]
+                if not ind_data: continue
+                
+                species = ind_data[0]['species']
+                color = species_color[species]
+                
+                ind_data.sort(key=lambda x: x['samples'])
+                x = [sample_to_pos[d['samples']] for d in ind_data]
+                y = [d['metric_value'] for d in ind_data]
+                
+                # Plot individual lines faintly
+                ax.plot(x, y, marker='o', color=color, alpha=0.3, linewidth=1)
+                
+            # Plot species averages
+            for species in species_list:
+                sp_data = [d for d in classify_data if d['species'] == species]
+                if not sp_data: continue
+                
+                # Group by samples to average
+                sample_map = {}
+                for d in sp_data:
+                    s = d['samples']
+                    if s not in sample_map: sample_map[s] = []
+                    sample_map[s].append(d['metric_value'])
+                
+                samples = sorted(sample_map.keys())
+                x_pos = [sample_to_pos[s] for s in samples]
+                avgs = [np.mean(sample_map[s]) for s in samples]
+                
+                # No label (no legend)
+                ax.plot(x_pos, avgs, marker='o', color=species_color[species], linewidth=3)
             
-            # Group by samples to average
-            sample_map = {}
-            for d in sp_data:
-                s = d['samples']
-                if s not in sample_map: sample_map[s] = []
-                sample_map[s].append(d['metric_value'])
+            # Construct title from species present
+            present_species = sorted(list(set(d['species'] for d in classify_data)))
+            species_str = ", ".join(present_species)
             
-            samples = sorted(sample_map.keys())
-            avgs = [np.mean(sample_map[s]) for s in samples]
+            # Set linear spacing with custom labels
+            ax.set_xticks(range(len(all_samples)))
+            ax.set_xticklabels([str(s) for s in all_samples])
             
-            plt.plot(samples, avgs, marker='o', label=species, color=species_color[species], linewidth=3)
+            ax.set_xlabel('Training Samples (Recordings)')
+            ax.set_ylabel('Frame Error Rate (%)')
+            ax.set_title(f'{species_str}: Fine Tune Samples vs Frame Error Rate')
+            # No grid
+            # No legend
             
-        plt.xscale('log')
-        plt.xlabel('Training Samples')
-        plt.ylabel('Frame Error Rate (%)')
-        plt.title('Classification Performance vs Training Size')
-        plt.grid(True, which="both", ls="-", alpha=0.2)
-        plt.legend()
-        plt.savefig(os.path.join(output_dir, 'classification_benchmark.png'), bbox_inches='tight')
-        plt.close()
+            fig.savefig(os.path.join(output_dir, 'classification_benchmark.png'), bbox_inches='tight')
+            plt.close(fig)
