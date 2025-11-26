@@ -49,6 +49,8 @@ audio2spec.py --> compute_statistics_of_spectrograms.py --> pretrain.py --> plot
 - [ ] remove spec subfolder when sbatch audio2spec
 - [ ] early stopping for supervised train and maybe pretrain
 - [ ] revert to the old extract embedding and figure out a way to exlude padding 
+- [ ] refactor all code that was touched by AI
+- [ ] make sure that plotting utils can be called independetly as well as part of the scripts they are a part of 
 
 #### Bugs
 - [] irregularity with number of specs made in log for XCM vs HSN_test

@@ -14,6 +14,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
+import umap
+from matplotlib import cm
 
 SPEC_FIGSIZE: Tuple[float, float] = (10.0, 6.0)  # matches plot_embedding chunk visuals
 SPEC_DPI = 300
@@ -26,7 +28,13 @@ TRAIN_COLOR = "royalblue"
 VAL_COLOR = "tomato"
 MASK_CMAP = "viridis"
 
-__all__ = ["save_reconstruction_plot", "plot_loss_curves", "save_supervised_prediction_plot", "plot_benchmark_results"]
+__all__ = [
+    "save_reconstruction_plot",
+    "plot_loss_curves",
+    "save_supervised_prediction_plot",
+    "plot_benchmark_results",
+    "generate_umap_plots",
+]
 
 
 def _depatchify(patches: torch.Tensor, *, mels: int, timebins: int, patch_size: Sequence[int]) -> torch.Tensor:
@@ -358,7 +366,16 @@ def plot_benchmark_results(results_csv: str, output_dir: str):
     species_color = dict(zip(species_list, colors))
     
     # Apply style changes via context
-    with plt.rc_context({'font.size': 14, 'font.weight': 'bold', 'axes.labelweight': 'bold', 'axes.titleweight': 'bold'}):
+    with plt.rc_context({
+        'font.size': 24,
+        'font.weight': 'bold',
+        'axes.labelweight': 'bold', 
+        'axes.titleweight': 'bold',
+        'axes.titlesize': 24,
+        'axes.labelsize': 24,
+        'xtick.labelsize': 24,
+        'ytick.labelsize': 24,
+    }):
         
         # Detection Plot
         detect_data = [d for d in data if d['task'] == 'detect']
@@ -386,7 +403,7 @@ def plot_benchmark_results(results_csv: str, output_dir: str):
         # Classification Plot
         classify_data = [d for d in data if d['task'] == 'classify']
         if classify_data:
-            fig, ax = plt.subplots(figsize=(8, 8), dpi=SPEC_DPI)
+            fig, ax = plt.subplots(figsize=(5, 6), dpi=SPEC_DPI)
             
             # Get unique sample sizes from data and create position mapping
             all_samples = sorted(list(set(d['samples'] for d in classify_data)))
@@ -436,11 +453,107 @@ def plot_benchmark_results(results_csv: str, output_dir: str):
             ax.set_xticks(range(len(all_samples)))
             ax.set_xticklabels([str(s) for s in all_samples])
             
-            ax.set_xlabel('Training Samples (Recordings)')
-            ax.set_ylabel('Frame Error Rate (%)')
-            ax.set_title(f'{species_str}: Fine Tune Samples vs Frame Error Rate')
+            ax.set_xlabel('# Training Recordings', fontsize=24)
+            ax.set_ylabel('Frame Error Rate (%)', fontsize=24)
+            ax.set_title(species_str, fontsize=24)
+            ax.set_ylim(0, 50)
+            ax.yaxis.set_major_locator(ticker.MultipleLocator(10))
+            ax.tick_params(axis='both', which='major', labelsize=24)
             # No grid
             # No legend
             
             fig.savefig(os.path.join(output_dir, 'classification_benchmark.png'), bbox_inches='tight')
             plt.close(fig)
+
+
+def _build_palette(labels, colormap=cm.tab20):
+    mask = labels >= 0
+    if not mask.any():
+        return {}
+    uniq = np.unique(labels[mask])
+    colors = colormap(np.linspace(0, 1, len(uniq)))
+    palette = {}
+    for uid, color in zip(uniq.tolist(), colors):
+        rgb = np.asarray(color, dtype=np.float32)
+        if rgb.shape[0] > 3:
+            rgb = rgb[:3]
+        palette[int(uid)] = rgb
+    return palette
+
+
+def _scatter_umap(xy, labels, palette, path, title):
+    plt.figure(figsize=(5.5, 5.5), dpi=300)
+    mask = labels >= 0
+    if (~mask).any():
+        plt.scatter(xy[~mask, 0], xy[~mask, 1], s=10, color="#404040", alpha=0.1, edgecolors="none")
+    for lab, color in palette.items():
+        idx = labels == lab
+        if idx.any():
+            plt.scatter(xy[idx, 0], xy[idx, 1], s=10, color=color, alpha=0.15, edgecolors="none")
+    plt.title(title, fontsize=24, fontweight="bold", loc="center")
+    plt.xlabel("UMAP 1", fontsize=20, fontweight="bold")
+    plt.ylabel("UMAP 2", fontsize=20, fontweight="bold")
+    plt.xticks([])
+    plt.yticks([])
+    plt.tight_layout()
+    plt.savefig(path, dpi=300, format="png")
+    plt.close()
+
+
+def _fit_umap_embedding(embeddings, n_neighbors, deterministic):
+    reducer_kwargs = {
+        "n_components": 2,
+        "n_neighbors": n_neighbors,
+        "metric": "cosine",
+        "min_dist": 0.01,
+    }
+    if deterministic:
+        reducer_kwargs["random_state"] = 42
+    else:
+        reducer_kwargs["low_memory"] = True
+        reducer_kwargs["n_jobs"] = -1
+    reducer = umap.UMAP(**reducer_kwargs)
+    return reducer.fit_transform(embeddings)
+
+
+def generate_umap_plots(npz_path: str, output_dir: str, umap_neighbors: int = 200, deterministic: bool = False):
+    """
+    Generate UMAP plots from an embedding NPZ file.
+    """
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
+    npz = np.load(npz_path, allow_pickle=True)
+    labels_down = npz["labels_downsampled"]
+    
+    base_palette = _build_palette(labels_down)
+    
+    # Check available keys
+    keys = ["encoded_embeddings_after_pos_removal", "encoded_embeddings_before_pos_removal"]
+    encoded_variants = {}
+    for k in keys:
+        if k in npz:
+            encoded_variants[k.replace("encoded_embeddings_", "")] = npz[k]
+    
+    umap_dir = os.path.join(output_dir, "umap")
+    os.makedirs(umap_dir, exist_ok=True)
+    
+    paths = {}
+    
+    for variant_name, embedding_array in encoded_variants.items():
+        xy = _fit_umap_embedding(embedding_array, umap_neighbors, deterministic)
+        umap_path = os.path.join(umap_dir, f"encoded_{variant_name}.png")
+        
+        title_text = "Pos. Removal" if "after" in variant_name else "No Pos. Removal"
+        
+        _scatter_umap(
+            xy,
+            labels_down,
+            base_palette,
+            umap_path,
+            title=title_text,
+        )
+        paths[variant_name] = umap_path
+        print(f"Generated UMAP plot: {umap_path}")
+        
+    return paths

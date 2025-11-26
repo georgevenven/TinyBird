@@ -13,17 +13,18 @@ cd "$(dirname "$0")/.."
 # PATHS - PLEASE UPDATE THESE IF NEEDED
 # Assuming spectrograms are in a 'spectrograms' folder or similar.
 # Since I couldn't automatically locate them, please set SPEC_ROOT.
-SPEC_ROOT="/media/george-vengrovski/George-SSD/SongMAE_Bench_Data" 
-ANNOTATION_ROOT="files"
+SPEC_ROOT="/Users/georgev/Documents/data/SongMAE_Bench_Data" 
+ANNOTATION_ROOT="/Users/georgev/Documents/data/SongMAE_Bench_Data"
 RESULTS_DIR="results/benchmark"
-PRETRAINED_RUN="xcm_frags" # the pretrained model 
+PRETRAINED_RUN="/Users/georgev/Documents/codebases/TinyBird/runs/tinybird_pretrain_20251122_091539" # the pretrained model 
 
 # Experiment Settings
-SAMPLE_SIZES=(1 5 10 30 100)
+SAMPLE_SIZES=(1 2 4 8 16)
 TEST_PERCENT=20
 STEPS=250
-BATCH_SIZE=32
+BATCH_SIZE=24
 NUM_WORKERS=4
+MAX_BIRDS=3
 
 # Probe Type: "linear" (Freeze Encoder) or "finetune" (MLP + Unfreeze)
 PROBE_MODE="finetune"
@@ -71,6 +72,10 @@ while [[ $# -gt 0 ]]; do
         NUM_WORKERS="$2"
         shift 2
         ;;
+        --max_birds)
+        MAX_BIRDS="$2"
+        shift 2
+        ;;
         *)
         echo "Unknown argument: $1"
         shift 1
@@ -84,6 +89,7 @@ echo "   RESULTS_DIR: $RESULTS_DIR"
 echo "   PRETRAINED_RUN: $PRETRAINED_RUN"
 echo "   TASK_MODE: $TASK_MODE"
 echo "   PROBE_MODE: $PROBE_MODE"
+echo "   MAX_BIRDS: $MAX_BIRDS"
 
 
 # Species Map: "SpeciesName:AnnotationFile:SpecSubDir"
@@ -233,7 +239,14 @@ for ENTRY in "${SPECIES_LIST[@]}"; do
         
         echo "  Found individuals: $BIRDS"
         
+        BIRD_COUNT=0
         for BIRD in $BIRDS; do
+            if [ "$BIRD_COUNT" -ge "$MAX_BIRDS" ]; then
+                echo "  Reached max birds ($MAX_BIRDS). Skipping remaining individuals."
+                break
+            fi
+            ((BIRD_COUNT++))
+
             echo "  Processing Individual: $BIRD"
             CLS_WORK_DIR="$SPECIES_WORK_DIR/classify/$BIRD"
             mkdir -p "$CLS_WORK_DIR"

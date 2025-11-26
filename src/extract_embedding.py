@@ -303,28 +303,7 @@ def main(args):
     encoded_embeddings_after_pos_removal = h_np.copy()
     patch_embeddings_after_pos_removal = z_seq_np.copy()
     
-    # Save embeddings before position removal
-    encoded_embeddings_before_pos_removal = h_np.copy()
-    patch_embeddings_before_pos_removal = z_seq_np.copy()
-    
-    # removal of average vector per position for encoded embeddings
-    uniq = np.unique(pos_ids)
-    means_h = np.zeros((uniq.max()+1, h_np.shape[1]), dtype=np.float32)
-    for p in uniq:
-        means_h[p] = h_np[pos_ids == p].mean(axis=0)
-    h_np = h_np - means_h[pos_ids]
-    
-    # removal of average vector per position for patch embeddings
-    means_z = np.zeros((uniq.max()+1, z_seq_np.shape[1]), dtype=np.float32)
-    for p in uniq:
-        means_z[p] = z_seq_np[pos_ids == p].mean(axis=0)
-    z_seq_np = z_seq_np - means_z[pos_ids]
-
-    # Save embeddings after position removal
-    encoded_embeddings_after_pos_removal = h_np.copy()
-    patch_embeddings_after_pos_removal = z_seq_np.copy()
-
-    # we need audio params, patch stuff, checkpoint, spec, labels original, labels_downsampled, embedding before and after pos removal 
+    # we need audio params, patch stuff, checkpoint, spec, labels original, labels_downsampled, embedding before and after pos removal
     np.savez(
         args["npz_dir"],
         # Spectrograms

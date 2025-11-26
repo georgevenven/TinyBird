@@ -38,8 +38,9 @@ def main():
     parser.add_argument("--run_dir", required=True, type=str, help="Run directory or name under ../runs")
     parser.add_argument("--spec_dir", required=True, type=str, help="Directory of spectrogram tensors (val-style)")
     parser.add_argument("--out_dir", required=True, type=str, help="Folder to store results")
-    parser.add_argument("--num_samples", type=int, default=1000, help="Max samples to evaluate")
+    parser.add_argument("--num_samples", type=int, default=10000, help="Max samples to evaluate")
     parser.add_argument("--checkpoint", type=str, default=None, help="Optional checkpoint filename to load")
+    parser.add_argument("--per_patch_norm", action="store_true", help="Enable per-patch normalization for visualization")
     args = parser.parse_args()
 
     # Load model + config
@@ -127,9 +128,12 @@ def main():
             overlay_patches[bool_mask] = pred_denorm[bool_mask]
             
             # Normalize all patches patch-wise for consistent visualization
-            overlay_mean = overlay_patches.mean(dim=-1, keepdim=True)
-            overlay_std = overlay_patches.std(dim=-1, keepdim=True)
-            overlay_patches_normalized = (overlay_patches - overlay_mean) / (overlay_std + 1e-6)
+            if args.per_patch_norm:
+                overlay_mean = overlay_patches.mean(dim=-1, keepdim=True)
+                overlay_std = overlay_patches.std(dim=-1, keepdim=True)
+                overlay_patches_normalized = (overlay_patches - overlay_mean) / (overlay_std + 1e-6)
+            else:
+                overlay_patches_normalized = overlay_patches
             
             overlay_img = depatchify(overlay_patches_normalized, H=H, W=W, patch_size=patch_size)
 
@@ -157,8 +161,35 @@ def main():
             x_img = x[0, 0].detach().cpu().numpy()
             masked_img_np = masked_img[0, 0].detach().cpu().numpy()
             overlay_np = overlay_img[0, 0].detach().cpu().numpy()
+            recon_full_np = recon_full[0, 0].detach().cpu().numpy()
 
-            fig = plt.figure(figsize=(8, 6))
+            fname = sanitize(filenames[0] if isinstance(filenames, list) else str(filenames))
+
+            # Plot 1: Decoder Output
+            fig1 = plt.figure(figsize=(7.9, 5.8933))
+            ax1 = plt.subplot(3, 1, 1)
+            ax1.imshow(x_img, origin="lower", aspect="auto")
+            ax1.set_title("Input Spectrogram", fontsize=16, fontweight='bold')
+            ax1.axis("off")
+
+            ax2 = plt.subplot(3, 1, 2)
+            ax2.imshow(masked_img_np, origin="lower", aspect="auto")
+            ax2.set_title("Input Spectrogram With Mask", fontsize=16, fontweight='bold')
+            ax2.axis("off")
+
+            ax3 = plt.subplot(3, 1, 3)
+            ax3.imshow(recon_full_np, origin="lower", aspect="auto")
+            ax3.set_title("Decoder Output", fontsize=16, fontweight='bold')
+            ax3.axis("off")
+
+            fig1.tight_layout()
+            out_png1 = os.path.join(imgs_dir, f"{i:06d}_{fname}_decoder.png")
+            fig1.savefig(out_png1, dpi=300, facecolor='white', 
+                       edgecolor='none')
+            plt.close(fig1)
+
+            # Plot 2: Overlay
+            fig2 = plt.figure(figsize=(7.9, 5.8933))
             ax1 = plt.subplot(3, 1, 1)
             ax1.imshow(x_img, origin="lower", aspect="auto")
             ax1.set_title("Input Spectrogram", fontsize=16, fontweight='bold')
@@ -174,13 +205,11 @@ def main():
             ax3.set_title("Decoder Predictions and Original Spectrogram", fontsize=16, fontweight='bold')
             ax3.axis("off")
 
-            fig.tight_layout()
-
-            fname = sanitize(filenames[0] if isinstance(filenames, list) else str(filenames))
-            out_png = os.path.join(imgs_dir, f"{i:06d}_{fname}.png")
-            fig.savefig(out_png, dpi=300, bbox_inches='tight', facecolor='white', 
-                       edgecolor='none', pad_inches=0.1)
-            plt.close(fig)
+            fig2.tight_layout()
+            out_png2 = os.path.join(imgs_dir, f"{i:06d}_{fname}_overlay.png")
+            fig2.savefig(out_png2, dpi=300, facecolor='white', 
+                       edgecolor='none')
+            plt.close(fig2)
 
             # Append CSV
             with open(csv_path, "a") as fcsv:
