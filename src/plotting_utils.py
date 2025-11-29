@@ -373,17 +373,18 @@ def plot_benchmark_results(results_csv: str, output_dir: str):
         'axes.titleweight': 'bold',
         'axes.titlesize': 24,
         'axes.labelsize': 24,
-        'xtick.labelsize': 24,
-        'ytick.labelsize': 24,
+        'xtick.labelsize': 18,
+        'ytick.labelsize': 18,
     }):
         
         # Detection Plot
         detect_data = [d for d in data if d['task'] == 'detect']
         if detect_data:
-            plt.figure(figsize=(10, 6), dpi=SPEC_DPI)
             for species in species_list:
                 sp_data = [d for d in detect_data if d['species'] == species]
                 if not sp_data: continue
+                
+                plt.figure(figsize=(10, 6), dpi=SPEC_DPI)
                 
                 # Sort by samples
                 sp_data.sort(key=lambda x: x['samples'])
@@ -392,46 +393,45 @@ def plot_benchmark_results(results_csv: str, output_dir: str):
                 
                 plt.plot(x, y, marker='o', label=species, color=species_color[species], linewidth=2)
                 
-            plt.xscale('log')
-            plt.xlabel('Training Samples')
-            plt.ylabel('F1 Score (%)')
-            plt.title('Detection Performance vs Training Size')
-            plt.legend()
-            plt.savefig(os.path.join(output_dir, 'detection_benchmark.png'), bbox_inches='tight')
-            plt.close()
+                plt.xscale('log')
+                plt.xlabel('Training Samples')
+                plt.ylabel('F1 Score (%)')
+                plt.title(f'Detection Performance: {species}')
+                plt.legend()
+                plt.gca().yaxis.set_major_locator(ticker.MultipleLocator(5))
+                plt.tick_params(axis='both', which='major', labelsize=18)
+                plt.grid(True, alpha=0.2)
+                plt.savefig(os.path.join(output_dir, f'detection_benchmark_{species}.png'), bbox_inches='tight')
+                plt.close()
             
         # Classification Plot
         classify_data = [d for d in data if d['task'] == 'classify']
         if classify_data:
-            fig, ax = plt.subplots(figsize=(5, 6), dpi=SPEC_DPI)
-            
             # Get unique sample sizes from data and create position mapping
             all_samples = sorted(list(set(d['samples'] for d in classify_data)))
             sample_to_pos = {s: i for i, s in enumerate(all_samples)}
             
-            # Group by individual
-            individuals = sorted(list(set(d['individual'] for d in classify_data)))
-            
-            for ind in individuals:
-                ind_data = [d for d in classify_data if d['individual'] == ind]
-                if not ind_data: continue
-                
-                species = ind_data[0]['species']
-                color = species_color[species]
-                
-                ind_data.sort(key=lambda x: x['samples'])
-                x = [sample_to_pos[d['samples']] for d in ind_data]
-                y = [d['metric_value'] for d in ind_data]
-                
-                # Plot individual lines faintly
-                ax.plot(x, y, marker='o', color=color, alpha=0.3, linewidth=1)
-                
-            # Plot species averages
             for species in species_list:
                 sp_data = [d for d in classify_data if d['species'] == species]
                 if not sp_data: continue
+
+                fig, ax = plt.subplots(figsize=(5.5, 6), dpi=SPEC_DPI)
                 
-                # Group by samples to average
+                # Group by individual
+                individuals = sorted(list(set(d['individual'] for d in sp_data)))
+                color = species_color[species]
+                
+                for ind in individuals:
+                    ind_data = [d for d in sp_data if d['individual'] == ind]
+                    
+                    ind_data.sort(key=lambda x: x['samples'])
+                    x = [sample_to_pos[d['samples']] for d in ind_data]
+                    y = [d['metric_value'] for d in ind_data]
+                    
+                    # Plot individual lines faintly
+                    ax.plot(x, y, marker='o', color=color, alpha=0.3, linewidth=1)
+                
+                # Plot species averages
                 sample_map = {}
                 for d in sp_data:
                     s = d['samples']
@@ -443,27 +443,22 @@ def plot_benchmark_results(results_csv: str, output_dir: str):
                 avgs = [np.mean(sample_map[s]) for s in samples]
                 
                 # No label (no legend)
-                ax.plot(x_pos, avgs, marker='o', color=species_color[species], linewidth=3)
+                ax.plot(x_pos, avgs, marker='o', color=color, linewidth=3)
             
-            # Construct title from species present
-            present_species = sorted(list(set(d['species'] for d in classify_data)))
-            species_str = ", ".join(present_species)
-            
-            # Set linear spacing with custom labels
-            ax.set_xticks(range(len(all_samples)))
-            ax.set_xticklabels([str(s) for s in all_samples])
-            
-            ax.set_xlabel('# Training Recordings', fontsize=24)
-            ax.set_ylabel('Frame Error Rate (%)', fontsize=24)
-            ax.set_title(species_str, fontsize=24)
-            ax.set_ylim(0, 50)
-            ax.yaxis.set_major_locator(ticker.MultipleLocator(10))
-            ax.tick_params(axis='both', which='major', labelsize=24)
-            # No grid
-            # No legend
-            
-            fig.savefig(os.path.join(output_dir, 'classification_benchmark.png'), bbox_inches='tight')
-            plt.close(fig)
+                # Set linear spacing with custom labels
+                ax.set_xticks(range(len(all_samples)))
+                ax.set_xticklabels([str(s) for s in all_samples])
+                
+                ax.set_xlabel('# Training Recordings', fontsize=24)
+                ax.set_ylabel('Frame Error Rate (%)', fontsize=24)
+                ax.set_title(species, fontsize=24)
+                ax.set_ylim(0, 50)
+                ax.yaxis.set_major_locator(ticker.MultipleLocator(5))
+                ax.tick_params(axis='both', which='major', labelsize=18)
+                ax.grid(True, alpha=0.2)
+                
+                fig.savefig(os.path.join(output_dir, f'classification_benchmark_{species}.png'), bbox_inches='tight')
+                plt.close(fig)
 
 
 def _build_palette(labels, colormap=cm.tab20):
