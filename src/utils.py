@@ -202,11 +202,11 @@ def load_audio_labels(path, filename, mode):
       Point of this function is to load the name of the file, and then match it with the name in the json, 
       then return either the detection labels, or the syllable classes
     
-      mode: "detect" or "classify"
+      mode: "detect", "classify", or "unit_detect"
       It should be file extension agnostic 
     """
-    if mode not in ["detect", "classify"]:
-        raise ValueError("mode must be 'detect' or 'classify'")
+    if mode not in ["detect", "classify", "unit_detect"]:
+        raise ValueError("mode must be 'detect', 'classify', or 'unit_detect'")
     
     with open(path, "r") as f:
         annotations = json.load(f)
@@ -217,7 +217,9 @@ def load_audio_labels(path, filename, mode):
             if mode == "detect":
                 return [{"onset_ms": event["onset_ms"], "offset_ms": event["offset_ms"]} 
                         for event in rec["detected_events"]]
-            else:
+            elif mode == "classify":
+                return [unit for event in rec["detected_events"] for unit in event["units"]]
+            else:  # unit_detect
                 return [unit for event in rec["detected_events"] for unit in event["units"]]
     
     raise ValueError(f"No matching recording found for: {filename}")
@@ -230,17 +232,18 @@ def get_num_classes_from_annotations(path, mode):
     
     Args:
         path (str): Path to annotation JSON file
-        mode (str): "detect" or "classify"
+        mode (str): "detect", "classify", or "unit_detect"
         
     Returns:
         int: Number of classes including silence class 0
              - For detect: 2 (silence=0, vocalization=1)
+             - For unit_detect: 2 (silence=0, unit_present=1)
              - For classify: max_syllable_id + 2 (silence=0, syllables=1,2,3,...)
     """
-    if mode not in ["detect", "classify"]:
-        raise ValueError("mode must be 'detect' or 'classify'")
+    if mode not in ["detect", "classify", "unit_detect"]:
+        raise ValueError("mode must be 'detect', 'classify', or 'unit_detect'")
     
-    if mode == "detect":
+    if mode in ["detect", "unit_detect"]:
         return 2  # silence and vocalization
     
     # For classify mode, find all unique syllable IDs

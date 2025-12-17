@@ -98,7 +98,7 @@ class SupervisedSpectogramDataset(Dataset):
         self.mean = np.float32(self.mean)
         self.std = np.float32(self.std)
 
-        self.mode = mode ## if classify, means classify syllable labels, if detect, means detect onset offset of vocalizations 
+        self.mode = mode ## detect = vocalization present/absent, unit_detect = syllable present/absent, classify = syllable class
         self.annotation_file_path = annotation_file_path
         self.white_noise = white_noise
         
@@ -129,7 +129,7 @@ class SupervisedSpectogramDataset(Dataset):
         labels = load_audio_labels(self.annotation_file_path, filename, mode=self.mode)
         
         # Initialize label array with silence (class 0)
-        if self.mode == "detect":
+        if self.mode in ["detect", "unit_detect"]:
             label_arr = np.full(time_length, 0, dtype=np.int64)  # 0 = silence
         else:  # classify
             label_arr = np.full(time_length, 0, dtype=np.int64)  # 0 = silence
@@ -139,8 +139,8 @@ class SupervisedSpectogramDataset(Dataset):
             onset_bin = self.ms_to_timebins(label["onset_ms"])
             offset_bin = self.ms_to_timebins(label["offset_ms"])
             
-            if self.mode == "detect":
-                label_arr[onset_bin:offset_bin] = 1  # 1 = vocalization
+            if self.mode in ["detect", "unit_detect"]:
+                label_arr[onset_bin:offset_bin] = 1  # 1 = present (vocalization or unit)
             else:  # classify
                 label_arr[onset_bin:offset_bin] = label["id"] + 1  # shift by +1, so classes are 1, 2, 3, ...
         

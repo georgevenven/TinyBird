@@ -290,7 +290,7 @@ class Trainer():
         # Setup loss logging file
         self.loss_log_path = os.path.join(self.run_path, "loss_log.txt")
         with open(self.loss_log_path, 'w') as f:
-            if config["mode"] == "detect":
+            if config["mode"] in ["detect", "unit_detect"]:
                 f.write("step,train_loss,val_loss,train_acc,val_acc,train_f1,val_f1,samples_processed,steps_per_sec,samples_per_sec\n")
             else:
                 f.write("step,train_loss,val_loss,train_acc,val_acc,samples_processed,steps_per_sec,samples_per_sec\n")
@@ -389,7 +389,7 @@ class Trainer():
             spectrogram=spec,
             labels=labels_downsampled,
             predictions=preds,
-            probabilities=probs if self.config["mode"] == "detect" else None,
+            probabilities=probs if self.config["mode"] in ["detect", "unit_detect"] else None,
             filename=filenames[sample_idx],
             mode=self.config["mode"],
             num_classes=self.model.num_classes,
@@ -508,7 +508,7 @@ class Trainer():
                 
                 # Print progress
                 current_lr = self.scheduler.get_last_lr()[0]
-                if self.config["mode"] == "detect":
+                if self.config["mode"] in ["detect", "unit_detect"]:
                     print(f"Step {step_num} ({progress_pct:.1f}%): "
                           f"Train Loss = {train_loss:.6f}, Val Loss = {val_loss:.6f}, "
                           f"Train Acc = {train_acc:.2f}%, Val Acc = {val_acc:.2f}%, "
@@ -528,7 +528,7 @@ class Trainer():
                 
                 # Log losses and accuracies to file
                 with open(self.loss_log_path, 'a') as f:
-                    if self.config["mode"] == "detect":
+                    if self.config["mode"] in ["detect", "unit_detect"]:
                         f.write(f"{step_num},{train_loss:.6f},{val_loss:.6f},{train_acc:.2f},{val_acc:.2f},{train_f1:.2f},{val_f1:.2f},{samples_processed},{steps_per_sec:.2f},{samples_per_sec:.1f}\n")
                     else:
                         f.write(f"{step_num},{train_loss:.6f},{val_loss:.6f},{train_acc:.2f},{val_acc:.2f},{samples_processed},{steps_per_sec:.2f},{samples_per_sec:.1f}\n")
@@ -557,7 +557,7 @@ if __name__ == "__main__":
     parser.add_argument("--run_name", type=str, required=True, help="directory name inside /runs to store train run details")
     parser.add_argument("--pretrained_run", type=str, required=True, help="path to pretrained run directory")
     parser.add_argument("--annotation_file", type=str, required=True, help="path to annotation JSON file")
-    parser.add_argument("--mode", type=str, required=True, choices=["detect", "classify"], help="detect or classify mode")
+    parser.add_argument("--mode", type=str, required=True, choices=["detect", "unit_detect", "classify"], help="detect, unit_detect, or classify mode")
     
     # Training hyperparameters
     parser.add_argument("--steps", type=int, default=50_000, help="number of training steps")

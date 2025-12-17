@@ -257,7 +257,7 @@ def save_supervised_prediction_plot(
         predictions: (W_patches,) predicted labels
         probabilities: (W_patches, num_classes) class probabilities (optional, used for detect mode)
         filename: Name of the audio file
-        mode: "detect" or "classify"
+        mode: "detect", "unit_detect", or "classify"
         num_classes: Total number of classes
         output_dir: Directory to save the plot
         step_num: Current training step
@@ -273,7 +273,7 @@ def save_supervised_prediction_plot(
     custom_cmap = plt.matplotlib.colors.ListedColormap(colors)
     
     # Create figure
-    if mode == "detect":
+    if mode in ["detect", "unit_detect"]:
         fig, axes = plt.subplots(4, 1, figsize=figsize or (12, 8), 
                                 gridspec_kw={'height_ratios': [3, 1, 0.5, 0.5]})
     else:
@@ -287,7 +287,7 @@ def save_supervised_prediction_plot(
     axes[0].set_xticks([])
     
     # Plot probability line for detect mode
-    if mode == "detect" and probabilities is not None:
+    if mode in ["detect", "unit_detect"] and probabilities is not None:
         vocal_prob = probabilities[:, 1]  # Probability of vocalization (class 1)
         x = np.arange(len(vocal_prob))
         axes[1].plot(x, vocal_prob, 'r-', linewidth=2)
