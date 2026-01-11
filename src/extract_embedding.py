@@ -12,6 +12,24 @@ from pathlib import Path
 import torch.nn.functional as F
 from matplotlib import colors as mcolors
 
+def iter_label_runs(labels_1d: torch.Tensor):
+    """
+    Yield contiguous runs in a 1D label tensor.
+
+    Returns tuples of (start_idx, end_idx_exclusive, label_value).
+    """
+    if labels_1d.numel() == 0:
+        return
+    prev = int(labels_1d[0].item())
+    start = 0
+    for idx in range(1, labels_1d.numel()):
+        cur = int(labels_1d[idx].item())
+        if cur != prev:
+            yield start, idx, prev
+            start = idx
+            prev = cur
+    yield start, labels_1d.numel(), prev
+
 def ms_to_timebins(ms_value, audio_params):
     """
     purpose: converts ms value to timebin value 
@@ -101,6 +119,10 @@ def main(args):
         checkpoint_file=args["checkpoint"]
     )
 
+    # Run encoder inference on GPU when available (CPU fallback).
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
+
     patch_height, patch_width, mels, model_num_timebins = config["patch_height"], config["patch_width"], config["mels"], config["num_timebins"]
     # number of time patches
 
@@ -172,91 +194,104 @@ def main(args):
                 if spec_detected.shape[-1] == 0:
                     continue
 
-                # reshape spec into batches to fit into context window
-                # Calculate batch size and padding to avoid omitting data
-                num_full_batches = spec_detected.shape[-1] // model_num_timebins
-                remainder_bins = spec_detected.shape[-1] % model_num_timebins
-                
-                if remainder_bins > 0:
-                    batch_size = num_full_batches + 1
-                    pad_amnt = model_num_timebins - remainder_bins
+                # Optionally split the detected event into contiguous unit/silence segments.
+                if args.get("segment_units", False):
+                    segments = []
+                    for seg_start, seg_end, _seg_label in iter_label_runs(labels):
+                        segments.append((seg_start, seg_end))
                 else:
-                    batch_size = num_full_batches
-                    pad_amnt = 0
-                    
-                if batch_size == 0:
-                    batch_size = 1
-                    pad_amnt = model_num_timebins - spec_detected.shape[-1]
+                    segments = [(0, labels.numel())]
 
-                # Pad if necessary
-                if pad_amnt > 0: 
-                    spec_detected = torch.nn.functional.pad(spec_detected, (0, pad_amnt), mode='constant', value=0)
-                    labels = torch.nn.functional.pad(labels, (0, pad_amnt), mode='constant', value=-1)
-                
-                channel, mel, time = spec_detected.shape
-                
-                # Correctly batch by slicing along time dimension
-                batched_spec_detected = spec_detected.reshape(channel, mel, batch_size, model_num_timebins)
-                batched_spec_detected = batched_spec_detected.permute(2, 0, 1, 3)  # (batch_size, channel, mel, model_num_timebins)
-                
-                with torch.no_grad():
-                    h, z_seq = model.forward_encoder_inference(batched_spec_detected)
-                    # h: encoded embeddings [B, NP, D]
-                    # z_seq: patch embeddings [B, NP, D]
-                    B, NP, D = h.shape
+                for seg_start, seg_end in segments:
+                    spec_segment = spec_detected[:, :, seg_start:seg_end]
+                    labels_segment = labels[seg_start:seg_end]
 
-                # Reshape and process embeddings
-                # Reconstruct grid [B, D, H, W]
-                h_grid = h.permute(0, 2, 1).reshape(B, D, num_patches_height, num_patches_time)
-                z_grid = z_seq.permute(0, 2, 1).reshape(B, D, num_patches_height, num_patches_time)
+                    if spec_segment.shape[-1] == 0:
+                        continue
 
-                # Permute to [B, W, H, D] to align with time
-                h_time = h_grid.permute(0, 3, 2, 1) 
-                z_time = z_grid.permute(0, 3, 2, 1)
+                    # reshape spec into batches to fit into context window
+                    # Calculate batch size and padding to avoid omitting data
+                    num_full_batches = spec_segment.shape[-1] // model_num_timebins
+                    remainder_bins = spec_segment.shape[-1] % model_num_timebins
 
-                # Flatten batch and time dimensions: [B*W, H, D] -> flatten H -> [B*W, H*D]
-                # We flatten B and W first to easily trim padding
-                h_flat = h_time.reshape(-1, num_patches_height * D)
-                z_flat = z_time.reshape(-1, num_patches_height * D)
-                
-                # Prepare spectrograms for saving: flatten B and T -> [B*T, M]
-                # batched_spec_detected: [B, C, M, T]
-                spec_flat = batched_spec_detected.squeeze(1).permute(0, 2, 1).reshape(-1, mel)
+                    if remainder_bins > 0:
+                        batch_size = num_full_batches + 1
+                        pad_amnt = model_num_timebins - remainder_bins
+                    else:
+                        batch_size = num_full_batches
+                        pad_amnt = 0
 
-                # Prepare labels
-                # labels is currently [B*T] (since it was padded to match spec)
-                
-                # Generate Pos IDs
-                # 0..W-1 repeated B times
-                current_pos_ids = torch.arange(0, num_patches_time).repeat(batch_size)
+                    if batch_size == 0:
+                        batch_size = 1
+                        pad_amnt = model_num_timebins - spec_segment.shape[-1]
 
-                # TRIM PADDING
-                if pad_amnt > 0:
-                    # Trim embeddings (patches)
-                    pad_patches = pad_amnt // patch_width
-                    h_flat = h_flat[:-pad_patches]
-                    z_flat = z_flat[:-pad_patches]
-                    current_pos_ids = current_pos_ids[:-pad_patches]
-                    
-                    # Trim spectrograms and labels (timebins)
-                    spec_flat = spec_flat[:-pad_amnt]
-                    labels = labels[:-pad_amnt]
+                    # Pad if necessary
+                    if pad_amnt > 0:
+                        spec_segment = torch.nn.functional.pad(spec_segment, (0, pad_amnt), mode='constant', value=0)
+                        labels_segment = torch.nn.functional.pad(labels_segment, (0, pad_amnt), mode='constant', value=-1)
 
-                # Downsample labels to patch resolution
-                # We do this after trimming to ensure alignment
-                # labels is 1D [Timebins]
-                labels_reshaped = labels.float().view(1, 1, -1)
-                labels_down = F.max_pool1d(labels_reshaped, kernel_size=patch_width, stride=patch_width).view(-1).long()
+                    channel, mel, time = spec_segment.shape
 
-                # Append to lists
-                latent_list.append(h_flat.cpu())
-                patch_list.append(z_flat.cpu())
-                label_list_original.append(labels.cpu())
-                label_list_downsampled.append(labels_down.cpu())
-                spec_list.append(spec_flat.cpu())
-                pos_ids_list.append(current_pos_ids.cpu())
-                
-                total_timebins += spec_flat.shape[0]
+                    # Correctly batch by slicing along time dimension
+                    batched_spec_detected = spec_segment.reshape(channel, mel, batch_size, model_num_timebins)
+                    batched_spec_detected = batched_spec_detected.permute(2, 0, 1, 3)  # (batch_size, channel, mel, model_num_timebins)
+
+                    with torch.inference_mode():
+                        batched_spec_detected = batched_spec_detected.to(device)
+                        h, z_seq = model.forward_encoder_inference(batched_spec_detected)
+                        # h: encoded embeddings [B, NP, D]
+                        # z_seq: patch embeddings [B, NP, D]
+                        B, NP, D = h.shape
+
+                    # Reshape and process embeddings
+                    # Reconstruct grid [B, D, H, W]
+                    h_grid = h.permute(0, 2, 1).reshape(B, D, num_patches_height, num_patches_time)
+                    z_grid = z_seq.permute(0, 2, 1).reshape(B, D, num_patches_height, num_patches_time)
+
+                    # Permute to [B, W, H, D] to align with time
+                    h_time = h_grid.permute(0, 3, 2, 1)
+                    z_time = z_grid.permute(0, 3, 2, 1)
+
+                    # Flatten batch and time dimensions: [B*W, H, D] -> flatten H -> [B*W, H*D]
+                    # We flatten B and W first to easily trim padding
+                    h_flat = h_time.reshape(-1, num_patches_height * D)
+                    z_flat = z_time.reshape(-1, num_patches_height * D)
+
+                    # Prepare spectrograms for saving: flatten B and T -> [B*T, M]
+                    # batched_spec_detected: [B, C, M, T]
+                    spec_flat = batched_spec_detected.squeeze(1).permute(0, 2, 1).reshape(-1, mel)
+
+                    # Generate Pos IDs
+                    # 0..W-1 repeated B times
+                    current_pos_ids = torch.arange(0, num_patches_time).repeat(batch_size)
+
+                    # TRIM PADDING
+                    if pad_amnt > 0:
+                        # Trim embeddings (patches)
+                        pad_patches = pad_amnt // patch_width
+                        h_flat = h_flat[:-pad_patches]
+                        z_flat = z_flat[:-pad_patches]
+                        current_pos_ids = current_pos_ids[:-pad_patches]
+
+                        # Trim spectrograms and labels (timebins)
+                        spec_flat = spec_flat[:-pad_amnt]
+                        labels_segment = labels_segment[:-pad_amnt]
+
+                    # Downsample labels to patch resolution
+                    # We do this after trimming to ensure alignment
+                    # labels is 1D [Timebins]
+                    labels_reshaped = labels_segment.float().view(1, 1, -1)
+                    labels_down = F.max_pool1d(labels_reshaped, kernel_size=patch_width, stride=patch_width).view(-1).long()
+
+                    # Append to lists
+                    latent_list.append(h_flat.cpu())
+                    patch_list.append(z_flat.cpu())
+                    label_list_original.append(labels_segment.cpu())
+                    label_list_downsampled.append(labels_down.cpu())
+                    spec_list.append(spec_flat.cpu())
+                    pos_ids_list.append(current_pos_ids.cpu())
+
+                    total_timebins += spec_flat.shape[0]
 
         i += 1
 
@@ -344,6 +379,7 @@ if __name__ == "__main__":
     parser.add_argument("--npz_dir", type=str, required=True, help="Save arrays to this .npz path")
     parser.add_argument("--json_path", type=str, default=None, help="to provide song snippets + syllable labels")
     parser.add_argument("--bird", type=str, default=None, help="select specific bird number (e.g., 1 for bird1, 2 for bird2)")
+    parser.add_argument("--segment_units", action="store_true", help="Embed each labeled unit and intervening silence as separate segments")
 
     args = parser.parse_args()
     main(vars(args))

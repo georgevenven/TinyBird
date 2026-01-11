@@ -116,6 +116,7 @@ def main():
     parser.add_argument("--num_timebins", type=int, default=12400, help="Maximum number of timebins to accumulate during extraction")
     parser.add_argument("--json_path", default=None, help="Event JSON path (optional)")
     parser.add_argument("--bird", default=None, help="Optional bird identifier to filter JSON")
+    parser.add_argument("--segment_units", action="store_true", help="Embed each labeled unit and intervening silence as separate segments")
     parser.add_argument("--umap_neighbors", type=int, default=200, help="Number of neighbors for UMAP")
     parser.add_argument("--max_spectrograms", type=int, default=5, help="Maximum number of event spectrograms to save")
     parser.add_argument("--deterministic", action="store_true", help="Use deterministic UMAP with random_state")
@@ -134,6 +135,7 @@ def main():
         "npz_dir": str(npz_path),
         "json_path": args.json_path,
         "bird": args.bird,
+        "segment_units": args.segment_units,
     }
     extract_embedding.main(extract_args)
 
