@@ -109,7 +109,7 @@ class TinyBird(nn.Module):
         
         return final_mask
 
-    def forward_encoder(self, x):
+    def forward_encoder(self, x, inference_mode: bool = False):
         """
         Patchify → add pos enc → mask → Transformer encoder.
         Returns:
@@ -123,6 +123,12 @@ class TinyBird(nn.Module):
         z = z + pos_enc
         z_seq = z.flatten(2).transpose(1, 2)        # (B, T, D_enc)
         T = z_seq.size(1)
+
+        if inference_mode:
+            bool_mask = torch.zeros((B, T), dtype=torch.bool, device=z.device)
+            idx_restore = torch.arange(T, device=z.device).unsqueeze(0).expand(B, -1)
+            h = self.encoder(z_seq)  # (B, T, D_enc)
+            return h, idx_restore, bool_mask, T
 
         mask_grid = self.voronoi_mask((H, W), p=self.mask_p, c=self.mask_c, device=z.device)
         bool_mask_flat = mask_grid.flatten()
@@ -139,7 +145,7 @@ class TinyBird(nn.Module):
         h = self.encoder(z_keep)                   # (B, keep, D_enc)
         return h, idx_restore, bool_mask, T
     
-    def forward_encoder_inference(self, x):
+    def forward_encoder_inference(self, x, encoder_layer_idx=None):
         z = self.patch_projection(x)               # (B, D_enc, H', W')
         B, D, H, W = z.shape
 
@@ -147,7 +153,25 @@ class TinyBird(nn.Module):
         z = z + pos_enc
         z_seq = z.flatten(2).transpose(1, 2)        # (B, T, D_enc)
 
-        h = self.encoder(z_seq)
+        if encoder_layer_idx is None:
+            h = self.encoder(z_seq)
+        else:
+            layers = getattr(self.encoder, "layers", None)
+            if layers is None:
+                raise RuntimeError("TinyBird.encoder does not expose .layers; cannot select intermediate layer.")
+            num_layers = len(layers)
+            idx = int(encoder_layer_idx)
+            if idx < 0:
+                idx = num_layers + idx
+            if idx < 0 or idx >= num_layers:
+                raise ValueError(f"encoder_layer_idx out of range: {encoder_layer_idx} (num_layers={num_layers})")
+
+            out = z_seq
+            for layer_i, layer in enumerate(layers):
+                out = layer(out)
+                if layer_i == idx:
+                    break
+            h = out
         return h, z_seq # z seq is encoded patches + pos enc 
 
     def forward_decoder(self, h, idx_restore, T):

@@ -116,6 +116,12 @@ def main():
     parser.add_argument("--num_timebins", type=int, default=12400, help="Maximum number of timebins to accumulate during extraction")
     parser.add_argument("--json_path", default=None, help="Event JSON path (optional)")
     parser.add_argument("--bird", default=None, help="Optional bird identifier to filter JSON")
+    parser.add_argument(
+        "--encoder_layer_idx",
+        type=int,
+        default=None,
+        help="If set, extract embeddings from this encoder layer index (0-based; negative allowed). Default uses final encoder output.",
+    )
     parser.add_argument("--umap_neighbors", type=int, default=200, help="Number of neighbors for UMAP")
     parser.add_argument("--max_spectrograms", type=int, default=5, help="Maximum number of event spectrograms to save")
     parser.add_argument("--deterministic", action="store_true", help="Use deterministic UMAP with random_state")
@@ -134,6 +140,7 @@ def main():
         "npz_dir": str(npz_path),
         "json_path": args.json_path,
         "bird": args.bird,
+        "encoder_layer_idx": args.encoder_layer_idx,
     }
     extract_embedding.main(extract_args)
 
@@ -174,6 +181,8 @@ def main():
         "encoded_umap_plots": umap_paths,
         "spectrograms": spectrograms,
     }
+    if args.encoder_layer_idx is not None:
+        metrics["encoder_layer_idx"] = int(args.encoder_layer_idx)
     if spectrogram_array is not None:
         metrics["spectrogram_timebins"] = int(spectrogram_array.shape[0])
         metrics["spectrogram_mels"] = int(spectrogram_array.shape[1]) if spectrogram_array.ndim == 2 else None

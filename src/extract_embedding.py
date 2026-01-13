@@ -200,7 +200,9 @@ def main(args):
                 batched_spec_detected = batched_spec_detected.permute(2, 0, 1, 3)  # (batch_size, channel, mel, model_num_timebins)
                 
                 with torch.no_grad():
-                    h, z_seq = model.forward_encoder_inference(batched_spec_detected)
+                    h, z_seq = model.forward_encoder_inference(
+                        batched_spec_detected, encoder_layer_idx=args.get("encoder_layer_idx")
+                    )
                     # h: encoded embeddings [B, NP, D]
                     # z_seq: patch embeddings [B, NP, D]
                     B, NP, D = h.shape
@@ -344,6 +346,12 @@ if __name__ == "__main__":
     parser.add_argument("--npz_dir", type=str, required=True, help="Save arrays to this .npz path")
     parser.add_argument("--json_path", type=str, default=None, help="to provide song snippets + syllable labels")
     parser.add_argument("--bird", type=str, default=None, help="select specific bird number (e.g., 1 for bird1, 2 for bird2)")
+    parser.add_argument(
+        "--encoder_layer_idx",
+        type=int,
+        default=None,
+        help="If set, extract embeddings from this encoder layer index (0-based; negative allowed). Default uses final encoder output.",
+    )
 
     args = parser.parse_args()
     main(vars(args))

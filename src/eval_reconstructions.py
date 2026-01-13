@@ -41,6 +41,7 @@ def main():
     parser.add_argument("--num_samples", type=int, default=10000, help="Max samples to evaluate")
     parser.add_argument("--checkpoint", type=str, default=None, help="Optional checkpoint filename to load")
     parser.add_argument("--per_patch_norm", action="store_true", help="Enable per-patch normalization for visualization")
+    parser.add_argument("--inference_mode", action="store_true", help="Disable masking (autoencoder-style reconstruction)")
     args = parser.parse_args()
 
     # Load model + config
@@ -108,7 +109,7 @@ def main():
             x = spectrograms.to(device, non_blocking=True)
 
             # Forward pass: encoder → decoder
-            h, idx_restore, bool_mask, T = model.forward_encoder(x)
+            h, idx_restore, bool_mask, T = model.forward_encoder(x, inference_mode=args.inference_mode)
             pred = model.forward_decoder(h, idx_restore, T)  # (1, T, P)
 
             # Prepare patches of target
@@ -120,12 +121,13 @@ def main():
             # pred_denorm = pred * (target_std + 1e-6) + target_mean  # (1, T, P)
             pred_denorm = pred.to(dtype=x_patches.dtype)
 
-            # Full-seq reconstruction image
-            recon_full = depatchify(pred_denorm, H=H, W=W, patch_size=patch_size)  # (1, 1, H, W)
-
-            # Overlay image: original for unmasked, prediction for masked
-            overlay_patches = x_patches.clone()
-            overlay_patches[bool_mask] = pred_denorm[bool_mask]
+            # Overlay image: original for unmasked, prediction for masked.
+            # In inference_mode there is no mask, so show full reconstruction.
+            if args.inference_mode:
+                overlay_patches = pred_denorm
+            else:
+                overlay_patches = x_patches.clone()
+                overlay_patches[bool_mask] = pred_denorm[bool_mask]
             
             # Normalize all patches patch-wise for consistent visualization
             if args.per_patch_norm:
@@ -161,34 +163,10 @@ def main():
             x_img = x[0, 0].detach().cpu().numpy()
             masked_img_np = masked_img[0, 0].detach().cpu().numpy()
             overlay_np = overlay_img[0, 0].detach().cpu().numpy()
-            recon_full_np = recon_full[0, 0].detach().cpu().numpy()
 
             fname = sanitize(filenames[0] if isinstance(filenames, list) else str(filenames))
 
-            # Plot 1: Decoder Output
-            fig1 = plt.figure(figsize=(7.9, 5.8933))
-            ax1 = plt.subplot(3, 1, 1)
-            ax1.imshow(x_img, origin="lower", aspect="auto")
-            ax1.set_title("Input Spectrogram", fontsize=16, fontweight='bold')
-            ax1.axis("off")
-
-            ax2 = plt.subplot(3, 1, 2)
-            ax2.imshow(masked_img_np, origin="lower", aspect="auto")
-            ax2.set_title("Input Spectrogram With Mask", fontsize=16, fontweight='bold')
-            ax2.axis("off")
-
-            ax3 = plt.subplot(3, 1, 3)
-            ax3.imshow(recon_full_np, origin="lower", aspect="auto")
-            ax3.set_title("Decoder Output", fontsize=16, fontweight='bold')
-            ax3.axis("off")
-
-            fig1.tight_layout()
-            out_png1 = os.path.join(imgs_dir, f"{i:06d}_{fname}_decoder.png")
-            fig1.savefig(out_png1, dpi=300, facecolor='white', 
-                       edgecolor='none')
-            plt.close(fig1)
-
-            # Plot 2: Overlay
+            # Plot: Overlay
             fig2 = plt.figure(figsize=(7.9, 5.8933))
             ax1 = plt.subplot(3, 1, 1)
             ax1.imshow(x_img, origin="lower", aspect="auto")
@@ -202,7 +180,11 @@ def main():
 
             ax3 = plt.subplot(3, 1, 3)
             ax3.imshow(overlay_np, origin="lower", aspect="auto")
-            ax3.set_title("Decoder Predictions and Original Spectrogram", fontsize=16, fontweight='bold')
+            ax3.set_title(
+                "Decoder Output" if args.inference_mode else "Decoder Predictions and Original Spectrogram",
+                fontsize=16,
+                fontweight="bold",
+            )
             ax3.axis("off")
 
             fig2.tight_layout()

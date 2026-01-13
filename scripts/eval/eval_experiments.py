@@ -174,12 +174,15 @@ def main():
         return
 
     for exp in experiments:
+        extra_args = exp.get("extra_args") or {}
         out_dir = (
             results_root
             / slugify(exp["run_name"])
             / slugify(exp["dataset_label"])
             / slugify(exp["bird_id"])
         )
+        if "encoder_layer_idx" in extra_args and extra_args["encoder_layer_idx"] is not None:
+            out_dir = out_dir / slugify(f"layer_{extra_args['encoder_layer_idx']}")
         out_dir.mkdir(parents=True, exist_ok=True)
         command = build_command(exp, out_dir)
         if args.dry_run:
