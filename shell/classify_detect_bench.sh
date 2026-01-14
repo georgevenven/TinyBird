@@ -107,7 +107,7 @@ mkdir -p "$RESULTS_DIR"
 RESULTS_CSV="$RESULTS_DIR/results.csv"
 # Initialize CSV if not exists
 if [ ! -f "$RESULTS_CSV" ]; then
-    echo "task,species,individual,samples,metric_name,metric_value" > "$RESULTS_CSV"
+    echo "task,species,individual,samples,run_name,metric_name,metric_value" > "$RESULTS_CSV"
 fi
 
 # Set Probe Arguments
@@ -206,6 +206,7 @@ for ENTRY in "${SPECIES_LIST[@]}"; do
                     --batch_size "$BATCH_SIZE" \
                     --num_workers "$NUM_WORKERS" \
                     --amp \
+                    --no-save_intermediate_checkpoints \
                     $PROBE_ARGS
             else
                 echo "    Skipping training (run exists)"
@@ -220,7 +221,7 @@ for ENTRY in "${SPECIES_LIST[@]}"; do
             # Error = 100 - F1
             ERROR=$(python -c "print(100 - float('$VAL_F1'))")
             
-            echo "detect,$SPECIES,all,$N,F1_Error,$ERROR" >> "$RESULTS_CSV"
+            echo "detect,$SPECIES,all,$N,$RUN_NAME,F1_Error,$ERROR" >> "$RESULTS_CSV"
             echo "    Result: F1 Error = $ERROR %"
         done
 
@@ -289,6 +290,7 @@ for ENTRY in "${SPECIES_LIST[@]}"; do
                     --batch_size "$BATCH_SIZE" \
                     --num_workers "$NUM_WORKERS" \
                     --amp \
+                    --no-save_intermediate_checkpoints \
                     $PROBE_ARGS
             else
                 echo "    Skipping training (run exists)"
@@ -302,7 +304,7 @@ for ENTRY in "${SPECIES_LIST[@]}"; do
             # Error = 100 - F1
             ERROR=$(python -c "print(100 - float('$VAL_F1'))")
             
-            echo "unit_detect,$SPECIES,all,$N,F1_Error,$ERROR" >> "$RESULTS_CSV"
+            echo "unit_detect,$SPECIES,all,$N,$RUN_NAME,F1_Error,$ERROR" >> "$RESULTS_CSV"
             echo "    Result: F1 Error = $ERROR %"
         done
 
@@ -354,12 +356,17 @@ for ENTRY in "${SPECIES_LIST[@]}"; do
             
             # 2. Split into Train Pool and Test
             if [ ! -d "$BIRD_TEST" ]; then
+                # Use bird-filtered annotation JSON if present (more efficient than scanning full species annotations)
+                FILTERED_ANNOT="$BIRD_POOL/annotations_filtered.json"
+                if [ ! -f "$FILTERED_ANNOT" ]; then
+                    FILTERED_ANNOT="$ANNOT_PATH"
+                fi
                 python scripts/split_train_test.py \
                     --mode split \
                     --spec_dir "$BIRD_POOL" \
                     --train_dir "$BIRD_TRAIN_POOL" \
                     --test_dir "$BIRD_TEST" \
-                    --annotation_json "$ANNOT_PATH" \
+                    --annotation_json "$FILTERED_ANNOT" \
                     --train_percent $((100 - TEST_PERCENT)) \
                     --ignore_bird_id # Already filtered by bird, so random split is fine
             fi
@@ -393,6 +400,7 @@ for ENTRY in "${SPECIES_LIST[@]}"; do
                         --batch_size "$BATCH_SIZE" \
                         --num_workers "$NUM_WORKERS" \
                         --amp \
+                        --no-save_intermediate_checkpoints \
                         $PROBE_ARGS
                 else
                     echo "      Skipping training (run exists)"
@@ -406,7 +414,7 @@ for ENTRY in "${SPECIES_LIST[@]}"; do
                 # FER = 100 - Accuracy
                 FER=$(python -c "print(100 - float('$VAL_ACC'))")
                 
-                echo "classify,$SPECIES,$BIRD,$N,FER,$FER" >> "$RESULTS_CSV"
+                echo "classify,$SPECIES,$BIRD,$N,$RUN_NAME,FER,$FER" >> "$RESULTS_CSV"
                 echo "      Result: FER = $FER %"
             done
 

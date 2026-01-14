@@ -6,6 +6,7 @@ import shutil
 import json
 from datetime import datetime
 import time
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -35,6 +36,7 @@ class SupervisedTinyBird(nn.Module):
         self.enc_hidden_d = config["enc_hidden_d"]
         self.mels = config["mels"]
         self.mode = mode
+        self.encoder_layer_idx = config.get("encoder_layer_idx", None)
         
         # Freeze encoder if in MLP classifier mode
         if freeze_encoder:
@@ -88,7 +90,9 @@ class SupervisedTinyBird(nn.Module):
         
         # Get encoder embeddings (no masking in inference mode)
         with torch.set_grad_enabled(not self.encoder.training or self.training):
-            h, z_seq = self.encoder.forward_encoder_inference(x)  # (B, T, D_enc)
+            h, z_seq = self.encoder.forward_encoder_inference(
+                x, encoder_layer_idx=self.encoder_layer_idx
+            )  # (B, T, D_enc)
         
         # h has shape (B, T, D_enc) where T = (H/patch_height) * (W/patch_width)
         # Reshape back to spatial grid (B, H_patches, W_patches, D_enc)
@@ -177,44 +181,58 @@ class SupervisedTinyBird(nn.Module):
     
     def compute_f1_score(self, logits, labels):
         """
-        Compute F1 score for detection (binary classification only).
+        Compute F1 score.
+
+        - For binary tasks (detect/unit_detect): F1 for the positive class (1), returned as 0-100%.
+        - For multi-class classify: macro-F1 across all classes (including silence=0), returned as 0-100%.
         
         Args:
             logits: (B, W_patches, 1) for binary or (B, W_patches, num_classes) for multi-class
             labels: (B, W) where W is n_timebins
             
         Returns:
-            f1: F1 score (0-100%), or None if not in binary detection mode
+            f1: F1 score (0-100%)
         """
-        if self.num_classes != 2:
-            return None
-        
         B_label, W = labels.shape
         
         # Downsample labels to match patch width
         labels_downsampled = labels[:, ::self.patch_width]
-        
-        # Binary classification: use sigmoid + threshold at 0.5
-        # logits shape: (B, W_patches, 1)
-        logits_flat = logits.reshape(-1)  # (B * W_patches,)
-        probs = torch.sigmoid(logits_flat)  # (B * W_patches,)
-        preds = (probs > 0.5).long()  # (B * W_patches,)
-        labels_flat = labels_downsampled.reshape(-1)  # (B * W_patches,)
-        
-        # Calculate TP, FP, FN
-        # Positive class is 1 (vocalization detected)
-        tp = ((preds == 1) & (labels_flat == 1)).sum().item()
-        fp = ((preds == 1) & (labels_flat == 0)).sum().item()
-        fn = ((preds == 0) & (labels_flat == 1)).sum().item()
-        
-        # Compute precision and recall
-        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-        
-        # Compute F1 score
-        f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
-        
-        return f1 * 100.0  # Convert to percentage
+
+        if self.num_classes == 2:
+            # Binary classification: use sigmoid + threshold at 0.5
+            # logits shape: (B, W_patches, 1)
+            logits_flat = logits.reshape(-1)  # (B * W_patches,)
+            probs = torch.sigmoid(logits_flat)  # (B * W_patches,)
+            preds = (probs > 0.5).long()  # (B * W_patches,)
+            labels_flat = labels_downsampled.reshape(-1)  # (B * W_patches,)
+
+            # Calculate TP, FP, FN for positive class 1
+            tp = ((preds == 1) & (labels_flat == 1)).sum().item()
+            fp = ((preds == 1) & (labels_flat == 0)).sum().item()
+            fn = ((preds == 0) & (labels_flat == 1)).sum().item()
+
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+            return f1 * 100.0
+
+        # Multi-class macro-F1 (include silence=0)
+        preds = torch.argmax(logits, dim=-1)  # (B, W_patches)
+        labels_mc = labels_downsampled  # (B, W_patches)
+
+        f1s = []
+        for c in range(int(self.num_classes)):
+            tp = ((preds == c) & (labels_mc == c)).sum().item()
+            fp = ((preds == c) & (labels_mc != c)).sum().item()
+            fn = ((preds != c) & (labels_mc == c)).sum().item()
+
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+            f1s.append(f1)
+
+        macro_f1 = float(np.mean(f1s)) if len(f1s) else 0.0
+        return macro_f1 * 100.0
 
 
 SRC_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -287,14 +305,179 @@ class Trainer():
         self.train_steps = []
         self.val_steps = []
         
+        # Early stopping state (initialized in train())
+        self._es_ema_val_loss = None
+        self._es_best_ema_val_loss = None
+        self._es_bad_evals = 0
+
         # Setup loss logging file
         self.loss_log_path = os.path.join(self.run_path, "loss_log.txt")
         with open(self.loss_log_path, 'w') as f:
-            if config["mode"] in ["detect", "unit_detect"]:
+            if config["mode"] in ["detect", "unit_detect"] or config.get("log_f1", False):
                 f.write("step,train_loss,val_loss,train_acc,val_acc,train_f1,val_f1,samples_processed,steps_per_sec,samples_per_sec\n")
             else:
                 f.write("step,train_loss,val_loss,train_acc,val_acc,samples_processed,steps_per_sec,samples_per_sec\n")
     
+    def export_validation_outputs(self, val_loader, step_num, final_weight_path=None):
+        """
+        Export validation logits + labels + filenames so metrics can be computed posthoc.
+
+        Runs inference once at the end of training (optionally reloading the final saved weights),
+        then saves consolidated arrays to: runs/<run_name>/val_outputs/
+
+        Outputs:
+          - logits.npy: float32, shape (N_windows, W_patches, C_or_1)
+          - labels_timebins.npy: int64, shape (N_windows, W_timebins)
+          - labels_patches.npy: int64, shape (N_windows, W_patches)
+          - window_starts.npy: int64, shape (N_windows,)   (start timebin in the original file)
+          - window_lengths.npy: int64, shape (N_windows,)  (unpadded length in timebins, <= W_timebins)
+          - filenames.json: list[str], length N_windows (filename repeated per window)
+          - meta.json
+        """
+        out_dir = Path(self.run_path) / "val_outputs"
+        if out_dir.exists():
+            shutil.rmtree(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        # Ensure we're exporting logits from the final saved weights (not an in-memory intermediate state)
+        if final_weight_path is not None:
+            state_dict = torch.load(final_weight_path, map_location="cpu")
+            self.model.load_state_dict(state_dict)
+
+        # IMPORTANT: we do NOT want a single random crop to represent a whole file.
+        # Export uses deterministic full-file coverage by tiling each file into sequential windows.
+        ds = val_loader.dataset
+        window_timebins = int(self.config["num_timebins"])
+        if window_timebins <= 0:
+            raise ValueError(f"num_timebins must be > 0 for export. Got {window_timebins}")
+
+        meta = {
+            "run_name": self.config.get("run_name"),
+            "mode": self.config.get("mode"),
+            "num_classes": int(getattr(self.model, "num_classes", -1)),
+            "patch_width": int(self.config.get("patch_width")),
+            "n_timebins": int(self.config.get("num_timebins")),
+            "step_num": int(step_num),
+            "final_weight_path": str(final_weight_path) if final_weight_path is not None else None,
+            "export_strategy": "tiled_full_file",
+            "export_stride_timebins": int(window_timebins),
+        }
+        with open(out_dir / "meta.json", "w") as f:
+            json.dump(meta, f, indent=2)
+
+        self.model.eval()
+        patch_width = int(self.config["patch_width"])
+        w_timebins = int(window_timebins)
+        w_patches = w_timebins // patch_width
+
+        # Infer output channels from a single batch
+        first_batch = next(iter(val_loader))
+        x0 = first_batch[0].to(self.device, non_blocking=True)
+        with torch.no_grad():
+            logits0 = self.model(x0)
+        c_out = int(logits0.shape[-1])
+
+        # Precompute all windows across all files (deterministic, full coverage)
+        window_index = []  # (path, filename, start, length, total_timebins)
+        for path in ds.file_dirs:
+            filename = path.stem
+            arr = np.load(path, mmap_mode="r")
+            total_t = int(arr.shape[1])
+            # starts at 0, stride = window length, include final partial window (padded)
+            start = 0
+            while start < total_t:
+                length = min(w_timebins, total_t - start)
+                window_index.append((path, filename, int(start), int(length), int(total_t)))
+                start += w_timebins
+            if total_t == 0:
+                # Degenerate case: still emit a single all-pad window
+                window_index.append((path, filename, 0, 0, 0))
+
+        n_windows = len(window_index)
+
+        logits_mm = np.lib.format.open_memmap(
+            out_dir / "logits.npy", mode="w+", dtype=np.float32, shape=(n_windows, w_patches, c_out)
+        )
+        labels_time_mm = np.lib.format.open_memmap(
+            out_dir / "labels_timebins.npy", mode="w+", dtype=np.int64, shape=(n_windows, w_timebins)
+        )
+        labels_patches_mm = np.lib.format.open_memmap(
+            out_dir / "labels_patches.npy", mode="w+", dtype=np.int64, shape=(n_windows, w_patches)
+        )
+        window_starts_mm = np.lib.format.open_memmap(
+            out_dir / "window_starts.npy", mode="w+", dtype=np.int64, shape=(n_windows,)
+        )
+        window_lengths_mm = np.lib.format.open_memmap(
+            out_dir / "window_lengths.npy", mode="w+", dtype=np.int64, shape=(n_windows,)
+        )
+        filenames_all = []  # repeated per window
+
+        # Batched inference over windows to control memory
+        batch_size = int(self.config["batch_size"])
+        if batch_size <= 0:
+            batch_size = 1
+
+        with torch.no_grad():
+            write_idx = 0
+            for i in range(0, n_windows, batch_size):
+                batch_windows = window_index[i:i + batch_size]
+                bsz = len(batch_windows)
+
+                specs_np = np.zeros((bsz, 1, int(ds.n_mels), w_timebins), dtype=np.float32)
+                labels_np = np.zeros((bsz, w_timebins), dtype=np.int64)
+                starts_np = np.zeros((bsz,), dtype=np.int64)
+                lengths_np = np.zeros((bsz,), dtype=np.int64)
+                fns = []
+
+                for j, (path, filename, start, length, total_t) in enumerate(batch_windows):
+                    arr = np.load(path, mmap_mode="r")  # (mels, time)
+                    # create labels for the full file, then slice the window
+                    full_labels = ds.create_label_array(filename, int(arr.shape[1]))
+
+                    # slice + pad if needed
+                    end = start + length
+                    if length > 0:
+                        window = np.array(arr[:, start:end], dtype=np.float32)
+                        lab_w = np.array(full_labels[start:end], dtype=np.int64)
+                    else:
+                        window = np.zeros((int(ds.n_mels), 0), dtype=np.float32)
+                        lab_w = np.zeros((0,), dtype=np.int64)
+
+                    if length < w_timebins:
+                        pad = w_timebins - length
+                        window = np.pad(window, ((0, 0), (0, pad)), mode="constant")
+                        lab_w = np.pad(lab_w, (0, pad), mode="constant", constant_values=0)
+
+                    # normalize like the dataset does (no noise in val)
+                    window -= ds.mean
+                    window /= ds.std
+
+                    specs_np[j, 0] = window
+                    labels_np[j] = lab_w
+                    starts_np[j] = start
+                    lengths_np[j] = length
+                    fns.append(filename)
+
+                x = torch.from_numpy(specs_np).to(self.device, non_blocking=True)
+                labels_t = torch.from_numpy(labels_np).to(self.device, non_blocking=True)
+                logits_t = self.model(x)
+                labels_patches_t = labels_t[:, ::patch_width]
+
+                logits_out = logits_t.detach().cpu().numpy().astype(np.float32, copy=False)
+                labels_time_out = labels_t.detach().cpu().numpy().astype(np.int64, copy=False)
+                labels_patches_out = labels_patches_t.detach().cpu().numpy().astype(np.int64, copy=False)
+
+                logits_mm[write_idx:write_idx + bsz] = logits_out
+                labels_time_mm[write_idx:write_idx + bsz] = labels_time_out
+                labels_patches_mm[write_idx:write_idx + bsz] = labels_patches_out
+                window_starts_mm[write_idx:write_idx + bsz] = starts_np
+                window_lengths_mm[write_idx:write_idx + bsz] = lengths_np
+                filenames_all.extend(fns)
+                write_idx += bsz
+
+        with open(out_dir / "filenames.json", "w") as f:
+            json.dump(filenames_all, f, indent=2)
+
     def step(self, batch, is_training=True):
         """
         Perform one forward pass and optionally backward pass.
@@ -447,6 +630,17 @@ class Trainer():
         val_iter = iter(val_loader)
         
         total_steps = self.config["steps"]
+
+        # Early stopping config:
+        # Stop if EMA-smoothed val_loss does not improve for N consecutive eval checks.
+        # Set early_stop_patience=0 to disable.
+        es_patience = int(self.config.get("early_stop_patience", 8))
+        es_alpha = float(self.config.get("early_stop_ema_alpha", 0.9))
+        es_min_delta = float(self.config.get("early_stop_min_delta", 0.0))
+        if not (0.0 <= es_alpha < 1.0):
+            raise ValueError(f"early_stop_ema_alpha must be in [0, 1). Got {es_alpha}")
+        if es_patience < 0:
+            raise ValueError(f"early_stop_patience must be >= 0. Got {es_patience}")
         
         # Initialize timing
         last_eval_time = time.time()
@@ -454,7 +648,9 @@ class Trainer():
         
         print(f"Training for {total_steps} steps")
         
+        last_step_num = -1
         for step_num in range(total_steps):
+            last_step_num = step_num
             try:
                 train_batch = next(train_iter)
             except StopIteration:
@@ -481,6 +677,24 @@ class Trainer():
                 
                 # Validation step (no gradients)
                 val_loss, val_acc, val_f1, val_logits = self.step(val_batch, is_training=False)
+
+                # Early stopping update (EMA-smoothed val loss)
+                if es_patience > 0:
+                    if self._es_ema_val_loss is None:
+                        self._es_ema_val_loss = float(val_loss)
+                        self._es_best_ema_val_loss = float(val_loss)
+                        self._es_bad_evals = 0
+                    else:
+                        self._es_ema_val_loss = (es_alpha * self._es_ema_val_loss) + ((1.0 - es_alpha) * float(val_loss))
+
+                    if self._es_best_ema_val_loss is None:
+                        self._es_best_ema_val_loss = float(self._es_ema_val_loss)
+
+                    if float(self._es_ema_val_loss) < (float(self._es_best_ema_val_loss) - es_min_delta):
+                        self._es_best_ema_val_loss = float(self._es_ema_val_loss)
+                        self._es_bad_evals = 0
+                    else:
+                        self._es_bad_evals += 1
                 
                 # Store validation loss and accuracy
                 self.val_loss_history.append(val_loss)
@@ -508,7 +722,8 @@ class Trainer():
                 
                 # Print progress
                 current_lr = self.scheduler.get_last_lr()[0]
-                if self.config["mode"] in ["detect", "unit_detect"]:
+                if self.config["mode"] in ["detect", "unit_detect"] or self.config.get("log_f1", False):
+                    # train_f1 / val_f1 are expected to be non-None when log_f1 is enabled
                     print(f"Step {step_num} ({progress_pct:.1f}%): "
                           f"Train Loss = {train_loss:.6f}, Val Loss = {val_loss:.6f}, "
                           f"Train Acc = {train_acc:.2f}%, Val Acc = {val_acc:.2f}%, "
@@ -528,22 +743,38 @@ class Trainer():
                 
                 # Log losses and accuracies to file
                 with open(self.loss_log_path, 'a') as f:
-                    if self.config["mode"] in ["detect", "unit_detect"]:
+                    if self.config["mode"] in ["detect", "unit_detect"] or self.config.get("log_f1", False):
                         f.write(f"{step_num},{train_loss:.6f},{val_loss:.6f},{train_acc:.2f},{val_acc:.2f},{train_f1:.2f},{val_f1:.2f},{samples_processed},{steps_per_sec:.2f},{samples_per_sec:.1f}\n")
                     else:
                         f.write(f"{step_num},{train_loss:.6f},{val_loss:.6f},{train_acc:.2f},{val_acc:.2f},{samples_processed},{steps_per_sec:.2f},{samples_per_sec:.1f}\n")
                 
-                # Save model weights
-                weight_path = os.path.join(self.weights_path, f"model_step_{step_num:06d}.pth")
-                torch.save(self.model.state_dict(), weight_path)
+                # Save intermediate model weights (optional; final checkpoint is always saved at end)
+                if self.config.get("save_intermediate_checkpoints", True):
+                    weight_path = os.path.join(self.weights_path, f"model_step_{step_num:06d}.pth")
+                    torch.save(self.model.state_dict(), weight_path)
                 
                 # Save prediction visualization
                 self.save_prediction_visualization(val_batch, val_logits, step_num)
+
+                # Potentially stop training
+                if es_patience > 0 and self._es_bad_evals >= es_patience:
+                    print(
+                        "Early stopping: EMA-smoothed validation loss did not improve for "
+                        f"{es_patience} consecutive validation checks "
+                        f"(ema_val_loss={self._es_ema_val_loss:.6f}, best_ema_val_loss={self._es_best_ema_val_loss:.6f}). "
+                        "Halting training."
+                    )
+                    break
         
         # Save final model weights
-        final_step = self.config['steps'] - 1
+        final_step = last_step_num if last_step_num >= 0 else 0
         final_weight_path = os.path.join(self.weights_path, f"model_step_{final_step:06d}.pth")
         torch.save(self.model.state_dict(), final_weight_path)
+
+        # Export validation outputs by default (can be disabled via CLI)
+        if self.config.get("save_val_logits", True):
+            print("Exporting validation logits/labels for posthoc metrics...")
+            self.export_validation_outputs(val_loader, final_step, final_weight_path=final_weight_path)
         
         print("Training complete!")
 
@@ -565,12 +796,35 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=256, help="batch size")
     parser.add_argument("--num_workers", type=int, default=8, help="number of DataLoader worker processes")
     parser.add_argument("--weight_decay", type=float, default=0.1, help="weight decay")
-    parser.add_argument("--eval_every", type=int, default=10, help="evaluate every N steps")
+    parser.add_argument("--eval_every", type=int, default=25, help="evaluate every N steps")
+
+    # Early stopping
+    parser.add_argument("--early_stop_patience", type=int, default=8, help="stop if EMA-smoothed val_loss does not improve for N consecutive eval checks (0 disables)")
+    parser.add_argument("--early_stop_ema_alpha", type=float, default=0.9, help="EMA alpha for smoothing val_loss (higher = smoother)")
+    parser.add_argument("--early_stop_min_delta", type=float, default=0.0, help="minimum decrease in EMA val_loss required to count as improvement")
+
+    # Export val logits/labels for posthoc metrics (default: on)
+    parser.add_argument(
+        "--save_val_logits",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="save validation logits/labels/filenames to runs/<run_name>/val_outputs/ (default: enabled)",
+    )
+
+    # Checkpointing
+    parser.add_argument(
+        "--save_intermediate_checkpoints",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="save intermediate checkpoints during training at eval steps (final checkpoint is always saved)",
+    )
     
     # Model configuration
     parser.add_argument("--freeze_encoder", action="store_true", help="freeze encoder weights (train classifier only)")
     parser.add_argument("--linear_probe", action="store_true", help="use single linear layer instead of MLP")
     parser.add_argument("--amp", action="store_true", help="enable automatic mixed precision training")
+    parser.add_argument("--encoder_layer_idx", type=int, default=None, help="encoder layer index to probe (0..enc_n_layer-1). If omitted, uses full encoder output.")
+    parser.add_argument("--log_f1", action="store_true", help="log (macro) F1 to loss_log.txt (useful for classify)")
     
     # Data augmentation
     parser.add_argument("--white_noise", type=float, default=0.0, help="standard deviation of white noise to add after normalization (0.0 = no noise)")

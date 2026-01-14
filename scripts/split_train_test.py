@@ -175,9 +175,11 @@ def filter_by_bird(input_file, spec_dir, output_dir, bird_id):
     with open(input_file, 'r') as f:
         data = json.load(f)
     
+    bird_recordings = []
     files_to_copy = []
     for recording in data['recordings']:
         if recording['recording']['bird_id'] == bird_id:
+            bird_recordings.append(recording)
             filename = recording['recording']['filename']
             base_name = os.path.splitext(filename)[0]
             files_to_copy.append(base_name)
@@ -198,6 +200,14 @@ def filter_by_bird(input_file, spec_dir, output_dir, bird_id):
         shutil.copy2(audio_params, os.path.join(output_dir, "audio_params.json"))
         
     print(f"Copied {count} files to {output_dir}")
+
+    # Write a filtered annotation JSON for downstream split steps (avoids scanning/copying unrelated recordings)
+    filtered = dict(data)
+    filtered["recordings"] = bird_recordings
+    filtered_path = os.path.join(output_dir, "annotations_filtered.json")
+    with open(filtered_path, "w") as f:
+        json.dump(filtered, f, indent=2)
+    print(f"Wrote filtered annotations: {filtered_path}")
 
 def sample_files(spec_dir, output_dir, n_samples):
     """Randomly sample n_samples .npy files from spec_dir and copy to output_dir"""
