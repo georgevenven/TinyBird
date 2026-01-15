@@ -33,6 +33,7 @@ __all__ = [
     "plot_loss_curves",
     "save_supervised_prediction_plot",
     "plot_benchmark_results",
+    "plot_layerwise_probe_results",
     "generate_umap_plots",
 ]
 
@@ -333,6 +334,7 @@ def plot_benchmark_results(results_csv: str, output_dir: str):
     """
     Plot benchmark results.
     Expected CSV format: task,species,individual,samples,metric_value
+    If a 'layer' column is present, plots layerwise probe results instead.
     """
     import csv
     import matplotlib.ticker as ticker
@@ -341,6 +343,9 @@ def plot_benchmark_results(results_csv: str, output_dir: str):
     try:
         with open(results_csv, 'r') as f:
             reader = csv.DictReader(f)
+            if reader.fieldnames and "layer" in reader.fieldnames:
+                plot_layerwise_probe_results(results_csv, output_dir)
+                return
             for row in reader:
                 row['samples'] = int(row['samples'])
                 row['metric_value'] = float(row['metric_value'])
@@ -458,6 +463,100 @@ def plot_benchmark_results(results_csv: str, output_dir: str):
                 ax.grid(True, alpha=0.2)
                 
                 fig.savefig(os.path.join(output_dir, f'classification_benchmark_{species}.png'), bbox_inches='tight')
+                plt.close(fig)
+
+
+def plot_layerwise_probe_results(results_csv: str, output_dir: str) -> None:
+    """
+    Plot layerwise linear-probe results.
+
+    Expected CSV format:
+      task,species,individual,layer,samples,run_name,metric_name,metric_value
+    """
+    import csv
+    import matplotlib.ticker as ticker
+
+    data = []
+    try:
+        with open(results_csv, "r") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if "layer" not in row or "metric_value" not in row:
+                    continue
+                row["layer"] = int(row["layer"])
+                row["samples"] = int(row["samples"])
+                row["metric_value"] = float(row["metric_value"])
+                data.append(row)
+    except FileNotFoundError:
+        print(f"Results file not found: {results_csv}")
+        return
+
+    if not data:
+        print("No layerwise data found in results CSV.")
+        return
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    species_list = sorted(list(set(d["species"] for d in data)))
+    metric_list = sorted(list(set(d.get("metric_name", "Metric") for d in data)))
+    sample_sizes = sorted(list(set(d["samples"] for d in data)))
+
+    # Colors by sample size
+    colors = plt.cm.tab10(np.linspace(0, 1, max(len(sample_sizes), 1)))
+    sample_color = dict(zip(sample_sizes, colors))
+
+    with plt.rc_context({
+        'font.size': 24,
+        'font.weight': 'bold',
+        'axes.labelweight': 'bold',
+        'axes.titleweight': 'bold',
+        'axes.titlesize': 24,
+        'axes.labelsize': 24,
+        'xtick.labelsize': 18,
+        'ytick.labelsize': 18,
+    }):
+        for species in species_list:
+            sp_data = [d for d in data if d["species"] == species]
+            if not sp_data:
+                continue
+
+            for metric in metric_list:
+                metric_data = [d for d in sp_data if d.get("metric_name", metric) == metric]
+                if not metric_data:
+                    continue
+
+                fig, ax = plt.subplots(figsize=(10, 6), dpi=SPEC_DPI)
+
+                for samples in sample_sizes:
+                    s_data = [d for d in metric_data if d["samples"] == samples]
+                    if not s_data:
+                        continue
+
+                    layer_map = {}
+                    for d in s_data:
+                        layer = d["layer"]
+                        layer_map.setdefault(layer, []).append(d["metric_value"])
+
+                    layers = sorted(layer_map.keys())
+                    means = [float(np.mean(layer_map[l])) for l in layers]
+                    stds = [float(np.std(layer_map[l])) for l in layers]
+
+                    color = sample_color[samples]
+                    ax.plot(layers, means, marker='o', linewidth=2, color=color, label=f"{samples} samples")
+                    if any(s > 0 for s in stds):
+                        lower = [m - s for m, s in zip(means, stds)]
+                        upper = [m + s for m, s in zip(means, stds)]
+                        ax.fill_between(layers, lower, upper, color=color, alpha=0.15)
+
+                ax.set_xlabel("Encoder Layer")
+                ax.set_ylabel(metric.replace("_", " "))
+                ax.set_title(f"{species} Layerwise Probe")
+                ax.xaxis.set_major_locator(ticker.MaxNLocator(integer=True))
+                ax.grid(True, alpha=0.2)
+                ax.legend()
+
+                safe_metric = metric.replace(" ", "_")
+                fig.savefig(os.path.join(output_dir, f"layerwise_{safe_metric}_{species}.png"), bbox_inches='tight')
                 plt.close(fig)
 
 

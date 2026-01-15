@@ -100,9 +100,13 @@ def load_json_events(json_path, audio_params, selected_bird=None):
         event_map.setdefault((file_name), []).extend(event_list)
     return event_map
 
-def create_label_arr(matched_event, rounded_spec_length):
+def create_label_arr(matched_event, rounded_spec_length, device=None):
     # create an array of labels 
-    labels = torch.full((rounded_spec_length,), fill_value=-1) # -1 represents silence / non song element 
+    labels = torch.full(
+        (rounded_spec_length,),
+        fill_value=-1,
+        device=device,
+    )  # -1 represents silence / non song element 
 
     units = matched_event["units"]
 
@@ -159,6 +163,7 @@ def main(args):
 
     while i < len(embedding_dataset) and total_timebins < args["num_timebins"]:
         spec, file_name = embedding_dataset[i]
+        spec = spec.to(device)
         
         # spec shape 1, mels, time
         spec_timebins = spec.shape[-1]
@@ -184,7 +189,7 @@ def main(args):
         if matched_events:
             for matched_event in matched_events: # could be multiple songs for each file 
                 # crop the non song elements 
-                labels = create_label_arr(matched_event, rounded_spec_length)
+                labels = create_label_arr(matched_event, rounded_spec_length, device=device)
 
                 # converts to spectrogram timebins 
                 spec_detected = spec[:,:,matched_event["on_timebins"]:matched_event["off_timebins"]]
@@ -226,14 +231,14 @@ def main(args):
                         pad_amnt = model_num_timebins - spec_segment.shape[-1]
 
                 # Pad if necessary
-                if pad_amnt > 0: 
-                    spec_detected = torch.nn.functional.pad(spec_detected, (0, pad_amnt), mode='constant', value=0)
-                    labels = torch.nn.functional.pad(labels, (0, pad_amnt), mode='constant', value=-1)
-                
-                channel, mel, time = spec_detected.shape
-                
+                if pad_amnt > 0:
+                    spec_segment = torch.nn.functional.pad(spec_segment, (0, pad_amnt), mode='constant', value=0)
+                    labels_segment = torch.nn.functional.pad(labels_segment, (0, pad_amnt), mode='constant', value=-1)
+
+                channel, mel, time = spec_segment.shape
+
                 # Correctly batch by slicing along time dimension
-                batched_spec_detected = spec_detected.reshape(channel, mel, batch_size, model_num_timebins)
+                batched_spec_detected = spec_segment.reshape(channel, mel, batch_size, model_num_timebins)
                 batched_spec_detected = batched_spec_detected.permute(2, 0, 1, 3)  # (batch_size, channel, mel, model_num_timebins)
                 
                 with torch.no_grad():
@@ -264,7 +269,7 @@ def main(args):
 
                     # Generate Pos IDs
                     # 0..W-1 repeated B times
-                    current_pos_ids = torch.arange(0, num_patches_time).repeat(batch_size)
+                    current_pos_ids = torch.arange(0, num_patches_time, device=device).repeat(batch_size)
 
                     # TRIM PADDING
                     if pad_amnt > 0:
