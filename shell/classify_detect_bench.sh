@@ -33,6 +33,7 @@ PROBE_MODE="finetune"
 TASK_MODE="classify"
 
 # ================= ARGUMENT PARSING =================
+ORIGINAL_ARGS=("$@")
 while [[ $# -gt 0 ]]; do
     key="$1"
     case $key in
@@ -82,6 +83,28 @@ while [[ $# -gt 0 ]]; do
         ;;
     esac
 done
+
+# Log resolved parameters (including defaults) to project root
+PARAMS_JSON="run_params_classify_detect_bench.json"
+printf '{\n' > "$PARAMS_JSON"
+printf '  "command": "%s",\n' "$0 ${ORIGINAL_ARGS[*]}" >> "$PARAMS_JSON"
+printf '  "spec_root": "%s",\n' "$SPEC_ROOT" >> "$PARAMS_JSON"
+printf '  "annotation_root": "%s",\n' "$ANNOTATION_ROOT" >> "$PARAMS_JSON"
+printf '  "results_dir": "%s",\n' "$RESULTS_DIR" >> "$PARAMS_JSON"
+printf '  "pretrained_run": "%s",\n' "$PRETRAINED_RUN" >> "$PARAMS_JSON"
+printf '  "probe_mode": "%s",\n' "$PROBE_MODE" >> "$PARAMS_JSON"
+printf '  "task_mode": "%s",\n' "$TASK_MODE" >> "$PARAMS_JSON"
+printf '  "steps": %s,\n' "$STEPS" >> "$PARAMS_JSON"
+printf '  "batch_size": %s,\n' "$BATCH_SIZE" >> "$PARAMS_JSON"
+printf '  "num_workers": %s,\n' "$NUM_WORKERS" >> "$PARAMS_JSON"
+printf '  "max_birds": %s,\n' "$MAX_BIRDS" >> "$PARAMS_JSON"
+printf '  "sample_sizes": [' >> "$PARAMS_JSON"
+for i in "${!SAMPLE_SIZES[@]}"; do
+    if [ "$i" -gt 0 ]; then printf ', ' >> "$PARAMS_JSON"; fi
+    printf '%s' "${SAMPLE_SIZES[$i]}" >> "$PARAMS_JSON"
+done
+printf ']\n' >> "$PARAMS_JSON"
+printf '}\n' >> "$PARAMS_JSON"
 
 echo " Configuration:"
 echo "   SPEC_ROOT: $SPEC_ROOT"
