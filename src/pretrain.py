@@ -4,6 +4,7 @@ import shutil
 import json
 from datetime import datetime
 import time
+import math
 
 # Set matplotlib backend BEFORE importing plotting_utils
 import matplotlib
@@ -12,7 +13,7 @@ matplotlib.use('Agg')  # Use non-interactive backend for headless environments
 import torch
 import wandb
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR
 from model import TinyBird
 from plotting_utils import plot_loss_curves, save_reconstruction_plot
 from utils import load_training_state
@@ -106,8 +107,35 @@ class Trainer():
         # Initialize optimizer
         self.optimizer = AdamW(self.tinybird.parameters(), lr=config["lr"], weight_decay=config["weight_decay"])
         
-        # Initialize cosine annealing scheduler
-        self.scheduler = CosineAnnealingLR(self.optimizer, T_max=config["steps"])
+        # Initialize LR scheduler (warmup + cosine decay to min_lr)
+        warmup_steps = int(config.get("warmup_steps", 1000))
+        min_lr = float(config.get("min_lr", 1e-6))
+        if warmup_steps < 0:
+            raise ValueError(f"warmup_steps must be >= 0. Got {warmup_steps}")
+        if min_lr < 0:
+            raise ValueError(f"min_lr must be >= 0. Got {min_lr}")
+
+        if warmup_steps > 0 or min_lr > 0.0:
+            total_steps = int(config["steps"])
+            base_lr = float(config["lr"])
+            decay_steps = max(1, total_steps - warmup_steps)
+
+            def lr_lambda(step_idx):
+                # LambdaLR passes 0 on the first scheduler.step() call.
+                step_num = step_idx + 1
+                if warmup_steps > 0 and step_num <= warmup_steps:
+                    return step_num / float(warmup_steps)
+                # Cosine decay from base_lr to min_lr
+                decay_step = step_num - warmup_steps
+                decay_step = min(max(decay_step, 0), decay_steps)
+                cosine = 0.5 * (1.0 + math.cos(math.pi * decay_step / float(decay_steps)))
+                target_lr = min_lr + (base_lr - min_lr) * cosine
+                return target_lr / base_lr if base_lr > 0 else 1.0
+
+            self.scheduler = LambdaLR(self.optimizer, lr_lambda=lr_lambda)
+        else:
+            # Fallback: cosine annealing to 0
+            self.scheduler = CosineAnnealingLR(self.optimizer, T_max=config["steps"])
         
         # Initialize AMP scaler if AMP is enabled
         self.use_amp = config.get("amp", False)
@@ -279,6 +307,7 @@ class Trainer():
             self.train_loss_history.append(train_loss)
             self.train_steps.append(step_num)
             
+
             # Calculate samples processed
             samples_processed = self.config["batch_size"] * (step_num + 1)
 
@@ -389,7 +418,7 @@ if __name__ == "__main__":
 
     # Defaults 
     parser.add_argument("--steps", type=int, default=500_000, help="number of training steps")
-    parser.add_argument("--lr", type=float, default=1e-4, help="learning rate")
+    parser.add_argument("--lr", type=float, default=3e-4, help="learning rate")
     parser.add_argument("--batch_size", type=int, default=256, help="batch size")
     parser.add_argument("--num_workers", type=int, default=8, help="number of DataLoader worker processes")
 
@@ -402,6 +431,8 @@ if __name__ == "__main__":
     parser.add_argument("--mask_c", type=float, default=0.1, help="seed probability for Voronoi mask")
     parser.add_argument("--mask_type", type=str, default="voronoi", choices=["voronoi", "random"], help="masking strategy")
     parser.add_argument("--eval_every", type=int, default=500, help="evaluate every N steps")
+    parser.add_argument("--warmup_steps", type=int, default=1000, help="linear warmup steps before decay")
+    parser.add_argument("--min_lr", type=float, default=1e-5, help="minimum learning rate for cosine decay")
     parser.add_argument("--amp", action="store_true", help="enable automatic mixed precision training")
     parser.add_argument("--weight_decay", type=float, default=0.1, help="weight decay")
     parser.add_argument("--no_normalize_patches", action="store_false", dest="normalize_patches", help="disable patch-level normalization in loss computation (enabled by default)")
