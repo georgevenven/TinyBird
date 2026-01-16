@@ -29,7 +29,7 @@ MAX_BIRDS=3
 # Probe Type: "linear" (Freeze Encoder) or "finetune" (MLP + Unfreeze)
 PROBE_MODE="finetune"
 
-# Task Selection: "all" (detect+unit_detect+classify), "detect", "unit_detect", or "classify"
+# Task Selection: "all" or a comma-separated list (e.g. "unit_detect,classify")
 TASK_MODE="classify"
 
 # ================= ARGUMENT PARSING =================
@@ -138,11 +138,20 @@ if [ "$PROBE_MODE" == "linear" ]; then
     PROBE_ARGS="--linear_probe --freeze_encoder --lr 1e-2"
     echo "Mode: Linear Probe (Frozen Encoder)"
 else
-    PROBE_ARGS="--freeze_encoder --lr 1e-4" # MLP head with frozen encoder
+    # Finetune defaults: warmup then decay to min lr
+    PROBE_ARGS="--lr 5e-5 --warmup_steps 100 --min_lr 1e-6"
     echo "Mode: MLP Probe (Frozen Encoder)"
 fi
 
 echo "Results will be saved to $RESULTS_DIR"
+
+# Task helper
+task_enabled() {
+    if [ "$TASK_MODE" == "all" ]; then
+        return 0
+    fi
+    [[ ",$TASK_MODE," == *",$1,"* ]]
+}
 
 # Loop over Species
 for ENTRY in "${SPECIES_LIST[@]}"; do
@@ -170,7 +179,7 @@ for ENTRY in "${SPECIES_LIST[@]}"; do
     # =========================================
     # TASK 1: DETECTION (Species Level)
     # =========================================
-    if [ "$TASK_MODE" == "detect" ] || [ "$TASK_MODE" == "all" ]; then
+    if task_enabled "detect"; then
         echo "--- Starting Detection Benchmark for $SPECIES ---"
         
         # 1. Prepare Fixed Test Set (Pool vs Test)
@@ -258,7 +267,7 @@ for ENTRY in "${SPECIES_LIST[@]}"; do
     # =========================================
     # TASK 1b: UNIT DETECTION (Species Level)
     # =========================================
-    if [ "$TASK_MODE" == "unit_detect" ] || [ "$TASK_MODE" == "all" ]; then
+    if task_enabled "unit_detect"; then
         echo "--- Starting Unit Detection Benchmark for $SPECIES ---"
         
         # 1. Prepare Fixed Test Set (Pool vs Test)
@@ -341,7 +350,7 @@ for ENTRY in "${SPECIES_LIST[@]}"; do
     # =========================================
     # TASK 2: CLASSIFICATION (Individual Level)
     # =========================================
-    if [ "$TASK_MODE" == "classify" ] || [ "$TASK_MODE" == "all" ]; then
+    if task_enabled "classify"; then
         echo "--- Starting Classification Benchmark for $SPECIES ---"
         
         # Discover Individuals

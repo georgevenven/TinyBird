@@ -7,12 +7,13 @@ import json
 from datetime import datetime
 import time
 from pathlib import Path
+import math
 
 import numpy as np
 import torch
 from torch import nn
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR
 
 class SupervisedTinyBird(nn.Module):
     def __init__(self, pretrained_model, config, num_classes=2, freeze_encoder=True, mode="detect", linear_probe=False):
@@ -288,8 +289,35 @@ class Trainer():
         trainable_params = [p for p in self.model.parameters() if p.requires_grad]
         self.optimizer = AdamW(trainable_params, lr=config["lr"], weight_decay=config["weight_decay"])
         
-        # Initialize cosine annealing scheduler
-        self.scheduler = CosineAnnealingLR(self.optimizer, T_max=config["steps"])
+        # Initialize LR scheduler (optional warmup + decay to min_lr)
+        warmup_steps = int(config.get("warmup_steps", 0))
+        min_lr = float(config.get("min_lr", 0.0))
+        if warmup_steps < 0:
+            raise ValueError(f"warmup_steps must be >= 0. Got {warmup_steps}")
+        if min_lr < 0:
+            raise ValueError(f"min_lr must be >= 0. Got {min_lr}")
+
+        if warmup_steps > 0 or min_lr > 0.0:
+            total_steps = int(config["steps"])
+            base_lr = float(config["lr"])
+            decay_steps = max(1, total_steps - warmup_steps)
+
+            def lr_lambda(step_idx):
+                # LambdaLR passes 0 on the first scheduler.step() call.
+                step_num = step_idx + 1
+                if warmup_steps > 0 and step_num <= warmup_steps:
+                    return step_num / float(warmup_steps)
+                # Cosine decay from base_lr to min_lr
+                decay_step = step_num - warmup_steps
+                decay_step = min(max(decay_step, 0), decay_steps)
+                cosine = 0.5 * (1.0 + math.cos(math.pi * decay_step / float(decay_steps)))
+                target_lr = min_lr + (base_lr - min_lr) * cosine
+                return target_lr / base_lr if base_lr > 0 else 1.0
+
+            self.scheduler = LambdaLR(self.optimizer, lr_lambda=lr_lambda)
+        else:
+            # Default behavior: cosine annealing to 0
+            self.scheduler = CosineAnnealingLR(self.optimizer, T_max=config["steps"])
         
         # Initialize AMP scaler if AMP is enabled
         self.use_amp = config.get("amp", False)
@@ -797,6 +825,8 @@ if __name__ == "__main__":
     parser.add_argument("--num_workers", type=int, default=8, help="number of DataLoader worker processes")
     parser.add_argument("--weight_decay", type=float, default=0.1, help="weight decay")
     parser.add_argument("--eval_every", type=int, default=25, help="evaluate every N steps")
+    parser.add_argument("--warmup_steps", type=int, default=0, help="linear warmup steps before decay")
+    parser.add_argument("--min_lr", type=float, default=0.0, help="minimum learning rate after decay")
 
     # Early stopping
     parser.add_argument("--early_stop_patience", type=int, default=8, help="stop if EMA-smoothed val_loss does not improve for N consecutive eval checks (0 disables)")

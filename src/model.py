@@ -9,6 +9,7 @@ class TinyBird(nn.Module):
         self.max_seq = config["max_seq"]
         self.mask_p = config["mask_p"]
         self.mask_c = config["mask_c"]
+        self.mask_type = config.get("mask_type", "voronoi")
         self.normalize_patches = config.get("normalize_patches", True)
 
         self.patch_projection = nn.Conv2d(
@@ -109,6 +110,13 @@ class TinyBird(nn.Module):
         
         return final_mask
 
+    def random_mask(self, hw, p=0.75, device=None):
+        """
+        Randomly mask patches with Bernoulli(p).
+        """
+        H, W = hw
+        return torch.rand((H, W), device=device) < p
+
     def forward_encoder(self, x, inference_mode: bool = False):
         """
         Patchify → add pos enc → mask → Transformer encoder.
@@ -130,7 +138,11 @@ class TinyBird(nn.Module):
             h = self.encoder(z_seq)  # (B, T, D_enc)
             return h, idx_restore, bool_mask, T
 
-        mask_grid = self.voronoi_mask((H, W), p=self.mask_p, c=self.mask_c, device=z.device)
+        mask_type = getattr(self, "mask_type", "voronoi")
+        if mask_type == "random":
+            mask_grid = self.random_mask((H, W), p=self.mask_p, device=z.device)
+        else:
+            mask_grid = self.voronoi_mask((H, W), p=self.mask_p, c=self.mask_c, device=z.device)
         bool_mask_flat = mask_grid.flatten()
         bool_mask = bool_mask_flat.unsqueeze(0).expand(B, -1)               # (B, T)
 

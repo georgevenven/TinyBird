@@ -34,6 +34,7 @@ __all__ = [
     "save_supervised_prediction_plot",
     "plot_benchmark_results",
     "plot_layerwise_probe_results",
+    "plot_theoretical_resolution_limit",
     "generate_umap_plots",
 ]
 
@@ -558,6 +559,85 @@ def plot_layerwise_probe_results(results_csv: str, output_dir: str) -> None:
                 safe_metric = metric.replace(" ", "_")
                 fig.savefig(os.path.join(output_dir, f"layerwise_{safe_metric}_{species}.png"), bbox_inches='tight')
                 plt.close(fig)
+
+
+def plot_theoretical_resolution_limit(results_csv: str, output_dir: str) -> None:
+    """
+    Plot theoretical max performance vs resolution_ms.
+
+    Expected CSV format:
+      species,resolution_ms,metric_name,metric_value
+    """
+    import csv
+    import matplotlib.ticker as ticker
+
+    data = []
+    try:
+        with open(results_csv, "r") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if "resolution_ms" not in row or "metric_value" not in row:
+                    continue
+                row["resolution_ms"] = int(row["resolution_ms"])
+                row["metric_value"] = float(row["metric_value"])
+                data.append(row)
+    except FileNotFoundError:
+        print(f"Results file not found: {results_csv}")
+        return
+
+    if not data:
+        print("No data found in results CSV.")
+        return
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    species_list = sorted(list(set(d["species"] for d in data)))
+    metric_list = sorted(list(set(d.get("metric_name", "Metric") for d in data)))
+
+    # Colors by species
+    if len(species_list) <= 10:
+        colors = plt.cm.tab10(np.linspace(0, 1, 10))[:len(species_list)]
+    else:
+        colors = plt.cm.viridis(np.linspace(0, 1, len(species_list)))
+    species_color = dict(zip(species_list, colors))
+
+    with plt.rc_context({
+        'font.size': 24,
+        'font.weight': 'bold',
+        'axes.labelweight': 'bold',
+        'axes.titleweight': 'bold',
+        'axes.titlesize': 24,
+        'axes.labelsize': 24,
+        'xtick.labelsize': 18,
+        'ytick.labelsize': 18,
+    }):
+        for metric in metric_list:
+            metric_data = [d for d in data if d.get("metric_name", metric) == metric]
+            if not metric_data:
+                continue
+
+            fig, ax = plt.subplots(figsize=(10, 6), dpi=SPEC_DPI)
+
+            for species in species_list:
+                sp_data = [d for d in metric_data if d["species"] == species]
+                if not sp_data:
+                    continue
+
+                sp_data.sort(key=lambda x: x["resolution_ms"])
+                x = [d["resolution_ms"] for d in sp_data]
+                y = [d["metric_value"] for d in sp_data]
+                ax.plot(x, y, marker='o', linewidth=2, color=species_color[species], label=species)
+
+            ax.set_xlabel("Resolution (ms)")
+            ax.set_ylabel(metric.replace("_", " "))
+            ax.set_title(f"Theoretical Limit: {metric.replace('_', ' ')}")
+            ax.xaxis.set_major_locator(ticker.MaxNLocator(integer=True))
+            ax.grid(True, alpha=0.2)
+            ax.legend()
+
+            safe_metric = metric.replace(" ", "_")
+            fig.savefig(os.path.join(output_dir, f"theoretical_limit_{safe_metric}.png"), bbox_inches='tight')
+            plt.close(fig)
 
 
 def _build_palette(labels, colormap=cm.tab20):

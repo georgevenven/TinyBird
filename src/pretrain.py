@@ -10,6 +10,7 @@ import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend for headless environments
 
 import torch
+import wandb
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from model import TinyBird
@@ -79,6 +80,15 @@ class Trainer():
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Using device: {self.device}")
         
+        # Initialize Weights & Biases if enabled
+        self.use_wandb = config.get("wandb", False)
+        if self.use_wandb:
+            wandb.init(
+                project=os.getenv("WANDB_PROJECT", "tinybird"),
+                name=config.get("run_name"),
+                config=config,
+            )
+
         # Initialize model
         if pretrained_model is not None:
             # Use the loaded model from continue mode
@@ -314,6 +324,20 @@ class Trainer():
                 # Log losses to file
                 with open(self.loss_log_path, 'a') as f:
                     f.write(f"{step_num},{train_loss:.6f},{val_loss:.6f},{gnorm:.6f},{samples_processed},{steps_per_sec:.2f},{samples_per_sec:.1f}\n")
+
+                if self.use_wandb:
+                    wandb.log(
+                        {
+                            "train_loss": train_loss,
+                            "val_loss": val_loss,
+                            "gnorm": gnorm,
+                            "samples_processed": samples_processed,
+                            "steps_per_sec": steps_per_sec,
+                            "samples_per_sec": samples_per_sec,
+                            "lr": current_lr,
+                        },
+                        step=step_num,
+                    )
                 
                 # Save model weights
                 weight_path = os.path.join(self.weights_path, f"model_step_{step_num:06d}.pth")
@@ -329,6 +353,8 @@ class Trainer():
         
         # Generate loss plot at the end of training
         self.end_of_train_viz()
+        if self.use_wandb:
+            wandb.finish()
 
     def end_of_train_viz(self):
         """Generate and save loss plots showing training and validation curves."""
@@ -363,11 +389,13 @@ if __name__ == "__main__":
     parser.add_argument("--dropout", type=float, default=0.1, help="dropout rate")
     parser.add_argument("--mask_p", type=float, default=0.75, help="mask probability")
     parser.add_argument("--mask_c", type=float, default=0.1, help="seed probability for Voronoi mask")
+    parser.add_argument("--mask_type", type=str, default="voronoi", choices=["voronoi", "random"], help="masking strategy")
     parser.add_argument("--eval_every", type=int, default=500, help="evaluate every N steps")
     parser.add_argument("--amp", action="store_true", help="enable automatic mixed precision training")
     parser.add_argument("--weight_decay", type=float, default=0.1, help="weight decay")
     parser.add_argument("--no_normalize_patches", action="store_false", dest="normalize_patches", help="disable patch-level normalization in loss computation (enabled by default)")
     parser.add_argument("--continue_from", type=str, help="continue training from existing run directory (path to run dir)")
+    parser.add_argument("--wandb", action="store_true", help="enable Weights & Biases logging")
 
     # Encoder 
     parser.add_argument("--enc_hidden_d", type=int, default=384, help="encoder hidden dimension")
@@ -395,7 +423,9 @@ if __name__ == "__main__":
         config['continue_from'] = resolved_continue
         config['is_continuing'] = True
         config.setdefault("mask_c", args.mask_c)
+        config.setdefault("mask_type", args.mask_type)
         config.setdefault("normalize_patches", True)  # Default to True for backward compatibility
+        config["wandb"] = args.wandb
 
     else:
         # New training mode - validate required args

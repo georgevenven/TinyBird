@@ -9,5 +9,6 @@ scikit-learn
 scipy
 tqdm
 umap-learn
+wandb
 
 # torch should be installed manually 
