@@ -279,6 +279,9 @@ class Trainer():
             self.train_loss_history.append(train_loss)
             self.train_steps.append(step_num)
             
+            # Calculate samples processed
+            samples_processed = self.config["batch_size"] * (step_num + 1)
+
             # Evaluation and checkpointing
             if step_num % self.config["eval_every"] == 0:
                 try:
@@ -293,9 +296,6 @@ class Trainer():
                 # Store validation loss
                 self.val_loss_history.append(val_loss)
                 self.val_steps.append(step_num)
-                
-                # Calculate samples processed
-                samples_processed = self.config["batch_size"] * (step_num + 1)
                 
                 # Calculate percentage complete
                 progress_pct = ((step_num - self.starting_step + 1) / total_steps) * 100
@@ -320,10 +320,6 @@ class Trainer():
                       f"LR = {current_lr:.2e}, "
                       f"Steps/sec = {steps_per_sec:.2f}, "
                       f"Samples/sec = {samples_per_sec:.1f}")
-                
-                # Log losses to file
-                with open(self.loss_log_path, 'a') as f:
-                    f.write(f"{step_num},{train_loss:.6f},{val_loss:.6f},{gnorm:.6f},{samples_processed},{steps_per_sec:.2f},{samples_per_sec:.1f}\n")
 
                 if self.use_wandb:
                     wandb.log(
@@ -345,6 +341,21 @@ class Trainer():
                 
                 # Save reconstruction visualization
                 self.save_reconstruction(val_batch, step_num)
+
+                val_loss_str = f"{val_loss:.6f}"
+                steps_per_sec_str = f"{steps_per_sec:.2f}"
+                samples_per_sec_str = f"{samples_per_sec:.1f}"
+            else:
+                val_loss_str = ""
+                steps_per_sec_str = ""
+                samples_per_sec_str = ""
+
+            # Log losses to file every step; val loss only at eval steps
+            with open(self.loss_log_path, 'a') as f:
+                f.write(
+                    f"{step_num},{train_loss:.6f},{val_loss_str},"
+                    f"{gnorm:.6f},{samples_processed},{steps_per_sec_str},{samples_per_sec_str}\n"
+                )
         
         # Save final model weights
         final_step = self.starting_step + self.config['steps'] - 1
