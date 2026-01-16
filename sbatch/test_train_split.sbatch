@@ -5,8 +5,8 @@
 #SBATCH --time=7-00:00:00
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=100G
-#SBATCH --output=/home/georgev/TinyBird/logs/pt_conversion-%j.out
-#SBATCH --error=/home/georgev/TinyBird/logs/pt_conversion-%j.err
+#SBATCH --output=/home/georgev/TinyBird/logs/test_train-%j.out
+#SBATCH --error=/home/georgev/TinyBird/logs/test_train-%j.err
 
 set -euo pipefail
 
@@ -14,7 +14,7 @@ set -euo pipefail
 module load miniconda3/20240410
 eval "$(conda shell.bash hook)"
 conda activate /home/georgev/.conda/envs/tinybird
-conda install --file "$HOME/TinyBird/requirements.txt" -y
+pip install -r "$HOME/TinyBird/requirements.txt"
 
 # --- scratch on Talapas is /scratch/<PIRG>/<USER>
 PIRG=${PIRG:-gardnerlab}
