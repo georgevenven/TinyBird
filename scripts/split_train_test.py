@@ -238,9 +238,11 @@ if __name__ == '__main__':
     parser.add_argument('--train_dir') # Optional depending on mode
     parser.add_argument('--test_dir') # Optional depending on mode
     parser.add_argument('--annotation_json') # Optional depending on mode
-    parser.add_argument('--train_percent', type=float, default=80)
+    parser.add_argument('--train_percent', type=float, default=95)
     parser.add_argument('--ignore_bird_id', action='store_true', 
                         help='Randomly split files without grouping by bird_id')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Random seed for deterministic splits/sampling')
     
     # New arguments
     parser.add_argument('--mode', type=str, default='split', choices=['split', 'filter_bird', 'sample'],
@@ -249,6 +251,9 @@ if __name__ == '__main__':
     parser.add_argument('--n_samples', type=int, help='Number of samples for sample mode')
     
     args = parser.parse_args()
+
+    if args.seed is not None:
+        random.seed(args.seed)
     
     if args.mode == 'split':
         if not args.train_dir or not args.test_dir or not args.annotation_json:

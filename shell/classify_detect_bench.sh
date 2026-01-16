@@ -84,8 +84,11 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Log resolved parameters (including defaults) to project root
-PARAMS_JSON="run_params_classify_detect_bench.json"
+# Ensure results directory exists before logging
+mkdir -p "$RESULTS_DIR"
+
+# Log resolved parameters (including defaults) to results directory
+PARAMS_JSON="$RESULTS_DIR/run_params_classify_detect_bench.json"
 printf '{\n' > "$PARAMS_JSON"
 printf '  "command": "%s",\n' "$0 ${ORIGINAL_ARGS[*]}" >> "$PARAMS_JSON"
 printf '  "spec_root": "%s",\n' "$SPEC_ROOT" >> "$PARAMS_JSON"
@@ -125,8 +128,6 @@ SPECIES_LIST=(
 
 # =================================================
 
-# Setup
-mkdir -p "$RESULTS_DIR"
 RESULTS_CSV="$RESULTS_DIR/results.csv"
 # Initialize CSV if not exists
 if [ ! -f "$RESULTS_CSV" ]; then

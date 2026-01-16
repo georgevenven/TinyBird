@@ -71,8 +71,11 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Log resolved parameters (including defaults) to project root
-PARAMS_JSON="run_params_classify_layerwise_linear_probe.json"
+# Ensure results directory exists before logging
+mkdir -p "$RESULTS_DIR"
+
+# Log resolved parameters (including defaults) to results directory
+PARAMS_JSON="$RESULTS_DIR/run_params_classify_layerwise_linear_probe.json"
 printf '{\n' > "$PARAMS_JSON"
 printf '  "command": "%s",\n' "$0 ${ORIGINAL_ARGS[*]}" >> "$PARAMS_JSON"
 printf '  "spec_root": "%s",\n' "$SPEC_ROOT" >> "$PARAMS_JSON"
@@ -108,7 +111,6 @@ SPECIES_LIST=(
 
 # =================================================
 
-mkdir -p "$RESULTS_DIR"
 RESULTS_CSV="$RESULTS_DIR/results.csv"
 if [ ! -f "$RESULTS_CSV" ]; then
     echo "task,species,individual,layer,samples,run_name,metric_name,metric_value" > "$RESULTS_CSV"
