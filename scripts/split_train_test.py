@@ -15,7 +15,7 @@ def calculate_ms(detected_events):
         total_ms += event['offset_ms'] - event['onset_ms']
     return total_ms
 
-def split_data_random(input_file, spec_dir, train_dir, test_dir, train_percent=80):
+def split_data_random(input_file, spec_dir, train_dir, test_dir, train_percent=80, move_files=False):
     """Randomly split recordings without considering bird_id"""
     
     # Create output directories
@@ -40,25 +40,32 @@ def split_data_random(input_file, spec_dir, train_dir, test_dir, train_percent=8
     test_ms = sum(calculate_ms(r['detected_events']) for r in test_recordings)
     total_ms = train_ms + test_ms
     
-    # Copy train spec files
-    print("Copying train files...")
+    # Copy/move train spec files
+    action = "Moving" if move_files else "Copying"
+    print(f"{action} train files...")
     for recording in tqdm(train_recordings):
         filename = recording['recording']['filename']
         base_name = os.path.splitext(filename)[0]
         matches = glob.glob(os.path.join(spec_dir, f"{base_name}.*"))
         for src in matches:
             dst = os.path.join(train_dir, os.path.basename(src))
-            shutil.copy2(src, dst)
+            if move_files:
+                shutil.move(src, dst)
+            else:
+                shutil.copy2(src, dst)
     
-    # Copy test spec files
-    print("Copying test files...")
+    # Copy/move test spec files
+    print(f"{action} test files...")
     for recording in tqdm(test_recordings):
         filename = recording['recording']['filename']
         base_name = os.path.splitext(filename)[0]
         matches = glob.glob(os.path.join(spec_dir, f"{base_name}.*"))
         for src in matches:
             dst = os.path.join(test_dir, os.path.basename(src))
-            shutil.copy2(src, dst)
+            if move_files:
+                shutil.move(src, dst)
+            else:
+                shutil.copy2(src, dst)
     
     # Copy audio_params.json to both directories
     audio_params = os.path.join(spec_dir, "audio_params.json")
@@ -74,7 +81,7 @@ def split_data_random(input_file, spec_dir, train_dir, test_dir, train_percent=8
     print(f"Train recordings: {len(train_recordings)}")
     print(f"Test recordings: {len(test_recordings)}")
 
-def split_data(input_file, spec_dir, train_dir, test_dir, train_percent=80):
+def split_data(input_file, spec_dir, train_dir, test_dir, train_percent=80, move_files=False):
     """Split recordings by bird_id, aiming for train_percent of ms in train set"""
     
     # Create output directories
@@ -132,25 +139,32 @@ def split_data(input_file, spec_dir, train_dir, test_dir, train_percent=80):
             test_recordings.extend(bird_info['recordings'])
             test_birds.append(bird_id)
     
-    # Copy train spec files
-    print("Copying train files...")
+    # Copy/move train spec files
+    action = "Moving" if move_files else "Copying"
+    print(f"{action} train files...")
     for recording in tqdm(train_recordings):
         filename = recording['recording']['filename']
         base_name = os.path.splitext(filename)[0]
         matches = glob.glob(os.path.join(spec_dir, f"{base_name}.*"))
         for src in matches:
             dst = os.path.join(train_dir, os.path.basename(src))
-            shutil.copy2(src, dst)
+            if move_files:
+                shutil.move(src, dst)
+            else:
+                shutil.copy2(src, dst)
     
-    # Copy test spec files
-    print("Copying test files...")
+    # Copy/move test spec files
+    print(f"{action} test files...")
     for recording in tqdm(test_recordings):
         filename = recording['recording']['filename']
         base_name = os.path.splitext(filename)[0]
         matches = glob.glob(os.path.join(spec_dir, f"{base_name}.*"))
         for src in matches:
             dst = os.path.join(test_dir, os.path.basename(src))
-            shutil.copy2(src, dst)
+            if move_files:
+                shutil.move(src, dst)
+            else:
+                shutil.copy2(src, dst)
     
     # Copy audio_params.json to both directories
     audio_params = os.path.join(spec_dir, "audio_params.json")
@@ -169,7 +183,7 @@ def split_data(input_file, spec_dir, train_dir, test_dir, train_percent=80):
     print(f"Train birds: {train_birds}")
     print(f"Test birds: {test_birds}")
 
-def filter_by_bird(input_file, spec_dir, output_dir, bird_id):
+def filter_by_bird(input_file, spec_dir, output_dir, bird_id, move_files=False):
     """Copy all files for a specific bird_id from spec_dir to output_dir"""
     os.makedirs(output_dir, exist_ok=True)
     with open(input_file, 'r') as f:
@@ -191,7 +205,10 @@ def filter_by_bird(input_file, spec_dir, output_dir, bird_id):
         matches = glob.glob(os.path.join(spec_dir, f"{base_name}.*"))
         for src in matches:
             dst = os.path.join(output_dir, os.path.basename(src))
-            shutil.copy2(src, dst)
+            if move_files:
+                shutil.move(src, dst)
+            else:
+                shutil.copy2(src, dst)
             count += 1
             
     # Copy audio_params if exists
@@ -209,7 +226,7 @@ def filter_by_bird(input_file, spec_dir, output_dir, bird_id):
         json.dump(filtered, f, indent=2)
     print(f"Wrote filtered annotations: {filtered_path}")
 
-def sample_files(spec_dir, output_dir, n_samples):
+def sample_files(spec_dir, output_dir, n_samples, move_files=False):
     """Randomly sample n_samples .npy files from spec_dir and copy to output_dir"""
     os.makedirs(output_dir, exist_ok=True)
     
@@ -225,7 +242,10 @@ def sample_files(spec_dir, output_dir, n_samples):
     
     for src in tqdm(selected_files):
         dst = os.path.join(output_dir, os.path.basename(src))
-        shutil.copy2(src, dst)
+        if move_files:
+            shutil.move(src, dst)
+        else:
+            shutil.copy2(src, dst)
         
     # Copy audio_params if exists
     audio_params = os.path.join(spec_dir, "audio_params.json")
@@ -243,6 +263,8 @@ if __name__ == '__main__':
                         help='Randomly split files without grouping by bird_id')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed for deterministic splits/sampling')
+    parser.add_argument('--move', action='store_true',
+                        help='Move files instead of copying (saves space)')
     
     # New arguments
     parser.add_argument('--mode', type=str, default='split', choices=['split', 'filter_bird', 'sample'],
@@ -259,20 +281,20 @@ if __name__ == '__main__':
         if not args.train_dir or not args.test_dir or not args.annotation_json:
              parser.error("--mode split requires --train_dir, --test_dir, and --annotation_json")
         if args.ignore_bird_id:
-            split_data_random(args.annotation_json, args.spec_dir, args.train_dir, args.test_dir, args.train_percent)
+            split_data_random(args.annotation_json, args.spec_dir, args.train_dir, args.test_dir, args.train_percent, args.move)
         else:
-            split_data(args.annotation_json, args.spec_dir, args.train_dir, args.test_dir, args.train_percent)
+            split_data(args.annotation_json, args.spec_dir, args.train_dir, args.test_dir, args.train_percent, args.move)
             
     elif args.mode == 'filter_bird':
         if not args.train_dir:
              parser.error("--mode filter_bird requires --train_dir (as output)")
         if not args.annotation_json or not args.bird_id:
              parser.error("--mode filter_bird requires --annotation_json and --bird_id")
-        filter_by_bird(args.annotation_json, args.spec_dir, args.train_dir, args.bird_id)
+        filter_by_bird(args.annotation_json, args.spec_dir, args.train_dir, args.bird_id, args.move)
         
     elif args.mode == 'sample':
         if not args.train_dir:
              parser.error("--mode sample requires --train_dir (as output)")
         if not args.n_samples:
              parser.error("--mode sample requires --n_samples")
-        sample_files(args.spec_dir, args.train_dir, args.n_samples)
+        sample_files(args.spec_dir, args.train_dir, args.n_samples, args.move)

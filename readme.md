@@ -32,6 +32,7 @@ audio2spec.py --> compute_statistics_of_spectrograms.py --> pretrain.py --> plot
 
 #### To Do Next SWE GOALS
 
+- [ ] We need docs pretty bad to explain the codebase (when updating / cleaning up code make it)
 - [ ] INHERITANCE IN THE DATACLASS, AND TWO TRAINING SCRIPTS (also inheritance)
 - [ ] Classification mixes individuals if folders not separated, fix this 
 - [ ] Breaking apart song for inference context length should be its own script
@@ -43,7 +44,7 @@ audio2spec.py --> compute_statistics_of_spectrograms.py --> pretrain.py --> plot
 - [ ] Standardize the data fields that are saved into the json files 
 - [ ] Discrepancy in VRAM usage between 
 - [ ] Rename to SongMAE everywhere 
-- [ ] Reconstructions should all be noramlized patch wise (if used during training) to precent jarring viz 
+- [ ] Reconstructions should all be noramlized patch wise (if used during training) to prevent jarring viz 
 - [ ] We need a central util for managing the json format ... this will make life so much easier 
 - [ ] snippification of datasets (for easy upload and faster training)
 - [ ] remove spec subfolder when sbatch audio2spec
