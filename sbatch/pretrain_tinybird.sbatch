@@ -15,6 +15,7 @@ set -euo pipefail
 module load miniconda3/20240410
 eval "$(conda shell.bash hook)"
 conda activate ~/.conda/envs/tinybird
+conda install --file "$HOME/TinyBird/requirements.txt" -y
 
 # CPU / CUDA runtime knobs
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}

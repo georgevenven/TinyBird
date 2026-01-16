@@ -14,6 +14,7 @@ set -euo pipefail
 module load miniconda3/20240410
 eval "$(conda shell.bash hook)"
 conda activate /home/georgev/.conda/envs/tinybird
+conda install --file "$HOME/TinyBird/requirements.txt" -y
 
 PIRG=${PIRG:-gardnerlab}
 MY_SCRATCH=/scratch/${PIRG}/${USER}
