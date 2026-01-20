@@ -21,12 +21,12 @@ PRETRAINED_RUN="/home/george-vengrovski/Documents/projects/TinyBird/runs/tinybir
 # Experiment Settings
 SAMPLE_SIZES=(100)
 TEST_PERCENT=20
-STEPS=1000
+STEPS=100
 BATCH_SIZE=24
 NUM_WORKERS=4
 MAX_BIRDS=3
 
-# Probe Type: "linear" (Freeze Encoder) or "finetune" (MLP + Unfreeze)
+# Probe Type: "linear", "finetune", or comma-separated list (e.g. "linear,finetune")
 PROBE_MODE="finetune"
 
 # Task Selection: "all" or a comma-separated list (e.g. "unit_detect,classify")
@@ -134,14 +134,11 @@ if [ ! -f "$RESULTS_CSV" ]; then
     echo "task,species,individual,samples,run_name,metric_name,metric_value" > "$RESULTS_CSV"
 fi
 
-# Set Probe Arguments
-if [ "$PROBE_MODE" == "linear" ]; then
-    PROBE_ARGS="--linear_probe --freeze_encoder --lr 1e-2"
-    echo "Mode: Linear Probe (Frozen Encoder)"
+# Resolve probe modes list
+if [ "$PROBE_MODE" == "all" ]; then
+    PROBE_MODES=("linear" "finetune")
 else
-    # Finetune defaults: warmup then decay to min lr
-    PROBE_ARGS="--lr 5e-5 --warmup_steps 100 --min_lr 1e-6"
-    echo "Mode: MLP Probe (Frozen Encoder)"
+    IFS=',' read -r -a PROBE_MODES <<< "$PROBE_MODE"
 fi
 
 echo "Results will be saved to $RESULTS_DIR"
@@ -154,9 +151,26 @@ task_enabled() {
     [[ ",$TASK_MODE," == *",$1,"* ]]
 }
 
-# Loop over Species
-for ENTRY in "${SPECIES_LIST[@]}"; do
-    IFS=":" read -r SPECIES ANNOT_FILE SPEC_SUBDIR <<< "$ENTRY"
+# Loop over Probe Modes
+for PROBE in "${PROBE_MODES[@]}"; do
+    PROBE="${PROBE// /}"
+    if [ "$PROBE" == "linear" ]; then
+        PROBE_ARGS="--linear_probe --freeze_encoder --lr 1e-2"
+        RUN_PREFIX="linear_"
+        echo "Probe Mode: Linear Probe (Frozen Encoder)"
+    elif [ "$PROBE" == "finetune" ]; then
+        # Finetune defaults: constant lr (no warmup/decay)
+        PROBE_ARGS="--lr 5e-5"
+        RUN_PREFIX="finetune_"
+        echo "Probe Mode: Finetune (Unfrozen Encoder)"
+    else
+        echo "Unknown probe mode: $PROBE (skipping)"
+        continue
+    fi
+
+    # Loop over Species
+    for ENTRY in "${SPECIES_LIST[@]}"; do
+        IFS=":" read -r SPECIES ANNOT_FILE SPEC_SUBDIR <<< "$ENTRY"
     
     ANNOT_PATH="$ANNOTATION_ROOT/$ANNOT_FILE"
     SPEC_DIR="$SPEC_ROOT/$SPEC_SUBDIR"
@@ -212,7 +226,7 @@ for ENTRY in "${SPECIES_LIST[@]}"; do
         # 2. Train with varying sample sizes
         for N in "${SAMPLE_SIZES[@]}"; do
             echo "  Running Detection with N=$N samples..."
-            RUN_NAME="${SPECIES}_detect_${N}"
+            RUN_NAME="${RUN_PREFIX}${SPECIES}_detect_${N}"
             TRAIN_DIR="$DET_WORK_DIR/train_${N}"
             
             # Prepare Train Set
@@ -266,84 +280,112 @@ for ENTRY in "${SPECIES_LIST[@]}"; do
     fi
 
     # =========================================
-    # TASK 1b: UNIT DETECTION (Species Level)
+    # TASK 1b: UNIT DETECTION (Individual Level)
     # =========================================
     if task_enabled "unit_detect"; then
         echo "--- Starting Unit Detection Benchmark for $SPECIES ---"
         
-        # 1. Prepare Fixed Test Set (Pool vs Test)
         UNIT_WORK_DIR="$SPECIES_WORK_DIR/unit_detect"
         mkdir -p "$UNIT_WORK_DIR"
-        
-        POOL_DIR="$UNIT_WORK_DIR/pool"
-        TEST_DIR="$UNIT_WORK_DIR/test"
-        
-        # Check if already prepared
-        if [ ! -d "$TEST_DIR" ] || [ -z "$(ls -A $TEST_DIR)" ]; then
-            echo "  Creating Test Set..."
-            # Split ALL species data into Pool (Train) and Test; combine all birds
-            python scripts/split_train_test.py \
-                --spec_dir "$SPEC_DIR" \
-                --train_dir "$POOL_DIR" \
-                --test_dir "$TEST_DIR" \
-                --annotation_json "$ANNOT_PATH" \
-                --train_percent $((100 - TEST_PERCENT)) \
-                --ignore_bird_id \
-                --mode split
-        else
-            echo "  Test Set already exists."
-        fi
-        
-        # 2. Train with varying sample sizes
-        for N in "${SAMPLE_SIZES[@]}"; do
-            echo "  Running Unit Detection with N=$N samples..."
-            RUN_NAME="${SPECIES}_unit_detect_${N}"
-            TRAIN_DIR="$UNIT_WORK_DIR/train_${N}"
-            
-            # Prepare Train Set
-            if [ ! -d "$TRAIN_DIR" ]; then
-                python scripts/split_train_test.py \
-                    --mode sample \
-                    --spec_dir "$POOL_DIR" \
-                    --train_dir "$TRAIN_DIR" \
-                    --n_samples "$N"
-            fi
-            
-            # Run Training
-            LOG_FILE="runs/$RUN_NAME/loss_log.txt"
-            if [ ! -f "$LOG_FILE" ]; then
-                python src/supervised_train.py \
-                    --train_dir "$TRAIN_DIR" \
-                    --val_dir "$TEST_DIR" \
-                    --run_name "$RUN_NAME" \
-                    --pretrained_run "$PRETRAINED_RUN" \
-                    --annotation_file "$ANNOT_PATH" \
-                    --mode unit_detect \
-                    --steps "$STEPS" \
-                    --batch_size "$BATCH_SIZE" \
-                    --num_workers "$NUM_WORKERS" \
-                    --amp \
-                    --no-save_intermediate_checkpoints \
-                    $PROBE_ARGS
-            else
-                echo "    Skipping training (run exists)"
-            fi
-            
-            # Extract Metrics
-            # Col 7 is val_f1 (same logging format as detect)
-            VAL_F1=$(tail -n +2 "$LOG_FILE" | cut -d',' -f7 | sort -n | tail -n 1)
-            if [ -z "$VAL_F1" ]; then VAL_F1="0"; fi
-            
-            # Error = 100 - F1
-            ERROR=$(python -c "print(100 - float('$VAL_F1'))")
-            
-            echo "unit_detect,$SPECIES,all,$N,$RUN_NAME,F1_Error,$ERROR" >> "$RESULTS_CSV"
-            echo "    Result: F1 Error = $ERROR %"
-        done
 
-        # Cleanup copied spec files for this task to avoid filling disk
-        echo "  Cleaning up copied Unit Detection files for $SPECIES..."
-        rm -rf "$UNIT_WORK_DIR"
+        # Discover Individuals
+        BIRDS=$(python -c "import json; d=json.load(open('$ANNOT_PATH')); print(' '.join(sorted(list(set(r['recording']['bird_id'] for r in d['recordings'])))))")
+        echo "  Found individuals: $BIRDS"
+
+        BIRD_COUNT=0
+        for BIRD in $BIRDS; do
+            if [ "$BIRD_COUNT" -ge "$MAX_BIRDS" ]; then
+                echo "  Reached max birds ($MAX_BIRDS). Skipping remaining individuals."
+                break
+            fi
+            # With `set -e`, `((var++))` can exit the script on the first iteration (returns status 1 when var was 0).
+            ((BIRD_COUNT+=1))
+
+            echo "  Processing Individual: $BIRD"
+            UNIT_BIRD_DIR="$UNIT_WORK_DIR/$BIRD"
+            mkdir -p "$UNIT_BIRD_DIR"
+
+            BIRD_POOL="$UNIT_BIRD_DIR/pool_source"
+            BIRD_TRAIN_POOL="$UNIT_BIRD_DIR/pool_train"
+            BIRD_TEST="$UNIT_BIRD_DIR/test"
+
+            # 1. Extract Bird Files
+            if [ ! -d "$BIRD_POOL" ]; then
+                python scripts/split_train_test.py \
+                    --mode filter_bird \
+                    --spec_dir "$SPEC_DIR" \
+                    --train_dir "$BIRD_POOL" \
+                    --annotation_json "$ANNOT_PATH" \
+                    --bird_id "$BIRD"
+            fi
+
+            # 2. Split into Train Pool and Test (random within bird)
+            if [ ! -d "$BIRD_TEST" ]; then
+                FILTERED_ANNOT="$BIRD_POOL/annotations_filtered.json"
+                if [ ! -f "$FILTERED_ANNOT" ]; then
+                    FILTERED_ANNOT="$ANNOT_PATH"
+                fi
+                python scripts/split_train_test.py \
+                    --mode split \
+                    --spec_dir "$BIRD_POOL" \
+                    --train_dir "$BIRD_TRAIN_POOL" \
+                    --test_dir "$BIRD_TEST" \
+                    --annotation_json "$FILTERED_ANNOT" \
+                    --train_percent $((100 - TEST_PERCENT)) \
+                    --ignore_bird_id
+            fi
+
+            # 3. Train with varying sample sizes
+            for N in "${SAMPLE_SIZES[@]}"; do
+                echo "    Running Unit Detection with N=$N samples..."
+                RUN_NAME="${RUN_PREFIX}${SPECIES}_${BIRD}_unit_detect_${N}"
+                TRAIN_DIR="$UNIT_BIRD_DIR/train_${N}"
+
+                # Prepare Train Set
+                if [ ! -d "$TRAIN_DIR" ]; then
+                    python scripts/split_train_test.py \
+                        --mode sample \
+                        --spec_dir "$BIRD_TRAIN_POOL" \
+                        --train_dir "$TRAIN_DIR" \
+                        --n_samples "$N"
+                fi
+
+                # Run Training
+                LOG_FILE="runs/$RUN_NAME/loss_log.txt"
+                if [ ! -f "$LOG_FILE" ]; then
+                    python src/supervised_train.py \
+                        --train_dir "$TRAIN_DIR" \
+                        --val_dir "$BIRD_TEST" \
+                        --run_name "$RUN_NAME" \
+                        --pretrained_run "$PRETRAINED_RUN" \
+                        --annotation_file "$ANNOT_PATH" \
+                        --mode unit_detect \
+                        --steps "$STEPS" \
+                        --batch_size "$BATCH_SIZE" \
+                        --num_workers "$NUM_WORKERS" \
+                        --amp \
+                        --no-save_intermediate_checkpoints \
+                        $PROBE_ARGS
+                else
+                    echo "    Skipping training (run exists)"
+                fi
+
+                # Extract Metrics
+                # Col 7 is val_f1 (same logging format as detect)
+                VAL_F1=$(tail -n +2 "$LOG_FILE" | cut -d',' -f7 | sort -n | tail -n 1)
+                if [ -z "$VAL_F1" ]; then VAL_F1="0"; fi
+
+                # Error = 100 - F1
+                ERROR=$(python -c "print(100 - float('$VAL_F1'))")
+
+                echo "unit_detect,$SPECIES,$BIRD,$N,$RUN_NAME,F1_Error,$ERROR" >> "$RESULTS_CSV"
+                echo "      Result: F1 Error = $ERROR %"
+            done
+
+            # Cleanup copied spec files for this bird to avoid filling disk
+            echo "  Cleaning up copied Unit Detection files for $SPECIES / $BIRD..."
+            rm -rf "$UNIT_BIRD_DIR"
+        done
     else
         echo "Skipping Unit Detection Task (TASK_MODE=$TASK_MODE)"
     fi
@@ -407,7 +449,7 @@ for ENTRY in "${SPECIES_LIST[@]}"; do
             # 3. Train with varying sample sizes
             for N in "${SAMPLE_SIZES[@]}"; do
                 echo "    Running Classification with N=$N samples..."
-                RUN_NAME="${SPECIES}_${BIRD}_classify_${N}"
+                RUN_NAME="${RUN_PREFIX}${SPECIES}_${BIRD}_classify_${N}"
                 TRAIN_DIR="$CLS_WORK_DIR/train_${N}"
                 
                 # Prepare Train Set
@@ -458,6 +500,7 @@ for ENTRY in "${SPECIES_LIST[@]}"; do
     else
         echo "Skipping Classification Task (TASK_MODE=$TASK_MODE)"
     fi
+    done
 done
 
 # Generate Plots
@@ -469,4 +512,3 @@ echo "Cleaning up temporary files..."
 rm -rf "$RESULTS_DIR/work"
 
 echo "Benchmark Completed! See $RESULTS_DIR"
-

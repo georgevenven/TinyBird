@@ -502,9 +502,16 @@ def plot_layerwise_probe_results(results_csv: str, output_dir: str) -> None:
     metric_list = sorted(list(set(d.get("metric_name", "Metric") for d in data)))
     sample_sizes = sorted(list(set(d["samples"] for d in data)))
 
-    # Colors by sample size
-    colors = plt.cm.tab10(np.linspace(0, 1, max(len(sample_sizes), 1)))
-    sample_color = dict(zip(sample_sizes, colors))
+    # Colors by species; line style/marker by sample size.
+    if len(species_list) <= 10:
+        colors = plt.cm.tab10(np.linspace(0, 1, 10))[:len(species_list)]
+    else:
+        colors = plt.cm.viridis(np.linspace(0, 1, len(species_list)))
+    species_color = dict(zip(species_list, colors))
+    line_styles = ["-", "--", "-.", ":"]
+    markers = ["o", "s", "D", "^", "v", "P", "X", "*"]
+    sample_style = {s: line_styles[i % len(line_styles)] for i, s in enumerate(sample_sizes)}
+    sample_marker = {s: markers[i % len(markers)] for i, s in enumerate(sample_sizes)}
 
     with plt.rc_context({
         'font.size': 24,
@@ -516,20 +523,20 @@ def plot_layerwise_probe_results(results_csv: str, output_dir: str) -> None:
         'xtick.labelsize': 18,
         'ytick.labelsize': 18,
     }):
-        for species in species_list:
-            sp_data = [d for d in data if d["species"] == species]
-            if not sp_data:
+        for metric in metric_list:
+            metric_data = [d for d in data if d.get("metric_name", metric) == metric]
+            if not metric_data:
                 continue
 
-            for metric in metric_list:
-                metric_data = [d for d in sp_data if d.get("metric_name", metric) == metric]
-                if not metric_data:
+            fig, ax = plt.subplots(figsize=(10, 6), dpi=SPEC_DPI)
+
+            for species in species_list:
+                sp_data = [d for d in metric_data if d["species"] == species]
+                if not sp_data:
                     continue
 
-                fig, ax = plt.subplots(figsize=(10, 6), dpi=SPEC_DPI)
-
                 for samples in sample_sizes:
-                    s_data = [d for d in metric_data if d["samples"] == samples]
+                    s_data = [d for d in sp_data if d["samples"] == samples]
                     if not s_data:
                         continue
 
@@ -542,23 +549,31 @@ def plot_layerwise_probe_results(results_csv: str, output_dir: str) -> None:
                     means = [float(np.mean(layer_map[l])) for l in layers]
                     stds = [float(np.std(layer_map[l])) for l in layers]
 
-                    color = sample_color[samples]
-                    ax.plot(layers, means, marker='o', linewidth=2, color=color, label=f"{samples} samples")
+                    color = species_color[species]
+                    label = species if samples == sample_sizes[0] else "_nolegend_"
+                    ax.plot(
+                        layers,
+                        means,
+                        marker=sample_marker[samples],
+                        linestyle=sample_style[samples],
+                        linewidth=2,
+                        color=color,
+                        label=label,
+                    )
                     if any(s > 0 for s in stds):
                         lower = [m - s for m, s in zip(means, stds)]
                         upper = [m + s for m, s in zip(means, stds)]
-                        ax.fill_between(layers, lower, upper, color=color, alpha=0.15)
+                        ax.fill_between(layers, lower, upper, color=color, alpha=0.1)
 
-                ax.set_xlabel("Encoder Layer")
-                ax.set_ylabel(metric.replace("_", " "))
-                ax.set_title(f"{species} Layerwise Probe")
-                ax.xaxis.set_major_locator(ticker.MaxNLocator(integer=True))
-                ax.grid(True, alpha=0.2)
-                ax.legend()
+            ax.set_xlabel("Encoder Layer")
+            ax.set_ylabel(metric.replace("_", " "))
+            ax.xaxis.set_major_locator(ticker.MaxNLocator(integer=True))
+            ax.grid(True, alpha=0.2)
+            ax.legend(fontsize=14)
 
-                safe_metric = metric.replace(" ", "_")
-                fig.savefig(os.path.join(output_dir, f"layerwise_{safe_metric}_{species}.png"), bbox_inches='tight')
-                plt.close(fig)
+            safe_metric = metric.replace(" ", "_")
+            fig.savefig(os.path.join(output_dir, f"layerwise_{safe_metric}_all_species.png"), bbox_inches='tight')
+            plt.close(fig)
 
 
 def plot_theoretical_resolution_limit(results_csv: str, output_dir: str) -> None:

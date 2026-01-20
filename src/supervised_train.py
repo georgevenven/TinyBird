@@ -13,7 +13,7 @@ import numpy as np
 import torch
 from torch import nn
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR
+from torch.optim.lr_scheduler import LambdaLR
 
 class SupervisedTinyBird(nn.Module):
     def __init__(self, pretrained_model, config, num_classes=2, freeze_encoder=True, mode="detect", linear_probe=False):
@@ -289,7 +289,7 @@ class Trainer():
         trainable_params = [p for p in self.model.parameters() if p.requires_grad]
         self.optimizer = AdamW(trainable_params, lr=config["lr"], weight_decay=config["weight_decay"])
         
-        # Initialize LR scheduler (optional warmup + decay to min_lr)
+        # Initialize LR scheduler (optional warmup + decay to min_lr; default: no scheduler)
         warmup_steps = int(config.get("warmup_steps", 0))
         min_lr = float(config.get("min_lr", 0.0))
         if warmup_steps < 0:
@@ -297,6 +297,7 @@ class Trainer():
         if min_lr < 0:
             raise ValueError(f"min_lr must be >= 0. Got {min_lr}")
 
+        self.scheduler = None
         if warmup_steps > 0 or min_lr > 0.0:
             total_steps = int(config["steps"])
             base_lr = float(config["lr"])
@@ -315,9 +316,6 @@ class Trainer():
                 return target_lr / base_lr if base_lr > 0 else 1.0
 
             self.scheduler = LambdaLR(self.optimizer, lr_lambda=lr_lambda)
-        else:
-            # Default behavior: cosine annealing to 0
-            self.scheduler = CosineAnnealingLR(self.optimizer, T_max=config["steps"])
         
         # Initialize AMP scaler if AMP is enabled
         self.use_amp = config.get("amp", False)
@@ -553,7 +551,8 @@ class Trainer():
             else:
                 loss.backward()
                 self.optimizer.step()
-            self.scheduler.step()
+            if self.scheduler is not None:
+                self.scheduler.step()
         
         return loss.item(), accuracy, f1, logits
     
@@ -749,7 +748,10 @@ class Trainer():
                 last_eval_step = step_num
                 
                 # Print progress
-                current_lr = self.scheduler.get_last_lr()[0]
+                if self.scheduler is not None:
+                    current_lr = self.scheduler.get_last_lr()[0]
+                else:
+                    current_lr = self.optimizer.param_groups[0]["lr"]
                 if self.config["mode"] in ["detect", "unit_detect"] or self.config.get("log_f1", False):
                     # train_f1 / val_f1 are expected to be non-None when log_f1 is enabled
                     print(f"Step {step_num} ({progress_pct:.1f}%): "
