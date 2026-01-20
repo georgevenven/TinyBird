@@ -29,7 +29,7 @@ TRAIN_DIR="${MY_SCRATCH}/XCM_Train"
 VAL_DIR="${MY_SCRATCH}/XCM_Test"
 mkdir -p "${SPEC_DIR}" logs
 
-RUN_NAME="xcm_voronoi_mask_no_normalize_32h_1w"
+RUN_NAME="xcm_voronoi_mask_no_normalize_128h_1w"
 
 python -u src/pretrain.py \
   --train_dir "$TRAIN_DIR" \
@@ -47,7 +47,7 @@ python -u src/pretrain.py \
   --warmup_steps 1000 \
   --min_lr 0.00001 \
   --weight_decay 0.1 \
-  --patch_height 32 \
+  --patch_height 128 \
   --patch_width 1 \
   --num_timebins 1024 \
   --enc_hidden_d 384 \
