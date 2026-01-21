@@ -25,6 +25,10 @@ STEPS=100
 BATCH_SIZE=24
 NUM_WORKERS=4
 MAX_BIRDS=3
+POOL_SIZE=0
+MAX_TRAIN=0
+POOL_SEED=42
+RUN_TAG=""
 
 # Probe Type: "linear", "finetune", or comma-separated list (e.g. "linear,finetune")
 PROBE_MODE="finetune"
@@ -77,12 +81,60 @@ while [[ $# -gt 0 ]]; do
         MAX_BIRDS="$2"
         shift 2
         ;;
+        --sample_sizes)
+        IFS=',' read -r -a SAMPLE_SIZES <<< "$2"
+        shift 2
+        ;;
+        --pool_size)
+        POOL_SIZE="$2"
+        shift 2
+        ;;
+        --max_train)
+        MAX_TRAIN="$2"
+        shift 2
+        ;;
+        --pool_seed)
+        POOL_SEED="$2"
+        shift 2
+        ;;
+        --run_tag)
+        RUN_TAG="$2"
+        shift 2
+        ;;
         *)
         echo "Unknown argument: $1"
         shift 1
         ;;
     esac
 done
+
+# Validate pooled sampling config
+if [ "$POOL_SIZE" -gt 0 ] || [ "$MAX_TRAIN" -gt 0 ]; then
+    if [ "$POOL_SIZE" -le 0 ] || [ "$MAX_TRAIN" -le 0 ]; then
+        echo "Error: --pool_size and --max_train must both be > 0"
+        exit 1
+    fi
+    if [ -z "$RUN_TAG" ]; then
+        RUN_TAG="pool${POOL_SIZE}_train${MAX_TRAIN}"
+    fi
+fi
+
+MAX_SAMPLE=0
+for N in "${SAMPLE_SIZES[@]}"; do
+    if [ "$N" -gt "$MAX_SAMPLE" ]; then
+        MAX_SAMPLE="$N"
+    fi
+done
+if [ "$MAX_TRAIN" -gt 0 ] && [ "$MAX_SAMPLE" -gt "$MAX_TRAIN" ]; then
+    echo "Error: max sample size ($MAX_SAMPLE) exceeds --max_train ($MAX_TRAIN)"
+    exit 1
+fi
+
+RUN_TAG_PREFIX=""
+if [ -n "$RUN_TAG" ]; then
+    RUN_TAG_PREFIX="${RUN_TAG}_"
+    RESULTS_DIR="${RESULTS_DIR}_${RUN_TAG}"
+fi
 
 # Ensure results directory exists before logging
 mkdir -p "$RESULTS_DIR"
@@ -101,6 +153,10 @@ printf '  "steps": %s,\n' "$STEPS" >> "$PARAMS_JSON"
 printf '  "batch_size": %s,\n' "$BATCH_SIZE" >> "$PARAMS_JSON"
 printf '  "num_workers": %s,\n' "$NUM_WORKERS" >> "$PARAMS_JSON"
 printf '  "max_birds": %s,\n' "$MAX_BIRDS" >> "$PARAMS_JSON"
+printf '  "pool_size": %s,\n' "$POOL_SIZE" >> "$PARAMS_JSON"
+printf '  "max_train": %s,\n' "$MAX_TRAIN" >> "$PARAMS_JSON"
+printf '  "pool_seed": %s,\n' "$POOL_SEED" >> "$PARAMS_JSON"
+printf '  "run_tag": "%s",\n' "$RUN_TAG" >> "$PARAMS_JSON"
 printf '  "sample_sizes": [' >> "$PARAMS_JSON"
 for i in "${!SAMPLE_SIZES[@]}"; do
     if [ "$i" -gt 0 ]; then printf ', ' >> "$PARAMS_JSON"; fi
@@ -116,6 +172,11 @@ echo "   PRETRAINED_RUN: $PRETRAINED_RUN"
 echo "   TASK_MODE: $TASK_MODE"
 echo "   PROBE_MODE: $PROBE_MODE"
 echo "   MAX_BIRDS: $MAX_BIRDS"
+echo "   SAMPLE_SIZES: ${SAMPLE_SIZES[*]}"
+echo "   POOL_SIZE: $POOL_SIZE"
+echo "   MAX_TRAIN: $MAX_TRAIN"
+echo "   POOL_SEED: $POOL_SEED"
+echo "   RUN_TAG: $RUN_TAG"
 
 
 # Species Map: "SpeciesName:AnnotationFile:SpecSubDir"
@@ -151,6 +212,103 @@ task_enabled() {
     [[ ",$TASK_MODE," == *",$1,"* ]]
 }
 
+has_npy() {
+    local dir="$1"
+    if ls "$dir"/*.npy >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
+make_train_order() {
+    local pool_dir="$1"
+    local seed="$2"
+    local order_file="$pool_dir/train_order.txt"
+    if [ ! -f "$order_file" ]; then
+        python - <<PY
+import random
+from pathlib import Path
+pool = Path("$pool_dir")
+files = sorted(pool.glob("*.npy"))
+random.seed(int($seed))
+random.shuffle(files)
+with open("$order_file", "w") as f:
+    for p in files:
+        f.write(p.name + "\\n")
+PY
+    fi
+}
+
+make_fixed_pool() {
+    local src_dir="$1"
+    local pool_dir="$2"
+    local test_dir="$3"
+    local pool_size="$4"
+    local max_train="$5"
+    local seed="$6"
+
+    if [ ! -d "$pool_dir" ] || ! has_npy "$pool_dir"; then
+        python scripts/split_train_test.py \
+            --mode sample \
+            --spec_dir "$src_dir" \
+            --train_dir "$pool_dir" \
+            --n_samples "$pool_size" \
+            --seed "$seed"
+    fi
+
+    local actual_count
+    actual_count=$(python - <<PY
+from pathlib import Path
+pool = Path("$pool_dir")
+print(len(list(pool.glob("*.npy"))))
+PY
+)
+
+    local test_count=$((actual_count - max_train))
+    if [ "$test_count" -lt 0 ]; then
+        test_count=0
+    fi
+
+    if [ "$test_count" -gt 0 ] && { [ ! -d "$test_dir" ] || ! has_npy "$test_dir"; }; then
+        python scripts/split_train_test.py \
+            --mode sample \
+            --spec_dir "$pool_dir" \
+            --train_dir "$test_dir" \
+            --n_samples "$test_count" \
+            --seed "$seed" \
+            --move
+    fi
+
+    make_train_order "$pool_dir" "$seed"
+}
+
+copy_train_subset() {
+    local pool_dir="$1"
+    local train_dir="$2"
+    local n_samples="$3"
+    if [ ! -d "$train_dir" ] || ! has_npy "$train_dir"; then
+        mkdir -p "$train_dir"
+        python - <<PY
+from pathlib import Path
+import shutil
+
+pool = Path("$pool_dir")
+train = Path("$train_dir")
+order = pool / "train_order.txt"
+names = [line.strip() for line in order.read_text().splitlines() if line.strip()]
+limit = int($n_samples)
+for name in names[:limit]:
+    src = pool / name
+    if src.exists():
+        shutil.copy2(src, train / src.name)
+
+audio_params = pool / "audio_params.json"
+if audio_params.exists():
+    shutil.copy2(audio_params, train / audio_params.name)
+PY
+    fi
+}
+
 # Loop over Probe Modes
 for PROBE in "${PROBE_MODES[@]}"; do
     PROBE="${PROBE// /}"
@@ -167,6 +325,8 @@ for PROBE in "${PROBE_MODES[@]}"; do
         echo "Unknown probe mode: $PROBE (skipping)"
         continue
     fi
+
+    RUN_PREFIX="${RUN_PREFIX}${RUN_TAG_PREFIX}"
 
     # Loop over Species
     for ENTRY in "${SPECIES_LIST[@]}"; do
@@ -204,23 +364,28 @@ for PROBE in "${PROBE_MODES[@]}"; do
         POOL_DIR="$DET_WORK_DIR/pool"
         TEST_DIR="$DET_WORK_DIR/test"
         
-        # Check if already prepared
-        if [ ! -d "$TEST_DIR" ] || [ -z "$(ls -A $TEST_DIR)" ]; then
-            echo "  Creating Test Set..."
-            # We use split_train_test.py to split ALL species data into Pool (Train) and Test
-            # We ignore bird_id for detection split to mix all individuals? 
-            # Or do we keep bird separation? 
-            # "there we only need to keep seperate species" -> Combine all birds.
-            python scripts/split_train_test.py \
-                --spec_dir "$SPEC_DIR" \
-                --train_dir "$POOL_DIR" \
-                --test_dir "$TEST_DIR" \
-                --annotation_json "$ANNOT_PATH" \
-                --train_percent $((100 - TEST_PERCENT)) \
-                --ignore_bird_id \
-                --mode split
+        if [ "$POOL_SIZE" -gt 0 ] && [ "$MAX_TRAIN" -gt 0 ]; then
+            echo "  Creating Fixed Pool/Test Split (pool=$POOL_SIZE, max_train=$MAX_TRAIN)..."
+            make_fixed_pool "$SPEC_DIR" "$POOL_DIR" "$TEST_DIR" "$POOL_SIZE" "$MAX_TRAIN" "$POOL_SEED"
         else
-            echo "  Test Set already exists."
+            # Check if already prepared
+            if [ ! -d "$TEST_DIR" ] || ! has_npy "$TEST_DIR"; then
+                echo "  Creating Test Set..."
+                # We use split_train_test.py to split ALL species data into Pool (Train) and Test
+                # We ignore bird_id for detection split to mix all individuals? 
+                # Or do we keep bird separation? 
+                # "there we only need to keep seperate species" -> Combine all birds.
+                python scripts/split_train_test.py \
+                    --spec_dir "$SPEC_DIR" \
+                    --train_dir "$POOL_DIR" \
+                    --test_dir "$TEST_DIR" \
+                    --annotation_json "$ANNOT_PATH" \
+                    --train_percent $((100 - TEST_PERCENT)) \
+                    --ignore_bird_id \
+                    --mode split
+            else
+                echo "  Test Set already exists."
+            fi
         fi
         
         # 2. Train with varying sample sizes
@@ -230,12 +395,16 @@ for PROBE in "${PROBE_MODES[@]}"; do
             TRAIN_DIR="$DET_WORK_DIR/train_${N}"
             
             # Prepare Train Set
-            if [ ! -d "$TRAIN_DIR" ]; then
-                python scripts/split_train_test.py \
-                    --mode sample \
-                    --spec_dir "$POOL_DIR" \
-                    --train_dir "$TRAIN_DIR" \
-                    --n_samples "$N"
+            if [ "$POOL_SIZE" -gt 0 ] && [ "$MAX_TRAIN" -gt 0 ]; then
+                copy_train_subset "$POOL_DIR" "$TRAIN_DIR" "$N"
+            else
+                if [ ! -d "$TRAIN_DIR" ]; then
+                    python scripts/split_train_test.py \
+                        --mode sample \
+                        --spec_dir "$POOL_DIR" \
+                        --train_dir "$TRAIN_DIR" \
+                        --n_samples "$N"
+                fi
             fi
             
             # Run Training
@@ -308,6 +477,7 @@ for PROBE in "${PROBE_MODES[@]}"; do
             BIRD_POOL="$UNIT_BIRD_DIR/pool_source"
             BIRD_TRAIN_POOL="$UNIT_BIRD_DIR/pool_train"
             BIRD_TEST="$UNIT_BIRD_DIR/test"
+            BIRD_POOL_FIXED="$UNIT_BIRD_DIR/pool_fixed"
 
             # 1. Extract Bird Files
             if [ ! -d "$BIRD_POOL" ]; then
@@ -320,19 +490,25 @@ for PROBE in "${PROBE_MODES[@]}"; do
             fi
 
             # 2. Split into Train Pool and Test (random within bird)
-            if [ ! -d "$BIRD_TEST" ]; then
-                FILTERED_ANNOT="$BIRD_POOL/annotations_filtered.json"
-                if [ ! -f "$FILTERED_ANNOT" ]; then
-                    FILTERED_ANNOT="$ANNOT_PATH"
+            if [ "$POOL_SIZE" -gt 0 ] && [ "$MAX_TRAIN" -gt 0 ]; then
+                make_fixed_pool "$BIRD_POOL" "$BIRD_POOL_FIXED" "$BIRD_TEST" "$POOL_SIZE" "$MAX_TRAIN" "$POOL_SEED"
+                TRAIN_POOL_DIR="$BIRD_POOL_FIXED"
+            else
+                if [ ! -d "$BIRD_TEST" ] || ! has_npy "$BIRD_TEST"; then
+                    FILTERED_ANNOT="$BIRD_POOL/annotations_filtered.json"
+                    if [ ! -f "$FILTERED_ANNOT" ]; then
+                        FILTERED_ANNOT="$ANNOT_PATH"
+                    fi
+                    python scripts/split_train_test.py \
+                        --mode split \
+                        --spec_dir "$BIRD_POOL" \
+                        --train_dir "$BIRD_TRAIN_POOL" \
+                        --test_dir "$BIRD_TEST" \
+                        --annotation_json "$FILTERED_ANNOT" \
+                        --train_percent $((100 - TEST_PERCENT)) \
+                        --ignore_bird_id
                 fi
-                python scripts/split_train_test.py \
-                    --mode split \
-                    --spec_dir "$BIRD_POOL" \
-                    --train_dir "$BIRD_TRAIN_POOL" \
-                    --test_dir "$BIRD_TEST" \
-                    --annotation_json "$FILTERED_ANNOT" \
-                    --train_percent $((100 - TEST_PERCENT)) \
-                    --ignore_bird_id
+                TRAIN_POOL_DIR="$BIRD_TRAIN_POOL"
             fi
 
             # 3. Train with varying sample sizes
@@ -342,12 +518,16 @@ for PROBE in "${PROBE_MODES[@]}"; do
                 TRAIN_DIR="$UNIT_BIRD_DIR/train_${N}"
 
                 # Prepare Train Set
-                if [ ! -d "$TRAIN_DIR" ]; then
-                    python scripts/split_train_test.py \
-                        --mode sample \
-                        --spec_dir "$BIRD_TRAIN_POOL" \
-                        --train_dir "$TRAIN_DIR" \
-                        --n_samples "$N"
+                if [ "$POOL_SIZE" -gt 0 ] && [ "$MAX_TRAIN" -gt 0 ]; then
+                    copy_train_subset "$TRAIN_POOL_DIR" "$TRAIN_DIR" "$N"
+                else
+                    if [ ! -d "$TRAIN_DIR" ]; then
+                        python scripts/split_train_test.py \
+                            --mode sample \
+                            --spec_dir "$TRAIN_POOL_DIR" \
+                            --train_dir "$TRAIN_DIR" \
+                            --n_samples "$N"
+                    fi
                 fi
 
                 # Run Training
@@ -418,6 +598,7 @@ for PROBE in "${PROBE_MODES[@]}"; do
             BIRD_POOL="$CLS_WORK_DIR/pool_source"
             BIRD_TRAIN_POOL="$CLS_WORK_DIR/pool_train"
             BIRD_TEST="$CLS_WORK_DIR/test"
+            BIRD_POOL_FIXED="$CLS_WORK_DIR/pool_fixed"
             
             # 1. Extract Bird Files
             if [ ! -d "$BIRD_POOL" ]; then
@@ -430,20 +611,26 @@ for PROBE in "${PROBE_MODES[@]}"; do
             fi
             
             # 2. Split into Train Pool and Test
-            if [ ! -d "$BIRD_TEST" ]; then
-                # Use bird-filtered annotation JSON if present (more efficient than scanning full species annotations)
-                FILTERED_ANNOT="$BIRD_POOL/annotations_filtered.json"
-                if [ ! -f "$FILTERED_ANNOT" ]; then
-                    FILTERED_ANNOT="$ANNOT_PATH"
+            if [ "$POOL_SIZE" -gt 0 ] && [ "$MAX_TRAIN" -gt 0 ]; then
+                make_fixed_pool "$BIRD_POOL" "$BIRD_POOL_FIXED" "$BIRD_TEST" "$POOL_SIZE" "$MAX_TRAIN" "$POOL_SEED"
+                TRAIN_POOL_DIR="$BIRD_POOL_FIXED"
+            else
+                if [ ! -d "$BIRD_TEST" ] || ! has_npy "$BIRD_TEST"; then
+                    # Use bird-filtered annotation JSON if present (more efficient than scanning full species annotations)
+                    FILTERED_ANNOT="$BIRD_POOL/annotations_filtered.json"
+                    if [ ! -f "$FILTERED_ANNOT" ]; then
+                        FILTERED_ANNOT="$ANNOT_PATH"
+                    fi
+                    python scripts/split_train_test.py \
+                        --mode split \
+                        --spec_dir "$BIRD_POOL" \
+                        --train_dir "$BIRD_TRAIN_POOL" \
+                        --test_dir "$BIRD_TEST" \
+                        --annotation_json "$FILTERED_ANNOT" \
+                        --train_percent $((100 - TEST_PERCENT)) \
+                        --ignore_bird_id # Already filtered by bird, so random split is fine
                 fi
-                python scripts/split_train_test.py \
-                    --mode split \
-                    --spec_dir "$BIRD_POOL" \
-                    --train_dir "$BIRD_TRAIN_POOL" \
-                    --test_dir "$BIRD_TEST" \
-                    --annotation_json "$FILTERED_ANNOT" \
-                    --train_percent $((100 - TEST_PERCENT)) \
-                    --ignore_bird_id # Already filtered by bird, so random split is fine
+                TRAIN_POOL_DIR="$BIRD_TRAIN_POOL"
             fi
             
             # 3. Train with varying sample sizes
@@ -453,12 +640,16 @@ for PROBE in "${PROBE_MODES[@]}"; do
                 TRAIN_DIR="$CLS_WORK_DIR/train_${N}"
                 
                 # Prepare Train Set
-                if [ ! -d "$TRAIN_DIR" ]; then
-                    python scripts/split_train_test.py \
-                        --mode sample \
-                        --spec_dir "$BIRD_TRAIN_POOL" \
-                        --train_dir "$TRAIN_DIR" \
-                        --n_samples "$N"
+                if [ "$POOL_SIZE" -gt 0 ] && [ "$MAX_TRAIN" -gt 0 ]; then
+                    copy_train_subset "$TRAIN_POOL_DIR" "$TRAIN_DIR" "$N"
+                else
+                    if [ ! -d "$TRAIN_DIR" ]; then
+                        python scripts/split_train_test.py \
+                            --mode sample \
+                            --spec_dir "$TRAIN_POOL_DIR" \
+                            --train_dir "$TRAIN_DIR" \
+                            --n_samples "$N"
+                    fi
                 fi
                 
                 # Run Training
