@@ -420,6 +420,7 @@ for PROBE in "${PROBE_MODES[@]}"; do
                     --mode detect \
                     --steps "$STEPS" \
                     --batch_size "$BATCH_SIZE" \
+                    --val_batch_size 1 \
                     --num_workers "$NUM_WORKERS" \
                     --amp \
                     --no-save_intermediate_checkpoints \
@@ -542,6 +543,7 @@ for PROBE in "${PROBE_MODES[@]}"; do
                         --mode unit_detect \
                         --steps "$STEPS" \
                         --batch_size "$BATCH_SIZE" \
+                    --val_batch_size 1 \
                         --num_workers "$NUM_WORKERS" \
                         --amp \
                         --no-save_intermediate_checkpoints \
@@ -664,6 +666,7 @@ for PROBE in "${PROBE_MODES[@]}"; do
                         --mode classify \
                         --steps "$STEPS" \
                         --batch_size "$BATCH_SIZE" \
+                    --val_batch_size 1 \
                         --num_workers "$NUM_WORKERS" \
                         --amp \
                         --no-save_intermediate_checkpoints \

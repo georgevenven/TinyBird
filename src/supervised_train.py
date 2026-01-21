@@ -13,7 +13,7 @@ import numpy as np
 import torch
 from torch import nn
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import LambdaLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR
 
 class SupervisedTinyBird(nn.Module):
     def __init__(self, pretrained_model, config, num_classes=2, freeze_encoder=True, mode="detect", linear_probe=False):
@@ -289,7 +289,7 @@ class Trainer():
         trainable_params = [p for p in self.model.parameters() if p.requires_grad]
         self.optimizer = AdamW(trainable_params, lr=config["lr"], weight_decay=config["weight_decay"])
         
-        # Initialize LR scheduler (optional warmup + decay to min_lr; default: no scheduler)
+        # Initialize LR scheduler (optional warmup + decay to min_lr)
         warmup_steps = int(config.get("warmup_steps", 0))
         min_lr = float(config.get("min_lr", 0.0))
         if warmup_steps < 0:
@@ -297,7 +297,6 @@ class Trainer():
         if min_lr < 0:
             raise ValueError(f"min_lr must be >= 0. Got {min_lr}")
 
-        self.scheduler = None
         if warmup_steps > 0 or min_lr > 0.0:
             total_steps = int(config["steps"])
             base_lr = float(config["lr"])
@@ -316,6 +315,9 @@ class Trainer():
                 return target_lr / base_lr if base_lr > 0 else 1.0
 
             self.scheduler = LambdaLR(self.optimizer, lr_lambda=lr_lambda)
+        else:
+            # Default behavior: cosine annealing to 0
+            self.scheduler = CosineAnnealingLR(self.optimizer, T_max=config["steps"])
         
         # Initialize AMP scaler if AMP is enabled
         self.use_amp = config.get("amp", False)
@@ -396,9 +398,9 @@ class Trainer():
         w_timebins = int(window_timebins)
         w_patches = w_timebins // patch_width
 
-        # Infer output channels from a single batch
+        # Infer output channels from a single sample to keep export inference low-memory
         first_batch = next(iter(val_loader))
-        x0 = first_batch[0].to(self.device, non_blocking=True)
+        x0 = first_batch[0][:1].to(self.device, non_blocking=True)
         with torch.no_grad():
             logits0 = self.model(x0)
         c_out = int(logits0.shape[-1])
@@ -438,10 +440,8 @@ class Trainer():
         )
         filenames_all = []  # repeated per window
 
-        # Batched inference over windows to control memory
-        batch_size = int(self.config["batch_size"])
-        if batch_size <= 0:
-            batch_size = 1
+        # Always use batch size 1 for export inference to minimize GPU memory
+        batch_size = 1
 
         with torch.no_grad():
             write_idx = 0
@@ -551,8 +551,7 @@ class Trainer():
             else:
                 loss.backward()
                 self.optimizer.step()
-            if self.scheduler is not None:
-                self.scheduler.step()
+            self.scheduler.step()
         
         return loss.item(), accuracy, f1, logits
     
@@ -644,9 +643,12 @@ class Trainer():
             pin_memory=True
         )
         
+        val_batch_size = int(self.config.get("val_batch_size", 0))
+        if val_batch_size <= 0:
+            val_batch_size = int(self.config["batch_size"])
         val_loader = DataLoader(
             val_dataset,
-            batch_size=self.config["batch_size"],
+            batch_size=val_batch_size,
             shuffle=False,
             num_workers=self.config["num_workers"],
             pin_memory=True
@@ -748,10 +750,7 @@ class Trainer():
                 last_eval_step = step_num
                 
                 # Print progress
-                if self.scheduler is not None:
-                    current_lr = self.scheduler.get_last_lr()[0]
-                else:
-                    current_lr = self.optimizer.param_groups[0]["lr"]
+                current_lr = self.scheduler.get_last_lr()[0]
                 if self.config["mode"] in ["detect", "unit_detect"] or self.config.get("log_f1", False):
                     # train_f1 / val_f1 are expected to be non-None when log_f1 is enabled
                     print(f"Step {step_num} ({progress_pct:.1f}%): "
@@ -824,6 +823,12 @@ if __name__ == "__main__":
     parser.add_argument("--steps", type=int, default=50_000, help="number of training steps")
     parser.add_argument("--lr", type=float, default=1e-3, help="learning rate")
     parser.add_argument("--batch_size", type=int, default=256, help="batch size")
+    parser.add_argument(
+        "--val_batch_size",
+        type=int,
+        default=0,
+        help="validation/inference batch size (0 uses --batch_size)",
+    )
     parser.add_argument("--num_workers", type=int, default=8, help="number of DataLoader worker processes")
     parser.add_argument("--weight_decay", type=float, default=0.1, help="weight decay")
     parser.add_argument("--eval_every", type=int, default=25, help="evaluate every N steps")
