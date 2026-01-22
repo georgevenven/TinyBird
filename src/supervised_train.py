@@ -12,6 +12,7 @@ import math
 import numpy as np
 import torch
 from torch import nn
+import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR
 
@@ -48,6 +49,7 @@ class SupervisedTinyBird(nn.Module):
         self.mels = config["mels"]
         self.mode = mode
         self.encoder_layer_idx = config.get("encoder_layer_idx", None)
+        self.class_weighting = bool(config.get("class_weighting", False))
         
         # Freeze encoder if in MLP classifier mode
         if freeze_encoder:
@@ -175,7 +177,14 @@ class SupervisedTinyBird(nn.Module):
             B, W_patches, num_classes = logits.shape
             logits_flat = logits.reshape(-1, num_classes)  # (B * W_patches, num_classes)
             labels_flat = labels_downsampled.reshape(-1)  # (B * W_patches,)
-            loss = self.loss_fn(logits_flat, labels_flat)
+            if self.class_weighting:
+                counts = torch.bincount(labels_flat, minlength=num_classes).float()
+                counts_safe = torch.where(counts > 0, counts, torch.ones_like(counts))
+                weights = counts.sum() / (counts_safe * num_classes)
+                weights = torch.where(counts > 0, weights, torch.zeros_like(weights))
+                loss = F.cross_entropy(logits_flat, labels_flat, weight=weights)
+            else:
+                loss = self.loss_fn(logits_flat, labels_flat)
         
         return loss
     
@@ -902,6 +911,7 @@ if __name__ == "__main__":
     parser.add_argument("--amp", action="store_true", help="enable automatic mixed precision training")
     parser.add_argument("--encoder_layer_idx", type=int, default=None, help="encoder layer index to probe (0..enc_n_layer-1). If omitted, uses full encoder output.")
     parser.add_argument("--log_f1", action="store_true", help="log (macro) F1 to loss_log.txt (useful for classify)")
+    parser.add_argument("--class_weighting", action="store_true", help="weight CE by inverse class frequency per batch (classify only)")
     
     # Data augmentation
     parser.add_argument("--white_noise", type=float, default=0.0, help="standard deviation of white noise to add after normalization (0.0 = no noise)")
