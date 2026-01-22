@@ -16,7 +16,16 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 
 class SupervisedTinyBird(nn.Module):
-    def __init__(self, pretrained_model, config, num_classes=2, freeze_encoder=True, mode="detect", linear_probe=False):
+    def __init__(
+        self,
+        pretrained_model,
+        config,
+        num_classes=2,
+        freeze_encoder=True,
+        freeze_encoder_up_to=None,
+        mode="detect",
+        linear_probe=False,
+    ):
         """
         Supervised classification/detection model built on top of pretrained TinyBird encoder.
         
@@ -25,6 +34,7 @@ class SupervisedTinyBird(nn.Module):
             config: Configuration dict with patch_size, etc.
             num_classes: Number of output classes (2 for detection, N for classification)
             freeze_encoder: If True, freeze encoder weights (train MLP classifier only)
+            freeze_encoder_up_to: If set, freeze encoder layers up to this index (inclusive)
             mode: "detect" for binary detection, "classify" for multi-class classification
             linear_probe: If True, use a single linear layer instead of MLP
         """
@@ -44,6 +54,30 @@ class SupervisedTinyBird(nn.Module):
             for param in self.encoder.parameters():
                 param.requires_grad = False
             print("Encoder frozen - training classifier only")
+        elif freeze_encoder_up_to is not None:
+            layers = getattr(self.encoder.encoder, "layers", None)
+            if layers is None:
+                raise RuntimeError("TinyBird.encoder does not expose .layers; cannot freeze by layer.")
+            num_layers = len(layers)
+            idx = int(freeze_encoder_up_to)
+            if idx < 0:
+                idx = num_layers + idx
+            if idx < 0 or idx >= num_layers:
+                raise ValueError(
+                    f"freeze_encoder_up_to out of range: {freeze_encoder_up_to} (num_layers={num_layers})"
+                )
+
+            # Freeze patch projection and positional embeddings (lowest encoder components).
+            for param in self.encoder.patch_projection.parameters():
+                param.requires_grad = False
+            self.encoder.pos_enc.requires_grad = False
+
+            # Freeze encoder transformer layers up to idx (inclusive).
+            for layer in layers[: idx + 1]:
+                for param in layer.parameters():
+                    param.requires_grad = False
+
+            print(f"Encoder partially frozen - frozen layers [0..{idx}]")
         else:
             print("Encoder unfrozen - finetuning entire model")
         
@@ -853,6 +887,12 @@ if __name__ == "__main__":
     
     # Model configuration
     parser.add_argument("--freeze_encoder", action="store_true", help="freeze encoder weights (train classifier only)")
+    parser.add_argument(
+        "--freeze_encoder_up_to",
+        type=int,
+        default=None,
+        help="freeze encoder layers up to this index (inclusive); negative allowed",
+    )
     parser.add_argument("--linear_probe", action="store_true", help="use single linear layer instead of MLP")
     parser.add_argument("--amp", action="store_true", help="enable automatic mixed precision training")
     parser.add_argument("--encoder_layer_idx", type=int, default=None, help="encoder layer index to probe (0..enc_n_layer-1). If omitted, uses full encoder output.")
@@ -893,6 +933,7 @@ if __name__ == "__main__":
         config=config,
         num_classes=num_classes,
         freeze_encoder=config["freeze_encoder"],
+        freeze_encoder_up_to=config.get("freeze_encoder_up_to", None),
         mode=config["mode"],
         linear_probe=config.get("linear_probe", False)
     )

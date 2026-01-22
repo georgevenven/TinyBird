@@ -2,6 +2,7 @@
 *.log
 *.json
 *.pyc
+*txt
 /recons
 /runs
 /imgs
