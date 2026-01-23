@@ -53,13 +53,20 @@ _CHUNK_MS_RE = re.compile(r"^(?P<base>.+)__ms_(?P<start>\d+)_(?P<end>\d+)$")
 
 
 def _parse_chunk_ms(stem):
-    match = _CHUNK_MS_RE.match(stem)
-    if not match:
-        return stem, None, None
-    return match.group("base"), int(match.group("start")), int(match.group("end"))
+    base = stem
+    last_start = None
+    last_end = None
+    while True:
+        match = _CHUNK_MS_RE.match(base)
+        if not match:
+            break
+        base = match.group("base")
+        last_start = int(match.group("start"))
+        last_end = int(match.group("end"))
+    return base, last_start, last_end
 
 
-def _load_events_by_stem(annotation_json, bird_id=None):
+def _load_recording_events(annotation_json, bird_id=None):
     if not annotation_json:
         return {}
     data = json.loads(Path(annotation_json).read_text(encoding="utf-8"))
@@ -72,79 +79,37 @@ def _load_events_by_stem(annotation_json, bird_id=None):
             continue
         stem = Path(fname).stem
         for event in rec.get("detected_events", []):
+            unit_ids = []
             for unit in event.get("units", []):
                 unit_id = unit.get("id")
                 if unit_id is None:
                     continue
-                events_by_stem[stem].append(
-                    {"id": int(unit_id), "onset_ms": unit["onset_ms"], "offset_ms": unit["offset_ms"]}
-                )
+                unit_ids.append(int(unit_id))
+            events_by_stem[stem].append(
+                {
+                    "onset_ms": event["onset_ms"],
+                    "offset_ms": event["offset_ms"],
+                    "unit_ids": unit_ids,
+                }
+            )
     return events_by_stem
 
 
-def _build_unit_index(spec_dir, annotation_json, bird_id=None, allowed_stems=None, mode="classify"):
-    if mode not in ["classify", "unit_detect"]:
-        return {}, set()
-    events_by_stem = _load_events_by_stem(annotation_json, bird_id=bird_id)
+def _build_event_index(spec_dir, annotation_json, bird_id=None, allowed_stems=None, mode="classify"):
+    events_by_stem = _load_recording_events(annotation_json, bird_id=bird_id)
     if not events_by_stem:
-        return {}, set()
+        return [], defaultdict(list), set()
+
     all_units = set()
     for stem, events in events_by_stem.items():
         if allowed_stems is not None and stem not in allowed_stems:
             continue
         for event in events:
-            all_units.add(event["id"])
-    events_by_unit = defaultdict(list)
-    for path in Path(spec_dir).glob("*.npy"):
-        base_stem, chunk_start, chunk_end = _parse_chunk_ms(path.stem)
-        if allowed_stems is not None and base_stem not in allowed_stems:
-            continue
-        events = events_by_stem.get(base_stem, [])
-        if not events:
-            continue
-        for event in events:
-            onset = event["onset_ms"]
-            offset = event["offset_ms"]
-            if chunk_start is not None:
-                if offset <= chunk_start or onset >= chunk_end:
-                    continue
-                local_onset = max(onset, chunk_start) - chunk_start
-                local_offset = min(offset, chunk_end) - chunk_start
-            else:
-                local_onset = onset
-                local_offset = offset
-            events_by_unit[event["id"]].append(
-                {
-                    "path": path,
-                    "base_stem": base_stem,
-                    "chunk_start": chunk_start,
-                    "onset_ms": local_onset,
-                    "offset_ms": local_offset,
-                }
-            )
-    return events_by_unit, all_units
-
-
-def _build_detect_events(spec_dir, annotation_json, bird_id=None, allowed_stems=None):
-    if not annotation_json:
-        return []
-    data = json.loads(Path(annotation_json).read_text(encoding="utf-8"))
-    events_by_stem = defaultdict(list)
-    for rec in data.get("recordings", []):
-        if bird_id and rec.get("recording", {}).get("bird_id") != bird_id:
-            continue
-        fname = rec.get("recording", {}).get("filename")
-        if not fname:
-            continue
-        stem = Path(fname).stem
-        if allowed_stems is not None and stem not in allowed_stems:
-            continue
-        for event in rec.get("detected_events", []):
-            events_by_stem[stem].append(
-                {"onset_ms": event["onset_ms"], "offset_ms": event["offset_ms"]}
-            )
+            for unit_id in event.get("unit_ids", []):
+                all_units.add(unit_id)
 
     event_pool = []
+    unit_events = defaultdict(list)
     for path in Path(spec_dir).glob("*.npy"):
         base_stem, chunk_start, chunk_end = _parse_chunk_ms(path.stem)
         if allowed_stems is not None and base_stem not in allowed_stems:
@@ -153,6 +118,8 @@ def _build_detect_events(spec_dir, annotation_json, bird_id=None, allowed_stems=
         if not events:
             continue
         for event in events:
+            if mode in ["classify", "unit_detect"] and not event.get("unit_ids"):
+                continue
             onset = event["onset_ms"]
             offset = event["offset_ms"]
             if chunk_start is not None:
@@ -160,19 +127,32 @@ def _build_detect_events(spec_dir, annotation_json, bird_id=None, allowed_stems=
                     continue
                 local_onset = max(onset, chunk_start) - chunk_start
                 local_offset = min(offset, chunk_end) - chunk_start
+                abs_onset = max(onset, chunk_start)
+                abs_offset = min(offset, chunk_end)
             else:
                 local_onset = onset
                 local_offset = offset
-            event_pool.append(
-                {
-                    "path": path,
-                    "base_stem": base_stem,
-                    "chunk_start": chunk_start,
-                    "onset_ms": local_onset,
-                    "offset_ms": local_offset,
-                }
-            )
-    return event_pool
+                abs_onset = onset
+                abs_offset = offset
+
+            if local_offset <= local_onset:
+                continue
+
+            entry = {
+                "path": path,
+                "base_stem": base_stem,
+                "chunk_start": chunk_start,
+                "onset_ms": local_onset,
+                "offset_ms": local_offset,
+                "abs_onset_ms": abs_onset,
+                "abs_offset_ms": abs_offset,
+                "unit_ids": event.get("unit_ids", []),
+            }
+            event_pool.append(entry)
+            for unit_id in entry["unit_ids"]:
+                unit_events[unit_id].append(entry)
+
+    return event_pool, unit_events, all_units
 
 
 def iter_files(spec_dir, order_file, seed, allowed_stems=None):
@@ -244,32 +224,24 @@ def sample_by_seconds(
     used_stems = set()
     total_seconds = 0.0
 
-    events_by_unit = {}
-    all_units = set()
     event_pool = []
-    if ensure_units or (event_chunks and mode in ["classify", "unit_detect"]):
-        events_by_unit, all_units = _build_unit_index(
+    unit_events = defaultdict(list)
+    all_units = set()
+    if ensure_units or event_chunks:
+        event_pool, unit_events, all_units = _build_event_index(
             spec_dir, annotation_json, bird_id=bird_id, allowed_stems=allowed_stems, mode=mode
-        )
-        if event_chunks:
-            for events in events_by_unit.values():
-                event_pool.extend(events)
-
-    if event_chunks and mode == "detect":
-        event_pool = _build_detect_events(
-            spec_dir, annotation_json, bird_id=bird_id, allowed_stems=allowed_stems
         )
 
     used_event_keys = set()
     if ensure_units:
         missing_units = []
         for unit_id in sorted(all_units):
-            events = events_by_unit.get(unit_id, [])
+            events = unit_events.get(unit_id, [])
             if not events:
                 missing_units.append(unit_id)
                 continue
             event = rng.choice(events)
-            event_key = (str(event["path"]), event["onset_ms"], event["offset_ms"])
+            event_key = (event["base_stem"], event["abs_onset_ms"], event["abs_offset_ms"])
             used_event_keys.add(event_key)
             path = event["path"]
             arr = np.load(path, mmap_mode="r")
@@ -308,12 +280,13 @@ def sample_by_seconds(
 
             chunk = np.array(arr[:, start_bin:end_bin], dtype=np.float32)
             base_stem = event["base_stem"]
-            start_ms = timebins_to_ms(start_bin, sr, hop_size)
-            end_ms = timebins_to_ms(end_bin, sr, hop_size)
-            chunk_start = event.get("chunk_start")
-            if chunk_start is not None:
-                start_ms += chunk_start
-                end_ms += chunk_start
+            if event_chunks:
+                start_ms = int(event["abs_onset_ms"])
+                end_ms = int(event["abs_offset_ms"])
+            else:
+                chunk_start = event.get("chunk_start") or 0
+                start_ms = timebins_to_ms(start_bin, sr, hop_size) + int(chunk_start)
+                end_ms = timebins_to_ms(end_bin, sr, hop_size) + int(chunk_start)
             out_name = f"{base_stem}__ms_{start_ms}_{end_ms}.npy"
             np.save(out_dir / out_name, chunk)
             used_stems.add(base_stem)
@@ -331,7 +304,7 @@ def sample_by_seconds(
         for event in event_pool:
             if total_seconds >= seconds:
                 break
-            event_key = (str(event["path"]), event["onset_ms"], event["offset_ms"])
+            event_key = (event["base_stem"], event["abs_onset_ms"], event["abs_offset_ms"])
             if event_key in used_event_keys:
                 continue
             path = event["path"]
@@ -350,12 +323,8 @@ def sample_by_seconds(
                 continue
             chunk = np.array(arr[:, start_bin:end_bin], dtype=np.float32)
             base_stem = event["base_stem"]
-            start_ms = timebins_to_ms(start_bin, sr, hop_size)
-            end_ms = timebins_to_ms(end_bin, sr, hop_size)
-            chunk_start = event.get("chunk_start")
-            if chunk_start is not None:
-                start_ms += chunk_start
-                end_ms += chunk_start
+            start_ms = int(event["abs_onset_ms"])
+            end_ms = int(event["abs_offset_ms"])
             out_name = f"{base_stem}__ms_{start_ms}_{end_ms}.npy"
             np.save(out_dir / out_name, chunk)
             used_event_keys.add(event_key)

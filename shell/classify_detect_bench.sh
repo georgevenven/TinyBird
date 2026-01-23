@@ -431,6 +431,56 @@ record_run_name() {
     fi
 }
 
+eval_val_outputs_f1() {
+    local run_name="$1"
+    local latest_csv="$EVAL_DIR/eval_f1_latest.csv"
+    local latest_summary="$EVAL_DIR/eval_f1_latest_summary.csv"
+
+    if [ -z "$run_name" ]; then
+        return
+    fi
+
+    python scripts/eval/eval_val_outputs_f1.py \
+        --runs_root "$PROJECT_ROOT/runs" \
+        --run_names "$run_name" \
+        --out_csv "$latest_csv" \
+        --summary_csv "$latest_summary"
+
+    python - <<PY
+import csv
+from pathlib import Path
+
+latest = Path("$latest_csv")
+dest = Path("$EVAL_DIR") / "eval_f1.csv"
+if not latest.exists():
+    raise SystemExit(0)
+
+with latest.open("r", encoding="utf-8") as f:
+    rows = list(csv.DictReader(f))
+if not rows:
+    raise SystemExit(0)
+
+if not dest.exists():
+    dest.write_text(latest.read_text(encoding="utf-8"), encoding="utf-8")
+    raise SystemExit(0)
+
+with dest.open("r", encoding="utf-8") as f:
+    existing = {row.get("run_name") for row in csv.DictReader(f)}
+
+new_rows = [r for r in rows if r.get("run_name") not in existing]
+if not new_rows:
+    raise SystemExit(0)
+
+with dest.open("a", encoding="utf-8") as f:
+    for r in new_rows:
+        f.write(
+            f"{r.get('probe_mode','')},{r.get('run_name','')},{r.get('mode','')},"
+            f"{r.get('species','')},{r.get('num_classes','')},{r.get('patch_width','')},"
+            f"{r.get('f1','')}\n"
+        )
+PY
+}
+
 write_filtered_annotations() {
     local annot_path="$1"
     local bird_id="$2"
@@ -604,6 +654,10 @@ PY
             else
                 echo "    Skipping training (run exists)"
             fi
+
+            if [ -d "runs/$RUN_NAME/val_outputs" ]; then
+                eval_val_outputs_f1 "$RUN_NAME"
+            fi
             
             # Extract Metrics
             # Col 7 is val_f1
@@ -712,6 +766,10 @@ PY
                     echo "    Skipping training (run exists)"
                 fi
 
+                if [ -d "runs/$RUN_NAME/val_outputs" ]; then
+                    eval_val_outputs_f1 "$RUN_NAME"
+                fi
+
                 # Extract Metrics
                 # Col 7 is val_f1 (same logging format as detect)
                 VAL_F1=$(tail -n +2 "$LOG_FILE" | cut -d',' -f7 | sort -n | tail -n 1)
@@ -817,6 +875,10 @@ PY
                 else
                     echo "      Skipping training (run exists)"
                 fi
+
+                if [ -d "runs/$RUN_NAME/val_outputs" ]; then
+                    eval_val_outputs_f1 "$RUN_NAME"
+                fi
                 
                 # Extract Metrics
                 # Col 5 is val_acc
@@ -844,12 +906,7 @@ done
 echo "Generating Plots..."
 python -c "from src.plotting_utils import plot_benchmark_results; plot_benchmark_results('$RESULTS_CSV', '$RESULTS_DIR')"
 
-echo "Evaluating val_outputs F1..."
-python scripts/eval/eval_val_outputs_f1.py \
-    --runs_root "$PROJECT_ROOT/runs" \
-    --run_names_file "$RUNS_LIST_FILE" \
-    --out_csv "$EVAL_DIR/eval_f1.csv" \
-    --summary_csv "$EVAL_DIR/eval_f1_summary.csv"
+echo "Evaluating val_outputs F1 per run..."
 
 python - <<PY
 import csv

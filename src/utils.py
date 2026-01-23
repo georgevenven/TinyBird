@@ -204,10 +204,17 @@ _CHUNK_MS_RE = re.compile(r"^(?P<base>.+)__ms_(?P<start>\d+)_(?P<end>\d+)$")
 
 def parse_chunk_ms(filename):
     stem = Path(filename).stem
-    match = _CHUNK_MS_RE.match(stem)
-    if not match:
-        return stem, None, None
-    return match.group("base"), int(match.group("start")), int(match.group("end"))
+    base = stem
+    last_start = None
+    last_end = None
+    while True:
+        match = _CHUNK_MS_RE.match(base)
+        if not match:
+            break
+        base = match.group("base")
+        last_start = int(match.group("start"))
+        last_end = int(match.group("end"))
+    return base, last_start, last_end
 
 
 def clip_labels_to_chunk(labels, chunk_start_ms, chunk_end_ms):
