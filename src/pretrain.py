@@ -63,6 +63,12 @@ class Trainer():
                 print(f"Moved existing run directory to: {archived_path}")
             
             os.makedirs(self.run_path, exist_ok=True)
+
+            audio_params_src = os.path.join(config.get("train_dir", ""), "audio_params.json")
+            if os.path.isfile(audio_params_src):
+                shutil.copy2(audio_params_src, os.path.join(self.run_path, "audio_params.json"))
+            else:
+                print(f"Warning: audio_params.json not found in train_dir: {audio_params_src}")
         
         # Create subdirectories
         self.weights_path = os.path.join(self.run_path, "weights")

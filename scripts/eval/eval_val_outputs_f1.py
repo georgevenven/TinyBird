@@ -16,7 +16,28 @@ from typing import Dict, Iterable, List, Tuple
 import numpy as np
 
 
+def _infer_probe_mode(run_name: str) -> str:
+    name = run_name.lower()
+    if name.startswith("linear") or name.startswith("linear_") or name.startswith("linear/"):
+        return "linear"
+    if name.startswith("finetune") or name.startswith("finetune_") or name.startswith("finetune/"):
+        return "finetune"
+    return "unknown"
+
+
 def _iter_run_dirs(runs_root: Path) -> Iterable[Tuple[str, Path]]:
+    flat_runs: List[Path] = []
+    for child in sorted(runs_root.iterdir()):
+        if not child.is_dir():
+            continue
+        if (child / "val_outputs").exists() or (child / "config.json").exists():
+            flat_runs.append(child)
+
+    if flat_runs:
+        for run_dir in flat_runs:
+            yield _infer_probe_mode(run_dir.name), run_dir
+        return
+
     for probe_dir in sorted(runs_root.iterdir()):
         if not probe_dir.is_dir():
             continue
@@ -133,6 +154,24 @@ def main() -> None:
         help="Root folder containing runs/finetuned and runs/linear_probe",
     )
     parser.add_argument(
+        "--runs_root",
+        type=str,
+        default=None,
+        help="Optional direct path to runs directory (supports flat or probe-mode subdirs).",
+    )
+    parser.add_argument(
+        "--run_names",
+        type=str,
+        default=None,
+        help="Comma-separated run directory names to evaluate (optional filter).",
+    )
+    parser.add_argument(
+        "--run_names_file",
+        type=str,
+        default=None,
+        help="File containing run directory names to evaluate (one per line).",
+    )
+    parser.add_argument(
         "--out_csv",
         type=str,
         default=None,
@@ -148,7 +187,7 @@ def main() -> None:
     args = parser.parse_args()
 
     results_root = Path(args.results_root)
-    runs_root = results_root / "runs"
+    runs_root = Path(args.runs_root) if args.runs_root else (results_root / "runs")
     out_csv = Path(args.out_csv) if args.out_csv else results_root / "eval_f1.csv"
     summary_csv = (
         Path(args.summary_csv) if args.summary_csv else results_root / "eval_f1_summary.csv"
@@ -157,7 +196,21 @@ def main() -> None:
     rows: List[str] = ["probe_mode,run_name,mode,species,num_classes,patch_width,f1"]
     records: List[Dict[str, object]] = []
 
+    run_filter: set[str] = set()
+    if args.run_names:
+        run_filter.update({n.strip() for n in args.run_names.split(",") if n.strip()})
+    if args.run_names_file:
+        run_names_path = Path(args.run_names_file)
+        if not run_names_path.exists():
+            raise SystemExit(f"Run names file not found: {run_names_path}")
+        for line in run_names_path.read_text(encoding="utf-8").splitlines():
+            name = line.strip()
+            if name:
+                run_filter.add(name)
+
     for probe_mode, run_dir in _iter_run_dirs(runs_root):
+        if run_filter and run_dir.name not in run_filter:
+            continue
         val_dir = run_dir / "val_outputs"
         if not val_dir.exists():
             continue

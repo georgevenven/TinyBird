@@ -243,12 +243,15 @@ def save_supervised_prediction_plot(
     labels: np.ndarray,
     predictions: np.ndarray,
     probabilities: Optional[np.ndarray],
+    logits: Optional[np.ndarray],
     filename: str,
     mode: str,
     num_classes: int,
     output_dir: str,
     step_num: int,
     figsize: Optional[Tuple[int, int]] = None,
+    logits_top_k: int = 3,
+    split: str = "val",
 ) -> str:
     """
     Generate and persist a supervised prediction visualization.
@@ -258,6 +261,9 @@ def save_supervised_prediction_plot(
         labels: (W_patches,) ground truth labels
         predictions: (W_patches,) predicted labels
         probabilities: (W_patches, num_classes) class probabilities (optional, used for detect mode)
+        logits: (W_patches, num_classes) or (W_patches,) raw logits (optional)
+        logits_top_k: number of class logits to plot as lines (multi-class only)
+        split: "train" or "val" label for the plot filename/title
         filename: Name of the audio file
         mode: "detect", "unit_detect", or "classify"
         num_classes: Total number of classes
@@ -276,16 +282,24 @@ def save_supervised_prediction_plot(
     
     # Create figure
     if mode in ["detect", "unit_detect"]:
-        fig, axes = plt.subplots(4, 1, figsize=figsize or (12, 8), 
-                                gridspec_kw={'height_ratios': [3, 1, 0.5, 0.5]})
+        fig, axes = plt.subplots(
+            5,
+            1,
+            figsize=figsize or (12, 9),
+            gridspec_kw={'height_ratios': [3, 1, 0.5, 0.7, 0.5]},
+        )
     else:
-        fig, axes = plt.subplots(3, 1, figsize=figsize or (12, 7), 
-                                gridspec_kw={'height_ratios': [3, 0.5, 0.5]})
+        fig, axes = plt.subplots(
+            4,
+            1,
+            figsize=figsize or (12, 8),
+            gridspec_kw={'height_ratios': [3, 0.5, 0.7, 0.5]},
+        )
     
     # Plot spectrogram
     axes[0].imshow(spectrogram, aspect='auto', origin='lower', cmap='viridis')
     axes[0].set_ylabel('Mel Bins')
-    axes[0].set_title(f'Spectrogram - {filename}')
+    axes[0].set_title(f'Spectrogram ({split}) - {filename}')
     axes[0].set_xticks([])
     
     # Plot probability line for detect mode
@@ -300,10 +314,12 @@ def save_supervised_prediction_plot(
         axes[1].set_xticks([])
         
         pred_ax_idx = 2
-        gt_ax_idx = 3
+        logit_ax_idx = 3
+        gt_ax_idx = 4
     else:
         pred_ax_idx = 1
-        gt_ax_idx = 2
+        logit_ax_idx = 2
+        gt_ax_idx = 3
     
     # Plot predicted classes as colored bar
     pred_img = predictions.reshape(1, -1)
@@ -312,6 +328,50 @@ def save_supervised_prediction_plot(
     axes[pred_ax_idx].set_ylabel('Predicted')
     axes[pred_ax_idx].set_yticks([])
     axes[pred_ax_idx].set_xticks([])
+
+    if logits is not None:
+        logits_arr = np.asarray(logits)
+        if logits_arr.ndim == 2 and logits_arr.shape[-1] == 1:
+            logits_arr = logits_arr.reshape(-1)
+
+        if logits_arr.ndim == 1:
+            magnitude = np.abs(logits_arr)
+            x = np.arange(len(magnitude))
+            axes[logit_ax_idx].plot(x, magnitude, color='tab:blue', linewidth=1.5)
+            axes[logit_ax_idx].set_xlim([0, len(magnitude)])
+            axes[logit_ax_idx].set_ylabel('Logit |mag|')
+            axes[logit_ax_idx].grid(True, alpha=0.3)
+            axes[logit_ax_idx].set_xticks([])
+        else:
+            time_len = predictions.shape[-1]
+            if logits_arr.ndim != 2:
+                logits_arr = logits_arr.reshape(logits_arr.shape[0], -1)
+
+            if logits_arr.shape[0] == time_len:
+                class_logits = logits_arr.T
+            elif logits_arr.shape[1] == time_len:
+                class_logits = logits_arr
+            else:
+                class_logits = logits_arr
+
+            class_logits = class_logits[:num_classes]
+            scores = np.mean(np.abs(class_logits), axis=1)
+            k = max(1, min(int(logits_top_k), num_classes))
+            top_ids = np.argsort(scores)[-k:][::-1]
+            x = np.arange(class_logits.shape[1])
+            for class_id in top_ids:
+                color = colors[class_id]
+                axes[logit_ax_idx].plot(
+                    x,
+                    np.abs(class_logits[class_id]),
+                    color=color,
+                    linewidth=1.2,
+                    label=f"{class_id}",
+                )
+            axes[logit_ax_idx].set_xlim([0, len(x)])
+            axes[logit_ax_idx].set_ylabel('Logit |mag|')
+            axes[logit_ax_idx].grid(True, alpha=0.3)
+            axes[logit_ax_idx].set_xticks([])
     
     # Plot ground truth classes as colored bar
     gt_img = labels.reshape(1, -1)
@@ -325,7 +385,7 @@ def save_supervised_prediction_plot(
     
     # Save figure
     os.makedirs(output_dir, exist_ok=True)
-    save_path = os.path.join(output_dir, f'prediction_step_{step_num:06d}.png')
+    save_path = os.path.join(output_dir, f'prediction_{split}_step_{step_num:06d}.png')
     fig.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
     
@@ -335,6 +395,7 @@ def plot_benchmark_results(results_csv: str, output_dir: str):
     """
     Plot benchmark results.
     Expected CSV format: task,species,individual,samples,metric_value
+    (samples column may represent seconds).
     If a 'layer' column is present, plots layerwise probe results instead.
     """
     import csv
@@ -348,7 +409,7 @@ def plot_benchmark_results(results_csv: str, output_dir: str):
                 plot_layerwise_probe_results(results_csv, output_dir)
                 return
             for row in reader:
-                row['samples'] = int(row['samples'])
+                row['samples'] = float(row['samples'])
                 row['metric_value'] = float(row['metric_value'])
                 data.append(row)
     except FileNotFoundError:
@@ -400,7 +461,7 @@ def plot_benchmark_results(results_csv: str, output_dir: str):
                 plt.plot(x, y, marker='o', label=species, color=species_color[species], linewidth=2)
                 
                 plt.xscale('log')
-                plt.xlabel('Training Samples')
+                plt.xlabel('Training Seconds (s)')
                 plt.ylabel('F1 Score (%)')
                 plt.title(f'Detection Performance: {species}')
                 plt.legend()
@@ -453,9 +514,9 @@ def plot_benchmark_results(results_csv: str, output_dir: str):
             
                 # Set linear spacing with custom labels
                 ax.set_xticks(range(len(all_samples)))
-                ax.set_xticklabels([str(s) for s in all_samples])
+                ax.set_xticklabels([f"{s:g}" for s in all_samples])
                 
-                ax.set_xlabel('# Training Recordings', fontsize=24)
+                ax.set_xlabel('Training Seconds (s)', fontsize=24)
                 ax.set_ylabel('Frame Error Rate (%)', fontsize=24)
                 ax.set_title(species, fontsize=24)
                 ax.set_ylim(0, 50)
@@ -485,7 +546,7 @@ def plot_layerwise_probe_results(results_csv: str, output_dir: str) -> None:
                 if "layer" not in row or "metric_value" not in row:
                     continue
                 row["layer"] = int(row["layer"])
-                row["samples"] = int(row["samples"])
+                row["samples"] = float(row["samples"])
                 row["metric_value"] = float(row["metric_value"])
                 data.append(row)
     except FileNotFoundError:

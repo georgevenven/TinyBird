@@ -14,7 +14,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR
+from torch.optim.lr_scheduler import LambdaLR
 
 class SupervisedTinyBird(nn.Module):
     def __init__(
@@ -101,7 +101,7 @@ class SupervisedTinyBird(nn.Module):
             print("Using MLP Classifier")
             self.classifier = nn.Sequential(
                 nn.Linear(input_dim, hidden_dim),
-                nn.ReLU(),
+                nn.GELU(),
                 nn.Linear(hidden_dim, output_dim)
             )
         
@@ -288,6 +288,7 @@ class Trainer():
     def __init__(self, model, config):
         self.config = config
         self.model = model
+        self.compute_f1 = config["mode"] in ["detect", "unit_detect"] or config.get("log_f1", False)
         
         # Setup run directory
         os.makedirs(RUNS_ROOT, exist_ok=True)
@@ -359,8 +360,8 @@ class Trainer():
 
             self.scheduler = LambdaLR(self.optimizer, lr_lambda=lr_lambda)
         else:
-            # Default behavior: cosine annealing to 0
-            self.scheduler = CosineAnnealingLR(self.optimizer, T_max=config["steps"])
+            # Default behavior: constant learning rate (no scheduler)
+            self.scheduler = None
         
         # Initialize AMP scaler if AMP is enabled
         self.use_amp = config.get("amp", False)
@@ -384,7 +385,7 @@ class Trainer():
         # Setup loss logging file
         self.loss_log_path = os.path.join(self.run_path, "loss_log.txt")
         with open(self.loss_log_path, 'w') as f:
-            if config["mode"] in ["detect", "unit_detect"] or config.get("log_f1", False):
+            if self.compute_f1:
                 f.write("step,train_loss,val_loss,train_acc,val_acc,train_f1,val_f1,samples_processed,steps_per_sec,samples_per_sec\n")
             else:
                 f.write("step,train_loss,val_loss,train_acc,val_acc,samples_processed,steps_per_sec,samples_per_sec\n")
@@ -409,6 +410,7 @@ class Trainer():
         if out_dir.exists():
             shutil.rmtree(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
+        from utils import parse_chunk_ms, clip_labels_to_chunk
 
         # Ensure we're exporting logits from the final saved weights (not an in-memory intermediate state)
         if final_weight_path is not None:
@@ -501,7 +503,12 @@ class Trainer():
                 for j, (path, filename, start, length, total_t) in enumerate(batch_windows):
                     arr = np.load(path, mmap_mode="r")  # (mels, time)
                     # create labels for the full file, then slice the window
-                    full_labels = ds.create_label_array(filename, int(arr.shape[1]))
+                    base_filename, chunk_start_ms, chunk_end_ms = parse_chunk_ms(filename)
+                    labels = ds._label_index.get(base_filename)
+                    if labels is None:
+                        raise ValueError(f"No matching recording found for: {base_filename}")
+                    labels = clip_labels_to_chunk(labels, chunk_start_ms, chunk_end_ms)
+                    full_labels = ds.create_label_array(labels, 0, int(arr.shape[1]))
 
                     # slice + pad if needed
                     end = start + length
@@ -560,6 +567,7 @@ class Trainer():
             accuracy: Accuracy percentage
             f1: F1 score (only for detection mode, else None)
             logits: Model predictions (for visualization)
+            grad_norm: L2 norm of gradients for the step (training only)
         """
         spectrograms, labels, _ = batch
         x = spectrograms.to(self.device, non_blocking=True)
@@ -578,27 +586,44 @@ class Trainer():
                     logits = self.model(x)
                     loss = self.model.compute_loss(logits, labels)
                     accuracy = self.model.compute_accuracy(logits, labels)
-                    f1 = self.model.compute_f1_score(logits, labels)
+                    f1 = self.model.compute_f1_score(logits, labels) if self.compute_f1 else None
             else:
                 logits = self.model(x)
                 loss = self.model.compute_loss(logits, labels)
                 accuracy = self.model.compute_accuracy(logits, labels)
-                f1 = self.model.compute_f1_score(logits, labels)
+                f1 = self.model.compute_f1_score(logits, labels) if self.compute_f1 else None
         
+        grad_norm = None
         # Backward pass only for training
         if is_training:
             if self.use_amp:
                 self.scaler.scale(loss).backward()
+                self.scaler.unscale_(self.optimizer)
+            else:
+                loss.backward()
+
+            grad_clip = float(self.config.get("grad_clip", 0.0))
+            if grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip)
+
+            grads = []
+            for param in self.model.parameters():
+                if param.grad is not None:
+                    grads.append(param.grad.detach().norm(2))
+            if grads:
+                grad_norm = float(torch.norm(torch.stack(grads), 2).item())
+
+            if self.use_amp:
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
-                loss.backward()
                 self.optimizer.step()
-            self.scheduler.step()
+            if self.scheduler is not None:
+                self.scheduler.step()
         
-        return loss.item(), accuracy, f1, logits
+        return loss.item(), accuracy, f1, logits, grad_norm
     
-    def save_prediction_visualization(self, batch, logits, step_num):
+    def save_prediction_visualization(self, batch, logits, step_num, split="val"):
         """
         Save visualization showing spectrogram, predictions, and ground truth.
         
@@ -606,6 +631,7 @@ class Trainer():
             batch: Input batch (spectrograms, labels, filenames)
             logits: Model predictions (B, W_patches, 1) for binary or (B, W_patches, num_classes) for multi-class
             step_num: Current training step
+            split: "train" or "val" label for the plot filename/title
         """
         from plotting_utils import save_supervised_prediction_plot
         
@@ -618,7 +644,7 @@ class Trainer():
         # Move to CPU and convert to numpy
         spec = spectrograms[sample_idx, 0].cpu().numpy()  # Selected sample, remove channel dim
         labels_np = labels[sample_idx].cpu().numpy()  # (W,)
-        logits_np = logits[sample_idx].cpu().numpy()  # (W_patches, 1) or (W_patches, num_classes)
+        logits_np = logits[sample_idx].detach().cpu().numpy()  # (W_patches, 1) or (W_patches, num_classes)
         
         # Get predictions and probabilities
         if self.model.num_classes == 2:
@@ -642,11 +668,13 @@ class Trainer():
             labels=labels_downsampled,
             predictions=preds,
             probabilities=probs if self.config["mode"] in ["detect", "unit_detect"] else None,
+            logits=logits_np,
             filename=filenames[sample_idx],
             mode=self.config["mode"],
             num_classes=self.model.num_classes,
             output_dir=self.imgs_path,
-            step_num=step_num
+            step_num=step_num,
+            split=split,
         )
     
     def train(self):
@@ -659,7 +687,8 @@ class Trainer():
             annotation_file_path=self.config["annotation_file"],
             n_timebins=self.config["num_timebins"],
             mode=self.config["mode"],
-            white_noise=self.config.get("white_noise", 0.0)
+            white_noise=self.config.get("white_noise", 0.0),
+            audio_params_override=self.config.get("audio_params_override"),
         )
         
         val_dataset = SupervisedSpectogramDataset(
@@ -667,7 +696,8 @@ class Trainer():
             annotation_file_path=self.config["annotation_file"],
             n_timebins=self.config["num_timebins"],
             mode=self.config["mode"],
-            white_noise=0.0  # No augmentation on validation set
+            white_noise=0.0,  # No augmentation on validation set
+            audio_params_override=self.config.get("audio_params_override"),
         )
         
         # Verify num_classes matches dataset
@@ -730,7 +760,7 @@ class Trainer():
                 train_batch = next(train_iter)
             
             # Training step
-            train_loss, train_acc, train_f1, _ = self.step(train_batch, is_training=True)
+            train_loss, train_acc, train_f1, train_logits, train_grad_norm = self.step(train_batch, is_training=True)
             
             # Store training loss and accuracy every step
             self.train_loss_history.append(train_loss)
@@ -748,7 +778,7 @@ class Trainer():
                     val_batch = next(val_iter)
                 
                 # Validation step (no gradients)
-                val_loss, val_acc, val_f1, val_logits = self.step(val_batch, is_training=False)
+                val_loss, val_acc, val_f1, val_logits, _ = self.step(val_batch, is_training=False)
 
                 # Early stopping update (EMA-smoothed val loss)
                 if es_patience > 0:
@@ -793,7 +823,11 @@ class Trainer():
                 last_eval_step = step_num
                 
                 # Print progress
-                current_lr = self.scheduler.get_last_lr()[0]
+                if self.scheduler is not None:
+                    current_lr = self.scheduler.get_last_lr()[0]
+                else:
+                    current_lr = self.optimizer.param_groups[0]["lr"]
+                grad_str = f", Grad Norm = {train_grad_norm:.4f}" if train_grad_norm is not None else ""
                 if self.config["mode"] in ["detect", "unit_detect"] or self.config.get("log_f1", False):
                     # train_f1 / val_f1 are expected to be non-None when log_f1 is enabled
                     print(f"Step {step_num} ({progress_pct:.1f}%): "
@@ -801,7 +835,7 @@ class Trainer():
                           f"Train Acc = {train_acc:.2f}%, Val Acc = {val_acc:.2f}%, "
                           f"Train F1 = {train_f1:.2f}%, Val F1 = {val_f1:.2f}%, "
                           f"Samples = {samples_processed}, "
-                          f"LR = {current_lr:.2e}, "
+                          f"LR = {current_lr:.2e}{grad_str}, "
                           f"Steps/sec = {steps_per_sec:.2f}, "
                           f"Samples/sec = {samples_per_sec:.1f}")
                 else:
@@ -809,7 +843,7 @@ class Trainer():
                           f"Train Loss = {train_loss:.6f}, Val Loss = {val_loss:.6f}, "
                           f"Train Acc = {train_acc:.2f}%, Val Acc = {val_acc:.2f}%, "
                           f"Samples = {samples_processed}, "
-                          f"LR = {current_lr:.2e}, "
+                          f"LR = {current_lr:.2e}{grad_str}, "
                           f"Steps/sec = {steps_per_sec:.2f}, "
                           f"Samples/sec = {samples_per_sec:.1f}")
                 
@@ -826,7 +860,8 @@ class Trainer():
                     torch.save(self.model.state_dict(), weight_path)
                 
                 # Save prediction visualization
-                self.save_prediction_visualization(val_batch, val_logits, step_num)
+                self.save_prediction_visualization(val_batch, val_logits, step_num, split="val")
+                self.save_prediction_visualization(train_batch, train_logits, step_num, split="train")
 
                 # Potentially stop training
                 if es_patience > 0 and self._es_bad_evals >= es_patience:
@@ -875,8 +910,8 @@ if __name__ == "__main__":
     parser.add_argument("--num_workers", type=int, default=8, help="number of DataLoader worker processes")
     parser.add_argument("--weight_decay", type=float, default=0.1, help="weight decay")
     parser.add_argument("--eval_every", type=int, default=25, help="evaluate every N steps")
-    parser.add_argument("--warmup_steps", type=int, default=0, help="linear warmup steps before decay")
-    parser.add_argument("--min_lr", type=float, default=0.0, help="minimum learning rate after decay")
+    parser.add_argument("--warmup_steps", type=int, default=0, help="linear warmup steps before decay (0 disables scheduler)")
+    parser.add_argument("--min_lr", type=float, default=0.0, help="minimum learning rate after decay (0 disables scheduler)")
 
     # Early stopping
     parser.add_argument("--early_stop_patience", type=int, default=8, help="stop if EMA-smoothed val_loss does not improve for N consecutive eval checks (0 disables)")
@@ -908,10 +943,21 @@ if __name__ == "__main__":
         help="freeze encoder layers up to this index (inclusive); negative allowed",
     )
     parser.add_argument("--linear_probe", action="store_true", help="use single linear layer instead of MLP")
-    parser.add_argument("--amp", action="store_true", help="enable automatic mixed precision training")
+    parser.add_argument(
+        "--amp",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="enable automatic mixed precision training (default: enabled)",
+    )
+    parser.add_argument("--grad_clip", type=float, default=5.0, help="clip gradient norm (0 disables)")
     parser.add_argument("--encoder_layer_idx", type=int, default=None, help="encoder layer index to probe (0..enc_n_layer-1). If omitted, uses full encoder output.")
     parser.add_argument("--log_f1", action="store_true", help="log (macro) F1 to loss_log.txt (useful for classify)")
-    parser.add_argument("--class_weighting", action="store_true", help="weight CE by inverse class frequency per batch (classify only)")
+    parser.add_argument(
+        "--class_weighting",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="weight CE by inverse class frequency per batch (classify only; default: enabled)",
+    )
     
     # Data augmentation
     parser.add_argument("--white_noise", type=float, default=0.0, help="standard deviation of white noise to add after normalization (0.0 = no noise)")
@@ -919,7 +965,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     # Load pretrained model and config
-    from utils import load_model_from_checkpoint, get_num_classes_from_annotations
+    from utils import load_model_from_checkpoint, get_num_classes_from_annotations, load_audio_params
     from pretrain import resolve_run_path
     
     pretrained_path = resolve_run_path(args.pretrained_run)
@@ -937,6 +983,10 @@ if __name__ == "__main__":
     config["enc_hidden_d"] = pretrained_config["enc_hidden_d"]
     config["mels"] = pretrained_config["mels"]
     config["pretrained_run"] = pretrained_path
+
+    # Use audio params (mean/std, sr/hop_size, mels) from the pretrain run for supervised scaling
+    config["audio_params_override"] = load_audio_params(pretrained_path)
+    config["audio_params_source"] = pretrained_path
     
     # Automatically determine number of classes from annotations
     num_classes = get_num_classes_from_annotations(config["annotation_file"], config["mode"])

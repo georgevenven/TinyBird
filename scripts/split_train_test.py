@@ -15,6 +15,17 @@ def calculate_ms(detected_events):
         total_ms += event['offset_ms'] - event['onset_ms']
     return total_ms
 
+
+def find_spec_matches(spec_dir, base_name):
+    patterns = [
+        os.path.join(spec_dir, f"{base_name}.*"),
+        os.path.join(spec_dir, f"{base_name}__ms_*"),
+    ]
+    matches = []
+    for pattern in patterns:
+        matches.extend(glob.glob(pattern))
+    return matches
+
 def split_data_random(input_file, spec_dir, train_dir, test_dir, train_percent=80, move_files=False):
     """Randomly split recordings without considering bird_id"""
     
@@ -46,7 +57,7 @@ def split_data_random(input_file, spec_dir, train_dir, test_dir, train_percent=8
     for recording in tqdm(train_recordings):
         filename = recording['recording']['filename']
         base_name = os.path.splitext(filename)[0]
-        matches = glob.glob(os.path.join(spec_dir, f"{base_name}.*"))
+        matches = find_spec_matches(spec_dir, base_name)
         for src in matches:
             dst = os.path.join(train_dir, os.path.basename(src))
             if move_files:
@@ -59,7 +70,7 @@ def split_data_random(input_file, spec_dir, train_dir, test_dir, train_percent=8
     for recording in tqdm(test_recordings):
         filename = recording['recording']['filename']
         base_name = os.path.splitext(filename)[0]
-        matches = glob.glob(os.path.join(spec_dir, f"{base_name}.*"))
+        matches = find_spec_matches(spec_dir, base_name)
         for src in matches:
             dst = os.path.join(test_dir, os.path.basename(src))
             if move_files:
@@ -145,7 +156,7 @@ def split_data(input_file, spec_dir, train_dir, test_dir, train_percent=80, move
     for recording in tqdm(train_recordings):
         filename = recording['recording']['filename']
         base_name = os.path.splitext(filename)[0]
-        matches = glob.glob(os.path.join(spec_dir, f"{base_name}.*"))
+        matches = find_spec_matches(spec_dir, base_name)
         for src in matches:
             dst = os.path.join(train_dir, os.path.basename(src))
             if move_files:
@@ -158,7 +169,7 @@ def split_data(input_file, spec_dir, train_dir, test_dir, train_percent=80, move
     for recording in tqdm(test_recordings):
         filename = recording['recording']['filename']
         base_name = os.path.splitext(filename)[0]
-        matches = glob.glob(os.path.join(spec_dir, f"{base_name}.*"))
+        matches = find_spec_matches(spec_dir, base_name)
         for src in matches:
             dst = os.path.join(test_dir, os.path.basename(src))
             if move_files:
@@ -202,7 +213,7 @@ def filter_by_bird(input_file, spec_dir, output_dir, bird_id, move_files=False):
     
     count = 0
     for base_name in tqdm(files_to_copy):
-        matches = glob.glob(os.path.join(spec_dir, f"{base_name}.*"))
+        matches = find_spec_matches(spec_dir, base_name)
         for src in matches:
             dst = os.path.join(output_dir, os.path.basename(src))
             if move_files:

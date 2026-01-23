@@ -1,6 +1,7 @@
 import os
 import json
 import glob
+import re
 import torch
 from pathlib import Path
 from model import TinyBird
@@ -197,6 +198,36 @@ def load_audio_params(data_dir):
     
     return audio_data_json
 
+
+_CHUNK_MS_RE = re.compile(r"^(?P<base>.+)__ms_(?P<start>\d+)_(?P<end>\d+)$")
+
+
+def parse_chunk_ms(filename):
+    stem = Path(filename).stem
+    match = _CHUNK_MS_RE.match(stem)
+    if not match:
+        return stem, None, None
+    return match.group("base"), int(match.group("start")), int(match.group("end"))
+
+
+def clip_labels_to_chunk(labels, chunk_start_ms, chunk_end_ms):
+    if chunk_start_ms is None:
+        return labels
+    if chunk_end_ms is None:
+        chunk_end_ms = float("inf")
+
+    clipped = []
+    for label in labels:
+        onset = label["onset_ms"]
+        offset = label["offset_ms"]
+        if offset <= chunk_start_ms or onset >= chunk_end_ms:
+            continue
+        new_label = dict(label)
+        new_label["onset_ms"] = max(onset, chunk_start_ms) - chunk_start_ms
+        new_label["offset_ms"] = min(offset, chunk_end_ms) - chunk_start_ms
+        clipped.append(new_label)
+    return clipped
+
 def load_audio_labels(path, filename, mode):
     """
       Point of this function is to load the name of the file, and then match it with the name in the json, 
@@ -208,21 +239,24 @@ def load_audio_labels(path, filename, mode):
     if mode not in ["detect", "classify", "unit_detect"]:
         raise ValueError("mode must be 'detect', 'classify', or 'unit_detect'")
     
+    base_filename, chunk_start_ms, chunk_end_ms = parse_chunk_ms(filename)
+
     with open(path, "r") as f:
         annotations = json.load(f)
     
     for rec in annotations["recordings"]:
         rec_filename = Path(rec["recording"]["filename"]).stem
-        if rec_filename == filename:
+        if rec_filename == base_filename:
             if mode == "detect":
-                return [{"onset_ms": event["onset_ms"], "offset_ms": event["offset_ms"]} 
-                        for event in rec["detected_events"]]
+                labels = [{"onset_ms": event["onset_ms"], "offset_ms": event["offset_ms"]}
+                          for event in rec["detected_events"]]
             elif mode == "classify":
-                return [unit for event in rec["detected_events"] for unit in event["units"]]
+                labels = [unit for event in rec["detected_events"] for unit in event["units"]]
             else:  # unit_detect
-                return [unit for event in rec["detected_events"] for unit in event["units"]]
+                labels = [unit for event in rec["detected_events"] for unit in event["units"]]
+            return clip_labels_to_chunk(labels, chunk_start_ms, chunk_end_ms)
     
-    raise ValueError(f"No matching recording found for: {filename}")
+    raise ValueError(f"No matching recording found for: {base_filename}")
 
 
 ## Make this function simpler, no need for this complexity 
