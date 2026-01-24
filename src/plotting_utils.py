@@ -32,8 +32,6 @@ __all__ = [
     "save_reconstruction_plot",
     "plot_loss_curves",
     "save_supervised_prediction_plot",
-    "plot_benchmark_results",
-    "plot_layerwise_probe_results",
     "plot_theoretical_resolution_limit",
     "generate_umap_plots",
 ]
@@ -391,23 +389,14 @@ def save_supervised_prediction_plot(
     
     return save_path
 
-def plot_benchmark_results(results_csv: str, output_dir: str):
-    """
-    Plot benchmark results.
-    Expected CSV format: task,species,individual,samples,metric_value
-    (samples column may represent seconds).
-    If a 'layer' column is present, plots layerwise probe results instead.
-    """
+def plot_theoretical_resolution_limit(results_csv: str, output_dir: str) -> None:
     import csv
     import matplotlib.ticker as ticker
-    
+
     data = []
     try:
         with open(results_csv, 'r') as f:
             reader = csv.DictReader(f)
-            if reader.fieldnames and "layer" in reader.fieldnames:
-                plot_layerwise_probe_results(results_csv, output_dir)
-                return
             for row in reader:
                 row['samples'] = float(row['samples'])
                 row['metric_value'] = float(row['metric_value'])
@@ -419,301 +408,46 @@ def plot_benchmark_results(results_csv: str, output_dir: str):
     if not data:
         print("No data found in results CSV.")
         return
-            
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Helper to get color map
-    species_list = sorted(list(set(d['species'] for d in data)))
-    # Use tab10 or viridis if more than 10 species
-    if len(species_list) <= 10:
-        colors = plt.cm.tab10(np.linspace(0, 1, 10))[:len(species_list)]
-    else:
-        colors = plt.cm.viridis(np.linspace(0, 1, len(species_list)))
-        
-    species_color = dict(zip(species_list, colors))
-    
-    # Apply style changes via context
-    with plt.rc_context({
-        'font.size': 24,
-        'font.weight': 'bold',
-        'axes.labelweight': 'bold', 
-        'axes.titleweight': 'bold',
-        'axes.titlesize': 24,
-        'axes.labelsize': 24,
-        'xtick.labelsize': 18,
-        'ytick.labelsize': 18,
-    }):
-        
-        # Detection Plot
-        detect_data = [d for d in data if d['task'] == 'detect']
-        if detect_data:
-            for species in species_list:
-                sp_data = [d for d in detect_data if d['species'] == species]
-                if not sp_data: continue
-                
-                plt.figure(figsize=(10, 6), dpi=SPEC_DPI)
-                
-                # Sort by samples
-                sp_data.sort(key=lambda x: x['samples'])
-                x = [d['samples'] for d in sp_data]
-                y = [d['metric_value'] for d in sp_data]
-                
-                plt.plot(x, y, marker='o', label=species, color=species_color[species], linewidth=2)
-                
-                plt.xscale('log')
-                plt.xlabel('Training Seconds (s)')
-                plt.ylabel('F1 Score (%)')
-                plt.title(f'Detection Performance: {species}')
-                plt.legend()
-                plt.gca().yaxis.set_major_locator(ticker.MultipleLocator(5))
-                plt.tick_params(axis='both', which='major', labelsize=18)
-                plt.grid(True, alpha=0.2)
-                plt.savefig(os.path.join(output_dir, f'detection_benchmark_{species}.png'), bbox_inches='tight')
-                plt.close()
-            
-        # Classification Plot
-        classify_data = [d for d in data if d['task'] == 'classify']
-        if classify_data:
-            # Get unique sample sizes from data and create position mapping
-            all_samples = sorted(list(set(d['samples'] for d in classify_data)))
-            sample_to_pos = {s: i for i, s in enumerate(all_samples)}
-            
-            for species in species_list:
-                sp_data = [d for d in classify_data if d['species'] == species]
-                if not sp_data: continue
-
-                fig, ax = plt.subplots(figsize=(5.5, 6), dpi=SPEC_DPI)
-                
-                # Group by individual
-                individuals = sorted(list(set(d['individual'] for d in sp_data)))
-                color = species_color[species]
-                
-                for ind in individuals:
-                    ind_data = [d for d in sp_data if d['individual'] == ind]
-                    
-                    ind_data.sort(key=lambda x: x['samples'])
-                    x = [sample_to_pos[d['samples']] for d in ind_data]
-                    y = [d['metric_value'] for d in ind_data]
-                    
-                    # Plot individual lines faintly
-                    ax.plot(x, y, marker='o', color=color, alpha=0.3, linewidth=1)
-                
-                # Plot species averages
-                sample_map = {}
-                for d in sp_data:
-                    s = d['samples']
-                    if s not in sample_map: sample_map[s] = []
-                    sample_map[s].append(d['metric_value'])
-                
-                samples = sorted(sample_map.keys())
-                x_pos = [sample_to_pos[s] for s in samples]
-                avgs = [np.mean(sample_map[s]) for s in samples]
-                
-                # No label (no legend)
-                ax.plot(x_pos, avgs, marker='o', color=color, linewidth=3)
-            
-                # Set linear spacing with custom labels
-                ax.set_xticks(range(len(all_samples)))
-                ax.set_xticklabels([f"{s:g}" for s in all_samples])
-                
-                ax.set_xlabel('Training Seconds (s)', fontsize=24)
-                ax.set_ylabel('Frame Error Rate (%)', fontsize=24)
-                ax.set_title(species, fontsize=24)
-                ax.set_ylim(0, 50)
-                ax.yaxis.set_major_locator(ticker.MultipleLocator(5))
-                ax.tick_params(axis='both', which='major', labelsize=18)
-                ax.grid(True, alpha=0.2)
-                
-                fig.savefig(os.path.join(output_dir, f'classification_benchmark_{species}.png'), bbox_inches='tight')
-                plt.close(fig)
-
-
-def plot_layerwise_probe_results(results_csv: str, output_dir: str) -> None:
-    """
-    Plot layerwise linear-probe results.
-
-    Expected CSV format:
-      task,species,individual,layer,samples,run_name,metric_name,metric_value
-    """
-    import csv
-    import matplotlib.ticker as ticker
-
-    data = []
-    try:
-        with open(results_csv, "r") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                if "layer" not in row or "metric_value" not in row:
-                    continue
-                row["layer"] = int(row["layer"])
-                row["samples"] = float(row["samples"])
-                row["metric_value"] = float(row["metric_value"])
-                data.append(row)
-    except FileNotFoundError:
-        print(f"Results file not found: {results_csv}")
-        return
-
-    if not data:
-        print("No layerwise data found in results CSV.")
-        return
 
     os.makedirs(output_dir, exist_ok=True)
 
-    species_list = sorted(list(set(d["species"] for d in data)))
-    metric_list = sorted(list(set(d.get("metric_name", "Metric") for d in data)))
-    sample_sizes = sorted(list(set(d["samples"] for d in data)))
+    # Filter to only classification results
+    classify_data = [d for d in data if d.get('task') == 'classify']
+    if not classify_data:
+        print("No classification data found.")
+        return
 
-    # Colors by species; line style/marker by sample size.
-    if len(species_list) <= 10:
-        colors = plt.cm.tab10(np.linspace(0, 1, 10))[:len(species_list)]
-    else:
-        colors = plt.cm.viridis(np.linspace(0, 1, len(species_list)))
+    # Group by individual and species
+    individuals = sorted(set(d['individual'] for d in classify_data))
+    species_list = sorted(set(d['species'] for d in classify_data))
+    colors = plt.cm.tab10(np.linspace(0, 1, len(species_list)))
     species_color = dict(zip(species_list, colors))
-    line_styles = ["-", "--", "-.", ":"]
-    markers = ["o", "s", "D", "^", "v", "P", "X", "*"]
-    sample_style = {s: line_styles[i % len(line_styles)] for i, s in enumerate(sample_sizes)}
-    sample_marker = {s: markers[i % len(markers)] for i, s in enumerate(sample_sizes)}
 
-    with plt.rc_context({
-        'font.size': 24,
-        'font.weight': 'bold',
-        'axes.labelweight': 'bold',
-        'axes.titleweight': 'bold',
-        'axes.titlesize': 24,
-        'axes.labelsize': 24,
-        'xtick.labelsize': 18,
-        'ytick.labelsize': 18,
-    }):
-        for metric in metric_list:
-            metric_data = [d for d in data if d.get("metric_name", metric) == metric]
-            if not metric_data:
+    # One plot per individual
+    for individual in individuals:
+        fig, ax = plt.subplots()
+
+        for species in species_list:
+            sp_data = [d for d in classify_data if d['species'] == species and d['individual'] == individual]
+            if not sp_data:
                 continue
+            sp_data = sorted(sp_data, key=lambda x: x['samples'])
 
-            fig, ax = plt.subplots(figsize=(10, 6), dpi=SPEC_DPI)
+            x = [d['samples'] for d in sp_data]
+            y = [d['metric_value'] for d in sp_data]
 
-            for species in species_list:
-                sp_data = [d for d in metric_data if d["species"] == species]
-                if not sp_data:
-                    continue
+            # Compute theoretical resolution in ms (128 hop at 32kHz: 4ms per timebin)
+            # We assume samples = seconds of training data. This is a heuristic; adjust if needed.
+            ax.plot(x, y, marker='o', linewidth=2, label=species, color=species_color[species])
 
-                for samples in sample_sizes:
-                    s_data = [d for d in sp_data if d["samples"] == samples]
-                    if not s_data:
-                        continue
-
-                    layer_map = {}
-                    for d in s_data:
-                        layer = d["layer"]
-                        layer_map.setdefault(layer, []).append(d["metric_value"])
-
-                    layers = sorted(layer_map.keys())
-                    means = [float(np.mean(layer_map[l])) for l in layers]
-                    stds = [float(np.std(layer_map[l])) for l in layers]
-
-                    color = species_color[species]
-                    label = species if samples == sample_sizes[0] else "_nolegend_"
-                    ax.plot(
-                        layers,
-                        means,
-                        marker=sample_marker[samples],
-                        linestyle=sample_style[samples],
-                        linewidth=2,
-                        color=color,
-                        label=label,
-                    )
-                    if any(s > 0 for s in stds):
-                        lower = [m - s for m, s in zip(means, stds)]
-                        upper = [m + s for m, s in zip(means, stds)]
-                        ax.fill_between(layers, lower, upper, color=color, alpha=0.1)
-
-            ax.set_xlabel("Encoder Layer")
-            ax.set_ylabel(metric.replace("_", " "))
-            ax.xaxis.set_major_locator(ticker.MaxNLocator(integer=True))
-            ax.grid(True, alpha=0.2)
-            ax.legend(fontsize=14)
-
-            safe_metric = metric.replace(" ", "_")
-            fig.savefig(os.path.join(output_dir, f"layerwise_{safe_metric}_all_species.png"), bbox_inches='tight')
-            plt.close(fig)
-
-
-def plot_theoretical_resolution_limit(results_csv: str, output_dir: str) -> None:
-    """
-    Plot theoretical max performance vs resolution_ms.
-
-    Expected CSV format:
-      species,resolution_ms,metric_name,metric_value
-    """
-    import csv
-    import matplotlib.ticker as ticker
-
-    data = []
-    try:
-        with open(results_csv, "r") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                if "resolution_ms" not in row or "metric_value" not in row:
-                    continue
-                row["resolution_ms"] = int(row["resolution_ms"])
-                row["metric_value"] = float(row["metric_value"])
-                data.append(row)
-    except FileNotFoundError:
-        print(f"Results file not found: {results_csv}")
-        return
-
-    if not data:
-        print("No data found in results CSV.")
-        return
-
-    os.makedirs(output_dir, exist_ok=True)
-
-    species_list = sorted(list(set(d["species"] for d in data)))
-    metric_list = sorted(list(set(d.get("metric_name", "Metric") for d in data)))
-
-    # Colors by species
-    if len(species_list) <= 10:
-        colors = plt.cm.tab10(np.linspace(0, 1, 10))[:len(species_list)]
-    else:
-        colors = plt.cm.viridis(np.linspace(0, 1, len(species_list)))
-    species_color = dict(zip(species_list, colors))
-
-    with plt.rc_context({
-        'font.size': 24,
-        'font.weight': 'bold',
-        'axes.labelweight': 'bold',
-        'axes.titleweight': 'bold',
-        'axes.titlesize': 24,
-        'axes.labelsize': 24,
-        'xtick.labelsize': 18,
-        'ytick.labelsize': 18,
-    }):
-        for metric in metric_list:
-            metric_data = [d for d in data if d.get("metric_name", metric) == metric]
-            if not metric_data:
-                continue
-
-            fig, ax = plt.subplots(figsize=(10, 6), dpi=SPEC_DPI)
-
-            for species in species_list:
-                sp_data = [d for d in metric_data if d["species"] == species]
-                if not sp_data:
-                    continue
-
-                sp_data.sort(key=lambda x: x["resolution_ms"])
-                x = [d["resolution_ms"] for d in sp_data]
-                y = [d["metric_value"] for d in sp_data]
-                ax.plot(x, y, marker='o', linewidth=2, color=species_color[species], label=species)
-
-            ax.set_xlabel("Resolution (ms)")
-            ax.set_ylabel(metric.replace("_", " "))
-            ax.set_title(f"Theoretical Limit: {metric.replace('_', ' ')}")
-            ax.xaxis.set_major_locator(ticker.MaxNLocator(integer=True))
-            ax.grid(True, alpha=0.2)
-            ax.legend()
-
-            safe_metric = metric.replace(" ", "_")
-            fig.savefig(os.path.join(output_dir, f"theoretical_limit_{safe_metric}.png"), bbox_inches='tight')
-            plt.close(fig)
+        ax.set_xlabel("Training Data (seconds)")
+        ax.set_ylabel("FER (%)")
+        ax.set_title(f"{individual} - Classification FER")
+        ax.grid(True, alpha=0.2)
+        ax.legend()
+        ax.xaxis.set_major_locator(ticker.MaxNLocator(integer=True))
+        fig.savefig(os.path.join(output_dir, f"theoretical_resolution_limit_{individual}.png"), bbox_inches='tight')
+        plt.close(fig)
 
 
 def _build_palette(labels, colormap=cm.tab20):

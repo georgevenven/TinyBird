@@ -33,9 +33,14 @@ POOL_SEED=42
 RUN_TAG=""
 CLASS_WEIGHTING=0
 SPECIES_FILTER=""
+LR="1e-4"
+FINETUNE_FREEZE_UP_TO=""
 
 # Probe Type: "linear", "finetune", or comma-separated list (e.g. "linear,finetune")
 PROBE_MODE="finetune"
+LORA_RANKS="1,4,8,16"
+LORA_ALPHA=16
+LORA_DROPOUT=0.0
 
 # Task Selection: "all" or a comma-separated list (e.g. "unit_detect,classify")
 TASK_MODE="classify"
@@ -65,8 +70,36 @@ while [[ $# -gt 0 ]]; do
         PROBE_MODE="$2"
         shift 2
         ;;
+        --lora_ranks)
+        LORA_RANKS="$2"
+        shift 2
+        ;;
+        --lora_rank)
+        LORA_RANKS="$2"
+        shift 2
+        ;;
+        --lora_alpha)
+        LORA_ALPHA="$2"
+        shift 2
+        ;;
+        --lora_dropout)
+        LORA_DROPOUT="$2"
+        shift 2
+        ;;
         --task_mode)
         TASK_MODE="$2"
+        shift 2
+        ;;
+        --lr)
+        LR="$2"
+        shift 2
+        ;;
+        --finetune_freeze_up_to)
+        FINETUNE_FREEZE_UP_TO="$2"
+        shift 2
+        ;;
+        --freeze_encoder_up_to)
+        FINETUNE_FREEZE_UP_TO="$2"
         shift 2
         ;;
         --steps)
@@ -199,6 +232,9 @@ printf '  "annotation_root": "%s",\n' "$ANNOTATION_ROOT" >> "$PARAMS_JSON"
 printf '  "results_dir": "%s",\n' "$RESULTS_DIR" >> "$PARAMS_JSON"
 printf '  "pretrained_run": "%s",\n' "$PRETRAINED_RUN" >> "$PARAMS_JSON"
 printf '  "probe_mode": "%s",\n' "$PROBE_MODE" >> "$PARAMS_JSON"
+printf '  "lora_ranks": "%s",\n' "$LORA_RANKS" >> "$PARAMS_JSON"
+printf '  "lora_alpha": %s,\n' "$LORA_ALPHA" >> "$PARAMS_JSON"
+printf '  "lora_dropout": %s,\n' "$LORA_DROPOUT" >> "$PARAMS_JSON"
 printf '  "task_mode": "%s",\n' "$TASK_MODE" >> "$PARAMS_JSON"
 printf '  "steps": %s,\n' "$STEPS" >> "$PARAMS_JSON"
 printf '  "batch_size": %s,\n' "$BATCH_SIZE" >> "$PARAMS_JSON"
@@ -209,6 +245,12 @@ printf '  "max_train": %s,\n' "$MAX_TRAIN" >> "$PARAMS_JSON"
 printf '  "pool_seed": %s,\n' "$POOL_SEED" >> "$PARAMS_JSON"
 printf '  "run_tag": "%s",\n' "$RUN_TAG" >> "$PARAMS_JSON"
 printf '  "class_weighting": %s,\n' "$CLASS_WEIGHTING" >> "$PARAMS_JSON"
+printf '  "lr": %s,\n' "$LR" >> "$PARAMS_JSON"
+if [ -n "$FINETUNE_FREEZE_UP_TO" ]; then
+    printf '  "finetune_freeze_up_to": %s,\n' "$FINETUNE_FREEZE_UP_TO" >> "$PARAMS_JSON"
+else
+    printf '  "finetune_freeze_up_to": null,\n' >> "$PARAMS_JSON"
+fi
 printf '  "species_filter": "%s",\n' "$SPECIES_FILTER" >> "$PARAMS_JSON"
 printf '  "sample_seconds": [' >> "$PARAMS_JSON"
 for i in "${!SAMPLE_SECONDS[@]}"; do
@@ -231,6 +273,10 @@ echo "   MAX_TRAIN: $MAX_TRAIN"
 echo "   POOL_SEED: $POOL_SEED"
 echo "   RUN_TAG: $RUN_TAG"
 echo "   CLASS_WEIGHTING: $CLASS_WEIGHTING"
+echo "   LR: $LR"
+if [ -n "$FINETUNE_FREEZE_UP_TO" ]; then
+    echo "   FINETUNE_FREEZE_UP_TO: $FINETUNE_FREEZE_UP_TO"
+fi
 echo "   CONTEXT_TIMEBINS: $CONTEXT_TIMEBINS"
 echo "   SPECIES_FILTER: $SPECIES_FILTER"
 
@@ -265,25 +311,18 @@ fi
 
 # =================================================
 
-RESULTS_CSV="$RESULTS_DIR/results.csv"
-# Initialize CSV if not exists
-if [ ! -f "$RESULTS_CSV" ]; then
-    echo "task,species,individual,samples,run_name,metric_name,metric_value" > "$RESULTS_CSV"
-fi
-
 # Resolve probe modes list
 if [ "$PROBE_MODE" == "all" ]; then
     PROBE_MODES=("linear" "finetune")
 else
     IFS=',' read -r -a PROBE_MODES <<< "$PROBE_MODE"
 fi
+IFS=',' read -r -a LORA_RANK_LIST <<< "$LORA_RANKS"
 
 echo "Results will be saved to $RESULTS_DIR"
 WORK_ROOT="$PROJECT_ROOT/temp"
 EVAL_DIR="$RESULTS_DIR/eval"
-RUNS_LIST_FILE="$EVAL_DIR/run_names.txt"
 mkdir -p "$EVAL_DIR"
-: > "$RUNS_LIST_FILE"
 mkdir -p "$WORK_ROOT"
 
 # Task helper
@@ -421,16 +460,6 @@ if [ "$CLASS_WEIGHTING" -eq 1 ]; then
     CLASS_WEIGHTING_FLAG="--class_weighting"
 fi
 
-record_run_name() {
-    local name="$1"
-    if [ -z "$name" ]; then
-        return
-    fi
-    if ! grep -Fxq "$name" "$RUNS_LIST_FILE" 2>/dev/null; then
-        echo "$name" >> "$RUNS_LIST_FILE"
-    fi
-}
-
 eval_val_outputs_f1() {
     local run_name="$1"
     local latest_csv="$EVAL_DIR/eval_f1_latest.csv"
@@ -444,7 +473,7 @@ eval_val_outputs_f1() {
         --runs_root "$PROJECT_ROOT/runs" \
         --run_names "$run_name" \
         --out_csv "$latest_csv" \
-        --summary_csv "$latest_summary"
+        --summary_csv "$latest_summary" 1>&2
 
     python - <<PY
 import csv
@@ -465,19 +494,68 @@ if not dest.exists():
     raise SystemExit(0)
 
 with dest.open("r", encoding="utf-8") as f:
-    existing = {row.get("run_name") for row in csv.DictReader(f)}
+    reader = csv.DictReader(f)
+    fieldnames = reader.fieldnames or []
+    existing_rows = list(reader)
+
+desired_fields = [
+    "f1",
+    "fer",
+    "probe_mode",
+    "mode",
+    "species",
+    "bird",
+    "train_seconds",
+    "num_classes",
+    "num_classes_train",
+    "num_classes_val",
+    "patch_width",
+    "frozen_layers",
+    "steps",
+    "lr",
+    "batch_size",
+    "class_weighting",
+    "run_name",
+    "created_at",
+]
+missing = [name for name in desired_fields if name not in fieldnames]
+if missing or fieldnames != desired_fields:
+    fieldnames = desired_fields
+    with dest.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in existing_rows:
+            writer.writerow({name: row.get(name, "") for name in fieldnames})
+
+existing = {row.get("run_name") for row in existing_rows}
 
 new_rows = [r for r in rows if r.get("run_name") not in existing]
 if not new_rows:
     raise SystemExit(0)
 
-with dest.open("a", encoding="utf-8") as f:
+with dest.open("a", encoding="utf-8", newline="") as f:
+    writer = csv.DictWriter(f, fieldnames=fieldnames)
     for r in new_rows:
-        f.write(
-            f"{r.get('probe_mode','')},{r.get('run_name','')},{r.get('mode','')},"
-            f"{r.get('species','')},{r.get('num_classes','')},{r.get('patch_width','')},"
-            f"{r.get('f1','')}\n"
-        )
+        writer.writerow({name: r.get(name, "") for name in fieldnames})
+PY
+
+    python - <<PY
+import csv
+from pathlib import Path
+
+latest = Path("$latest_csv")
+run_name = "$run_name"
+f1 = "0"
+fer = "0"
+if latest.exists():
+    with latest.open("r", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            if row.get("run_name") == run_name:
+                f1 = row.get("f1", "0") or "0"
+                fer = row.get("fer", "0") or "0"
+                break
+
+print(f"{f1} {fer}")
 PY
 }
 
@@ -499,10 +577,31 @@ for rec in data.get("recordings", []):
     if rec.get("recording", {}).get("bird_id") == bird_id:
         recordings.append(rec)
 
+unit_ids = set()
+for rec in recordings:
+    for event in rec.get("detected_events", []):
+        for unit in event.get("units", []):
+            unit_id = unit.get("id")
+            if unit_id is None:
+                continue
+            unit_ids.add(int(unit_id))
+
+id_map = {old: new for new, old in enumerate(sorted(unit_ids))}
+if id_map:
+    for rec in recordings:
+        for event in rec.get("detected_events", []):
+            for unit in event.get("units", []):
+                unit_id = unit.get("id")
+                if unit_id is None:
+                    continue
+                unit["id"] = id_map[int(unit_id)]
+
 filtered = dict(data)
 filtered["recordings"] = recordings
 out_path.parent.mkdir(parents=True, exist_ok=True)
 out_path.write_text(json.dumps(filtered, indent=2), encoding="utf-8")
+if id_map:
+    print(f"Remapped {len(id_map)} unit IDs for bird {bird_id}")
 print(f"Wrote filtered annotations: {out_path}")
 PY
 }
@@ -530,24 +629,56 @@ PY
 # Loop over Probe Modes
 for PROBE in "${PROBE_MODES[@]}"; do
     PROBE="${PROBE// /}"
+    PROBE_LABELS=()
+    PROBE_ARGS_LIST=()
+    RUN_PREFIX_LIST=()
+
     if [ "$PROBE" == "linear" ]; then
-        PROBE_ARGS="--linear_probe --freeze_encoder --lr 1e-4 --warmup_steps 50 --min_lr 0.0"
-        RUN_PREFIX="linear_"
-        echo "Probe Mode: Linear Probe (Frozen Encoder)"
+        PROBE_LABELS=("linear")
+        PROBE_ARGS_LIST=("--linear_probe --freeze_encoder --lr $LR")
+        RUN_PREFIX_LIST=("linear_")
     elif [ "$PROBE" == "finetune" ]; then
         # Finetune defaults: constant lr (no warmup/decay)
-        PROBE_ARGS="--lr 1e-4 --warmup_steps 50 --min_lr 0.0"
-        RUN_PREFIX="finetune_"
-        echo "Probe Mode: Finetune (Unfrozen Encoder)"
+        PROBE_LABELS=("finetune")
+        if [ -n "$FINETUNE_FREEZE_UP_TO" ]; then
+            PROBE_ARGS_LIST=("--lr $LR --freeze_encoder_up_to $FINETUNE_FREEZE_UP_TO")
+        else
+            PROBE_ARGS_LIST=("--lr $LR")
+        fi
+        RUN_PREFIX_LIST=("finetune_")
+    elif [ "$PROBE" == "lora" ]; then
+        for RANK in "${LORA_RANK_LIST[@]}"; do
+            RANK="${RANK// /}"
+            if [ -z "$RANK" ]; then
+                continue
+            fi
+            PROBE_LABELS+=("lora_r${RANK}")
+            PROBE_ARGS_LIST+=("--lora_rank $RANK --lora_alpha $LORA_ALPHA --lora_dropout $LORA_DROPOUT --lr $LR")
+            RUN_PREFIX_LIST+=("lora_r${RANK}_")
+        done
+        if [ "${#PROBE_LABELS[@]}" -eq 0 ]; then
+            echo "No LoRA ranks configured (skipping)"
+            continue
+        fi
     else
         echo "Unknown probe mode: $PROBE (skipping)"
         continue
     fi
 
-    RUN_PREFIX="${RUN_PREFIX}${RUN_TAG_PREFIX}"
+    for idx in "${!PROBE_LABELS[@]}"; do
+        PROBE_LABEL="${PROBE_LABELS[$idx]}"
+        PROBE_ARGS="${PROBE_ARGS_LIST[$idx]}"
+        RUN_PREFIX="${RUN_PREFIX_LIST[$idx]}${RUN_TAG_PREFIX}"
+        if [ "$PROBE" == "linear" ]; then
+            echo "Probe Mode: Linear Probe (Frozen Encoder)"
+        elif [ "$PROBE" == "finetune" ]; then
+            echo "Probe Mode: Finetune (Unfrozen Encoder)"
+        else
+            echo "Probe Mode: LoRA FFN (${PROBE_LABEL})"
+        fi
 
-    # Loop over Species
-    for ENTRY in "${SELECTED_SPECIES_LIST[@]}"; do
+        # Loop over Species
+        for ENTRY in "${SELECTED_SPECIES_LIST[@]}"; do
         IFS=":" read -r SPECIES ANNOT_FILE SPEC_SUBDIR <<< "$ENTRY"
     
     ANNOT_PATH="$ANNOTATION_ROOT/$ANNOT_FILE"
@@ -627,7 +758,6 @@ PY
             echo "  Running Detection with ${SECONDS}s..."
             RUN_NAME="${RUN_PREFIX}${SPECIES}_detect_${SECONDS_TAG}s"
             TRAIN_DIR="$DET_WORK_DIR/train_${SECONDS_TAG}s"
-            record_run_name "$RUN_NAME"
             
             # Prepare Train Set
             copy_train_subset_seconds "$POOL_DIR" "$TRAIN_DIR" "$SECONDS" "$POOL_SEED"
@@ -636,7 +766,7 @@ PY
             # Check if already run (log exists)
             LOG_FILE="runs/$RUN_NAME/loss_log.txt"
             if [ ! -f "$LOG_FILE" ]; then
-                python src/supervised_train.py \
+                PYTHONWARNINGS=ignore python src/supervised_train.py \
                     --train_dir "$TRAIN_DIR" \
                     --val_dir "$TEST_DIR" \
                     --run_name "$RUN_NAME" \
@@ -645,7 +775,7 @@ PY
                     --mode detect \
                     --steps "$STEPS" \
                     --batch_size "$BATCH_SIZE" \
-                    --val_batch_size 1 \
+                    --val_batch_size "$BATCH_SIZE" \
                     --num_workers "$NUM_WORKERS" \
                     --amp \
                     --no-save_intermediate_checkpoints \
@@ -655,21 +785,16 @@ PY
                 echo "    Skipping training (run exists)"
             fi
 
+            VAL_F1="0"
             if [ -d "runs/$RUN_NAME/val_outputs" ]; then
-                eval_val_outputs_f1 "$RUN_NAME"
+                read -r VAL_F1 _ < <(eval_val_outputs_f1 "$RUN_NAME")
             fi
-            
-            # Extract Metrics
-            # Col 7 is val_f1
-            VAL_F1=$(tail -n +2 "$LOG_FILE" | cut -d',' -f7 | sort -n | tail -n 1)
-            # Handle empty/nan
             if [ -z "$VAL_F1" ]; then VAL_F1="0"; fi
-            
+
             # Error = 100 - F1
             ERROR=$(python -c "print(100 - float('$VAL_F1'))")
-            
-            echo "detect,$SPECIES,all,$SECONDS,$RUN_NAME,F1_Error,$ERROR" >> "$RESULTS_CSV"
-            echo "    Result: F1 Error = $ERROR %"
+
+            echo "    Result: F1 = $VAL_F1 %, F1 Error = $ERROR %"
         done
 
         # Cleanup copied spec files for this task to avoid filling disk
@@ -708,21 +833,24 @@ PY
             BIRD_TRAIN_POOL="$UNIT_BIRD_DIR/pool_train"
             BIRD_TEST="$UNIT_BIRD_DIR/test"
             BIRD_POOL_FIXED="$UNIT_BIRD_DIR/pool_fixed"
+            FILTERED_ANNOT="$UNIT_BIRD_DIR/annotations_filtered.json"
+            if [ ! -f "$FILTERED_ANNOT" ]; then
+                write_filtered_annotations "$ANNOT_PATH" "$BIRD" "$FILTERED_ANNOT"
+            fi
+            BIRD_ANNOT="$FILTERED_ANNOT"
 
             # 2. Split into Train Pool and Test (random within bird)
             if [ "$USE_FIXED_POOL" -eq 1 ]; then
-                make_fixed_pool_seconds "$SPEC_DIR" "$BIRD_POOL_FIXED" "$BIRD_TEST" "$POOL_SIZE" "$MAX_TRAIN" "$POOL_SEED" "$ANNOT_PATH" "$BIRD" "$CONTEXT_TIMEBINS"
+                make_fixed_pool_seconds "$SPEC_DIR" "$BIRD_POOL_FIXED" "$BIRD_TEST" "$POOL_SIZE" "$MAX_TRAIN" "$POOL_SEED" "$BIRD_ANNOT" "$BIRD" "$CONTEXT_TIMEBINS"
                 TRAIN_POOL_DIR="$BIRD_POOL_FIXED"
             else
                 if [ ! -d "$BIRD_TEST" ] || ! has_npy "$BIRD_TEST"; then
-                    FILTERED_ANNOT="$UNIT_BIRD_DIR/annotations_filtered.json"
-                    write_filtered_annotations "$ANNOT_PATH" "$BIRD" "$FILTERED_ANNOT"
                     python scripts/split_train_test.py \
                         --mode split \
                         --spec_dir "$SPEC_DIR" \
                         --train_dir "$BIRD_TRAIN_POOL" \
                         --test_dir "$BIRD_TEST" \
-                        --annotation_json "$FILTERED_ANNOT" \
+                        --annotation_json "$BIRD_ANNOT" \
                         --train_percent $((100 - TEST_PERCENT)) \
                         --ignore_bird_id
                 fi
@@ -739,24 +867,23 @@ PY
                 echo "    Running Unit Detection with ${SECONDS}s..."
                 RUN_NAME="${RUN_PREFIX}${SPECIES}_${BIRD}_unit_detect_${SECONDS_TAG}s"
                 TRAIN_DIR="$UNIT_BIRD_DIR/train_${SECONDS_TAG}s"
-                record_run_name "$RUN_NAME"
 
                 # Prepare Train Set
-                copy_train_subset_seconds "$TRAIN_POOL_DIR" "$TRAIN_DIR" "$SECONDS" "$POOL_SEED" "$ANNOT_PATH" "$BIRD" 1 "$CONTEXT_TIMEBINS"
+                copy_train_subset_seconds "$TRAIN_POOL_DIR" "$TRAIN_DIR" "$SECONDS" "$POOL_SEED" "$BIRD_ANNOT" "$BIRD" 1 "$CONTEXT_TIMEBINS"
 
                 # Run Training
                 LOG_FILE="runs/$RUN_NAME/loss_log.txt"
                 if [ ! -f "$LOG_FILE" ]; then
-                    python src/supervised_train.py \
+                    PYTHONWARNINGS=ignore python src/supervised_train.py \
                         --train_dir "$TRAIN_DIR" \
                         --val_dir "$BIRD_TEST" \
                         --run_name "$RUN_NAME" \
                         --pretrained_run "$PRETRAINED_RUN" \
-                        --annotation_file "$ANNOT_PATH" \
+                        --annotation_file "$BIRD_ANNOT" \
                         --mode unit_detect \
                         --steps "$STEPS" \
                         --batch_size "$BATCH_SIZE" \
-                    --val_batch_size 1 \
+                        --val_batch_size "$BATCH_SIZE" \
                         --num_workers "$NUM_WORKERS" \
                         --amp \
                         --no-save_intermediate_checkpoints \
@@ -766,20 +893,16 @@ PY
                     echo "    Skipping training (run exists)"
                 fi
 
+                VAL_F1="0"
                 if [ -d "runs/$RUN_NAME/val_outputs" ]; then
-                    eval_val_outputs_f1 "$RUN_NAME"
+                    read -r VAL_F1 _ < <(eval_val_outputs_f1 "$RUN_NAME")
                 fi
-
-                # Extract Metrics
-                # Col 7 is val_f1 (same logging format as detect)
-                VAL_F1=$(tail -n +2 "$LOG_FILE" | cut -d',' -f7 | sort -n | tail -n 1)
                 if [ -z "$VAL_F1" ]; then VAL_F1="0"; fi
 
                 # Error = 100 - F1
                 ERROR=$(python -c "print(100 - float('$VAL_F1'))")
 
-                echo "unit_detect,$SPECIES,$BIRD,$SECONDS,$RUN_NAME,F1_Error,$ERROR" >> "$RESULTS_CSV"
-                echo "      Result: F1 Error = $ERROR %"
+                echo "      Result: F1 = $VAL_F1 %, F1 Error = $ERROR %"
             done
 
             # Cleanup copied spec files for this bird to avoid filling disk
@@ -818,21 +941,24 @@ PY
             BIRD_TRAIN_POOL="$CLS_WORK_DIR/pool_train"
             BIRD_TEST="$CLS_WORK_DIR/test"
             BIRD_POOL_FIXED="$CLS_WORK_DIR/pool_fixed"
+            FILTERED_ANNOT="$CLS_WORK_DIR/annotations_filtered.json"
+            if [ ! -f "$FILTERED_ANNOT" ]; then
+                write_filtered_annotations "$ANNOT_PATH" "$BIRD" "$FILTERED_ANNOT"
+            fi
+            BIRD_ANNOT="$FILTERED_ANNOT"
             
             # 2. Split into Train Pool and Test
             if [ "$USE_FIXED_POOL" -eq 1 ]; then
-                make_fixed_pool_seconds "$SPEC_DIR" "$BIRD_POOL_FIXED" "$BIRD_TEST" "$POOL_SIZE" "$MAX_TRAIN" "$POOL_SEED" "$ANNOT_PATH" "$BIRD"
+                make_fixed_pool_seconds "$SPEC_DIR" "$BIRD_POOL_FIXED" "$BIRD_TEST" "$POOL_SIZE" "$MAX_TRAIN" "$POOL_SEED" "$BIRD_ANNOT" "$BIRD"
                 TRAIN_POOL_DIR="$BIRD_POOL_FIXED"
             else
                 if [ ! -d "$BIRD_TEST" ] || ! has_npy "$BIRD_TEST"; then
-                    FILTERED_ANNOT="$CLS_WORK_DIR/annotations_filtered.json"
-                    write_filtered_annotations "$ANNOT_PATH" "$BIRD" "$FILTERED_ANNOT"
                     python scripts/split_train_test.py \
                         --mode split \
                         --spec_dir "$SPEC_DIR" \
                         --train_dir "$BIRD_TRAIN_POOL" \
                         --test_dir "$BIRD_TEST" \
-                        --annotation_json "$FILTERED_ANNOT" \
+                        --annotation_json "$BIRD_ANNOT" \
                         --train_percent $((100 - TEST_PERCENT)) \
                         --ignore_bird_id # Already filtered by bird, so random split is fine
                 fi
@@ -849,24 +975,23 @@ PY
                 echo "    Running Classification with ${SECONDS}s..."
                 RUN_NAME="${RUN_PREFIX}${SPECIES}_${BIRD}_classify_${SECONDS_TAG}s"
                 TRAIN_DIR="$CLS_WORK_DIR/train_${SECONDS_TAG}s"
-                record_run_name "$RUN_NAME"
                 
                 # Prepare Train Set
-                copy_train_subset_seconds "$TRAIN_POOL_DIR" "$TRAIN_DIR" "$SECONDS" "$POOL_SEED"
+                copy_train_subset_seconds "$TRAIN_POOL_DIR" "$TRAIN_DIR" "$SECONDS" "$POOL_SEED" "$BIRD_ANNOT" "$BIRD" 1 "$CONTEXT_TIMEBINS"
                 
                 # Run Training
                 LOG_FILE="runs/$RUN_NAME/loss_log.txt"
                 if [ ! -f "$LOG_FILE" ]; then
-                    python src/supervised_train.py \
+                    PYTHONWARNINGS=ignore python src/supervised_train.py \
                         --train_dir "$TRAIN_DIR" \
                         --val_dir "$BIRD_TEST" \
                         --run_name "$RUN_NAME" \
                         --pretrained_run "$PRETRAINED_RUN" \
-                        --annotation_file "$ANNOT_PATH" \
+                        --annotation_file "$BIRD_ANNOT" \
                         --mode classify \
                         --steps "$STEPS" \
                         --batch_size "$BATCH_SIZE" \
-                    --val_batch_size 1 \
+                        --val_batch_size "$BATCH_SIZE" \
                         --num_workers "$NUM_WORKERS" \
                         --amp \
                         --no-save_intermediate_checkpoints \
@@ -876,20 +1001,15 @@ PY
                     echo "      Skipping training (run exists)"
                 fi
 
+                VAL_F1="0"
+                VAL_FER="0"
                 if [ -d "runs/$RUN_NAME/val_outputs" ]; then
-                    eval_val_outputs_f1 "$RUN_NAME"
+                    read -r VAL_F1 VAL_FER < <(eval_val_outputs_f1 "$RUN_NAME")
                 fi
-                
-                # Extract Metrics
-                # Col 5 is val_acc
-                VAL_ACC=$(tail -n +2 "$LOG_FILE" | cut -d',' -f5 | sort -n | tail -n 1)
-                if [ -z "$VAL_ACC" ]; then VAL_ACC="0"; fi
-                
-                # FER = 100 - Accuracy
-                FER=$(python -c "print(100 - float('$VAL_ACC'))")
-                
-                echo "classify,$SPECIES,$BIRD,$SECONDS,$RUN_NAME,FER,$FER" >> "$RESULTS_CSV"
-                echo "      Result: FER = $FER %"
+                if [ -z "$VAL_F1" ]; then VAL_F1="0"; fi
+                if [ -z "$VAL_FER" ]; then VAL_FER="0"; fi
+
+                echo "      Result: F1 = $VAL_F1 %, FER = $VAL_FER %"
             done
 
             # Cleanup copied spec files for this bird to avoid filling disk
@@ -900,42 +1020,8 @@ PY
         echo "Skipping Classification Task (TASK_MODE=$TASK_MODE)"
     fi
     done
+    done
 done
-
-# Generate Plots
-echo "Generating Plots..."
-python -c "from src.plotting_utils import plot_benchmark_results; plot_benchmark_results('$RESULTS_CSV', '$RESULTS_DIR')"
-
-echo "Evaluating val_outputs F1 per run..."
-
-python - <<PY
-import csv
-from pathlib import Path
-
-eval_csv = Path("$EVAL_DIR") / "eval_f1.csv"
-run_list_path = Path("$RUNS_LIST_FILE")
-if not eval_csv.exists() or not run_list_path.exists():
-    raise SystemExit(0)
-
-run_names = {line.strip() for line in run_list_path.read_text(encoding="utf-8").splitlines() if line.strip()}
-if not run_names:
-    raise SystemExit(0)
-
-rows = []
-with eval_csv.open("r", encoding="utf-8") as f:
-    reader = csv.DictReader(f)
-    for row in reader:
-        if row.get("run_name") in run_names:
-            rows.append(row)
-
-if not rows:
-    raise SystemExit(0)
-
-print("F1 results (val_outputs):")
-print("run_name\tmode\tspecies\tf1")
-for row in rows:
-    print(f"{row.get('run_name','')}\t{row.get('mode','')}\t{row.get('species','')}\t{row.get('f1','')}")
-PY
 
 # Cleanup temporary work directories
 echo "Cleaning up temporary files..."

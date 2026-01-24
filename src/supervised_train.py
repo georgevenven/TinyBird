@@ -15,6 +15,7 @@ from torch import nn
 import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
+from model import apply_lora_to_encoder, LoRALinear
 
 class SupervisedTinyBird(nn.Module):
     def __init__(
@@ -26,6 +27,9 @@ class SupervisedTinyBird(nn.Module):
         freeze_encoder_up_to=None,
         mode="detect",
         linear_probe=False,
+        lora_rank=0,
+        lora_alpha=1.0,
+        lora_dropout=0.0,
     ):
         """
         Supervised classification/detection model built on top of pretrained TinyBird encoder.
@@ -38,6 +42,9 @@ class SupervisedTinyBird(nn.Module):
             freeze_encoder_up_to: If set, freeze encoder layers up to this index (inclusive)
             mode: "detect" for binary detection, "classify" for multi-class classification
             linear_probe: If True, use a single linear layer instead of MLP
+            lora_rank: If > 0, apply LoRA adapters to encoder FFN layers
+            lora_alpha: LoRA alpha scaling factor
+            lora_dropout: LoRA dropout (applied before low-rank projection)
         """
         super().__init__()
         
@@ -50,9 +57,39 @@ class SupervisedTinyBird(nn.Module):
         self.mode = mode
         self.encoder_layer_idx = config.get("encoder_layer_idx", None)
         self.class_weighting = bool(config.get("class_weighting", False))
+        self.lora_rank = int(lora_rank)
+        self.lora_alpha = float(lora_alpha)
+        self.lora_dropout = float(lora_dropout)
         
+        # LoRA mode: inject adapters and train only them (plus classifier).
+        if self.lora_rank > 0:
+            replaced = apply_lora_to_encoder(
+                self.encoder,
+                rank=self.lora_rank,
+                alpha=self.lora_alpha,
+                dropout=self.lora_dropout,
+            )
+            if replaced == 0:
+                print("Warning: LoRA enabled but no FFN layers were replaced.")
+
+            # Freeze all encoder params, then unfreeze only LoRA params.
+            for param in self.encoder.parameters():
+                param.requires_grad = False
+            lora_param_count = 0
+            for module in self.encoder.modules():
+                if isinstance(module, LoRALinear):
+                    for param in module.lora_parameters():
+                        param.requires_grad = True
+                        lora_param_count += param.numel()
+            print(
+                "LoRA enabled - training adapters only "
+                f"(rank={self.lora_rank}, alpha={self.lora_alpha}, dropout={self.lora_dropout}, "
+                f"lora_params={lora_param_count:,})"
+            )
+            if freeze_encoder or freeze_encoder_up_to is not None:
+                print("LoRA enabled - ignoring freeze_encoder/freeze_encoder_up_to")
         # Freeze encoder if in MLP classifier mode
-        if freeze_encoder:
+        elif freeze_encoder:
             for param in self.encoder.parameters():
                 param.requires_grad = False
             print("Encoder frozen - training classifier only")
@@ -334,8 +371,8 @@ class Trainer():
         self.optimizer = AdamW(trainable_params, lr=config["lr"], weight_decay=config["weight_decay"])
         
         # Initialize LR scheduler (optional warmup + decay to min_lr)
-        warmup_steps = int(config.get("warmup_steps", 0))
-        min_lr = float(config.get("min_lr", 0.0))
+        warmup_steps = int(config.get("warmup_steps") or 0)
+        min_lr = float(config.get("min_lr") or 0.0)
         if warmup_steps < 0:
             raise ValueError(f"warmup_steps must be >= 0. Got {warmup_steps}")
         if min_lr < 0:
@@ -910,8 +947,18 @@ if __name__ == "__main__":
     parser.add_argument("--num_workers", type=int, default=8, help="number of DataLoader worker processes")
     parser.add_argument("--weight_decay", type=float, default=0.1, help="weight decay")
     parser.add_argument("--eval_every", type=int, default=25, help="evaluate every N steps")
-    parser.add_argument("--warmup_steps", type=int, default=0, help="linear warmup steps before decay (0 disables scheduler)")
-    parser.add_argument("--min_lr", type=float, default=0.0, help="minimum learning rate after decay (0 disables scheduler)")
+    parser.add_argument(
+        "--warmup_steps",
+        type=int,
+        default=None,
+        help="linear warmup steps before decay (omit to disable scheduler)",
+    )
+    parser.add_argument(
+        "--min_lr",
+        type=float,
+        default=None,
+        help="minimum learning rate after decay (omit to disable scheduler)",
+    )
 
     # Early stopping
     parser.add_argument("--early_stop_patience", type=int, default=8, help="stop if EMA-smoothed val_loss does not improve for N consecutive eval checks (0 disables)")
@@ -942,6 +989,9 @@ if __name__ == "__main__":
         default=None,
         help="freeze encoder layers up to this index (inclusive); negative allowed",
     )
+    parser.add_argument("--lora_rank", type=int, default=0, help="LoRA rank for encoder FFN (0 disables)")
+    parser.add_argument("--lora_alpha", type=float, default=16.0, help="LoRA alpha scaling factor")
+    parser.add_argument("--lora_dropout", type=float, default=0.0, help="LoRA dropout before low-rank projection")
     parser.add_argument("--linear_probe", action="store_true", help="use single linear layer instead of MLP")
     parser.add_argument(
         "--amp",
@@ -975,6 +1025,10 @@ if __name__ == "__main__":
     
     # Create supervised config
     config = vars(args)
+    if config.get("warmup_steps") is None:
+        config.pop("warmup_steps", None)
+    if config.get("min_lr") is None:
+        config.pop("min_lr", None)
     
     # Add necessary info from pretrained config
     config["num_timebins"] = pretrained_config["num_timebins"]
@@ -1000,7 +1054,10 @@ if __name__ == "__main__":
         freeze_encoder=config["freeze_encoder"],
         freeze_encoder_up_to=config.get("freeze_encoder_up_to", None),
         mode=config["mode"],
-        linear_probe=config.get("linear_probe", False)
+        linear_probe=config.get("linear_probe", False),
+        lora_rank=config.get("lora_rank", 0),
+        lora_alpha=config.get("lora_alpha", 16.0),
+        lora_dropout=config.get("lora_dropout", 0.0),
     )
     
     # Create trainer and train

@@ -1,6 +1,74 @@
 import torch, math 
 from torch import nn, zero_
 
+class LoRALinear(nn.Module):
+    def __init__(self, base_layer, rank, alpha=1.0, dropout=0.0):
+        super().__init__()
+        if not isinstance(base_layer, nn.Linear):
+            raise TypeError("LoRALinear expects a nn.Linear base layer")
+        rank = int(rank)
+        if rank <= 0:
+            raise ValueError(f"LoRA rank must be > 0, got {rank}")
+
+        self.base = base_layer
+        self.in_features = self.base.in_features
+        self.out_features = self.base.out_features
+        self.rank = rank
+        self.alpha = float(alpha)
+        self.scaling = self.alpha / float(self.rank)
+        self.lora_dropout = nn.Dropout(float(dropout)) if float(dropout) > 0.0 else nn.Identity()
+
+        self.lora_A = nn.Linear(self.base.in_features, self.rank, bias=False)
+        self.lora_B = nn.Linear(self.rank, self.base.out_features, bias=False)
+
+        nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))
+        nn.init.zeros_(self.lora_B.weight)
+
+    @property
+    def weight(self):
+        return self.base.weight + (self.lora_B.weight @ self.lora_A.weight) * self.scaling
+
+    @property
+    def bias(self):
+        return self.base.bias
+
+    def forward(self, x):
+        out = self.base(x)
+        lora_out = self.lora_B(self.lora_A(self.lora_dropout(x))) * self.scaling
+        return out + lora_out
+
+    def lora_parameters(self):
+        return (self.lora_A.weight, self.lora_B.weight)
+
+
+def apply_lora_to_encoder(model, rank, alpha=1.0, dropout=0.0, target_modules=("linear1", "linear2")):
+    """
+    Replace specified FFN Linear layers inside Transformer encoder layers with LoRA adapters.
+    Returns the number of layers replaced.
+    """
+    rank = int(rank)
+    if rank <= 0:
+        return 0
+
+    layers = getattr(model.encoder, "layers", None)
+    if layers is None:
+        raise RuntimeError("TinyBird.encoder does not expose .layers; cannot apply LoRA.")
+
+    replaced = 0
+    for layer in layers:
+        for name in target_modules:
+            mod = getattr(layer, name, None)
+            if mod is None:
+                continue
+            if isinstance(mod, LoRALinear):
+                continue
+            if not isinstance(mod, nn.Linear):
+                continue
+            setattr(layer, name, LoRALinear(mod, rank=rank, alpha=alpha, dropout=dropout))
+            replaced += 1
+
+    return replaced
+
 class TinyBird(nn.Module):
     def __init__(self, config):
         super().__init__()

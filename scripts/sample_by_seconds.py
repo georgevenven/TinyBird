@@ -95,6 +95,105 @@ def _load_recording_events(annotation_json, bird_id=None):
     return events_by_stem
 
 
+def _load_recording_units(annotation_json, bird_id=None, allowed_stems=None):
+    if not annotation_json:
+        return {}, set()
+    data = json.loads(Path(annotation_json).read_text(encoding="utf-8"))
+    units_by_stem = defaultdict(list)
+    all_units = set()
+    for rec in data.get("recordings", []):
+        if bird_id and rec.get("recording", {}).get("bird_id") != bird_id:
+            continue
+        fname = rec.get("recording", {}).get("filename")
+        if not fname:
+            continue
+        stem = Path(fname).stem
+        if allowed_stems is not None and stem not in allowed_stems:
+            continue
+        for event in rec.get("detected_events", []):
+            for unit in event.get("units", []):
+                unit_id = unit.get("id")
+                onset = unit.get("onset_ms")
+                offset = unit.get("offset_ms")
+                if unit_id is None or onset is None or offset is None:
+                    continue
+                onset = float(onset)
+                offset = float(offset)
+                if offset <= onset:
+                    continue
+                unit_id = int(unit_id)
+                units_by_stem[stem].append(
+                    {"unit_id": unit_id, "onset_ms": onset, "offset_ms": offset}
+                )
+                all_units.add(unit_id)
+    return units_by_stem, all_units
+
+
+def _build_unit_index(spec_dir, annotation_json, bird_id=None, allowed_stems=None):
+    units_by_stem, all_units = _load_recording_units(
+        annotation_json, bird_id=bird_id, allowed_stems=allowed_stems
+    )
+    if not units_by_stem:
+        return defaultdict(list), set()
+
+    unit_events = defaultdict(list)
+    for path in Path(spec_dir).glob("*.npy"):
+        base_stem, chunk_start, chunk_end = _parse_chunk_ms(path.stem)
+        if allowed_stems is not None and base_stem not in allowed_stems:
+            continue
+        units = units_by_stem.get(base_stem, [])
+        if not units:
+            continue
+        for unit in units:
+            onset = unit["onset_ms"]
+            offset = unit["offset_ms"]
+            if chunk_start is not None:
+                if offset <= chunk_start or onset >= chunk_end:
+                    continue
+                local_onset = max(onset, chunk_start) - chunk_start
+                local_offset = min(offset, chunk_end) - chunk_start
+            else:
+                local_onset = onset
+                local_offset = offset
+
+            if local_offset <= local_onset:
+                continue
+
+            unit_events[unit["unit_id"]].append(
+                {
+                    "path": path,
+                    "base_stem": base_stem,
+                    "chunk_start": chunk_start,
+                    "onset_ms": local_onset,
+                    "offset_ms": local_offset,
+                }
+            )
+
+    return unit_events, all_units
+
+
+def _center_window_on_unit(onset_bin, offset_bin, window_bins, timebins):
+    window_bins = min(window_bins, timebins)
+    center = (onset_bin + offset_bin) / 2.0
+    start = int(round(center - window_bins / 2.0))
+    start = max(0, min(start, timebins - window_bins))
+    end = start + window_bins
+    if onset_bin < start:
+        start = max(0, min(onset_bin, timebins - window_bins))
+        end = start + window_bins
+    if offset_bin > end:
+        start = max(0, min(offset_bin - window_bins, timebins - window_bins))
+        end = start + window_bins
+    return start, end
+
+
+def _chunk_bounds_to_ms(base_stem, chunk_start, start_bin, end_bin, sr, hop_size):
+    chunk_offset = int(chunk_start or 0)
+    start_ms = timebins_to_ms(start_bin, sr, hop_size) + chunk_offset
+    end_ms = timebins_to_ms(end_bin, sr, hop_size) + chunk_offset
+    return base_stem, start_ms, end_ms
+
+
 def _build_event_index(spec_dir, annotation_json, bird_id=None, allowed_stems=None, mode="classify"):
     events_by_stem = _load_recording_events(annotation_json, bird_id=bird_id)
     if not events_by_stem:
@@ -156,20 +255,24 @@ def _build_event_index(spec_dir, annotation_json, bird_id=None, allowed_stems=No
 
 
 def iter_files(spec_dir, order_file, seed, allowed_stems=None):
+    def is_allowed(path):
+        if allowed_stems is None:
+            return True
+        base_stem, _, _ = _parse_chunk_ms(path.stem)
+        return base_stem in allowed_stems
+
     if order_file:
         with open(order_file, "r") as f:
             names = [line.strip() for line in f if line.strip()]
         for name in names:
             path = spec_dir / name
             if path.exists():
-                if allowed_stems is None or path.stem in allowed_stems:
+                if is_allowed(path):
                     yield path
     else:
-        if allowed_stems is None:
-            files = sorted(spec_dir.glob("*.npy"))
-        else:
-            files = [spec_dir / f"{stem}.npy" for stem in sorted(allowed_stems)]
-            files = [p for p in files if p.exists()]
+        files = sorted(spec_dir.glob("*.npy"))
+        if allowed_stems is not None:
+            files = [p for p in files if is_allowed(p)]
         rng = random.Random(seed)
         rng.shuffle(files)
         for path in files:
@@ -227,79 +330,157 @@ def sample_by_seconds(
     event_pool = []
     unit_events = defaultdict(list)
     all_units = set()
-    if ensure_units or event_chunks:
+    if ensure_units:
+        unit_events, all_units = _build_unit_index(
+            spec_dir, annotation_json, bird_id=bird_id, allowed_stems=allowed_stems
+        )
+    elif event_chunks:
         event_pool, unit_events, all_units = _build_event_index(
             spec_dir, annotation_json, bird_id=bird_id, allowed_stems=allowed_stems, mode=mode
         )
 
-    used_event_keys = set()
     if ensure_units:
+        budget_bins = seconds_to_timebins(seconds, sr, hop_size)
+        planned = []
         missing_units = []
+        length_cache = {}
         for unit_id in sorted(all_units):
             events = unit_events.get(unit_id, [])
             if not events:
                 missing_units.append(unit_id)
                 continue
-            event = rng.choice(events)
-            event_key = (event["base_stem"], event["abs_onset_ms"], event["abs_offset_ms"])
-            used_event_keys.add(event_key)
-            path = event["path"]
-            arr = np.load(path, mmap_mode="r")
-            timebins = int(arr.shape[1])
+            entry = rng.choice(events)
+            path = entry["path"]
+            if path not in length_cache:
+                arr = np.load(path, mmap_mode="r")
+                length_cache[path] = int(arr.shape[1])
+            timebins = length_cache[path]
             if timebins == 0:
                 missing_units.append(unit_id)
                 continue
 
-            onset_bin = ms_to_timebins(event["onset_ms"], sr, hop_size)
-            offset_bin = ms_to_timebins(event["offset_ms"], sr, hop_size)
+            onset_bin = ms_to_timebins(entry["onset_ms"], sr, hop_size)
+            offset_bin = ms_to_timebins(entry["offset_ms"], sr, hop_size)
             onset_bin = max(0, min(onset_bin, timebins - 1))
             offset_bin = max(onset_bin + 1, min(offset_bin, timebins))
-
-            if event_chunks:
-                start_bin = onset_bin
-                end_bin = offset_bin
-            else:
-                window_bins = int(min_timebins) if min_timebins and min_timebins > 0 else timebins
-                window_bins = min(window_bins, timebins)
-                if window_bins <= 0:
-                    missing_units.append(unit_id)
-                    continue
-                if window_bins >= timebins:
-                    start_bin = 0
-                else:
-                    start_min = max(0, offset_bin - window_bins)
-                    start_max = min(onset_bin, timebins - window_bins)
-                    if start_min > start_max:
-                        start_bin = max(0, min(onset_bin, timebins - window_bins))
-                    else:
-                        start_bin = rng.randint(start_min, start_max)
-                end_bin = start_bin + window_bins
-                if end_bin > timebins:
-                    end_bin = timebins
-                    start_bin = max(0, end_bin - window_bins)
-
-            chunk = np.array(arr[:, start_bin:end_bin], dtype=np.float32)
-            base_stem = event["base_stem"]
-            if event_chunks:
-                start_ms = int(event["abs_onset_ms"])
-                end_ms = int(event["abs_offset_ms"])
-            else:
-                chunk_start = event.get("chunk_start") or 0
-                start_ms = timebins_to_ms(start_bin, sr, hop_size) + int(chunk_start)
-                end_ms = timebins_to_ms(end_bin, sr, hop_size) + int(chunk_start)
-            out_name = f"{base_stem}__ms_{start_ms}_{end_ms}.npy"
-            np.save(out_dir / out_name, chunk)
-            used_stems.add(base_stem)
-            total_seconds += (end_bin - start_bin) * hop_size / sr
+            unit_bins = max(1, offset_bin - onset_bin)
+            window_bins = unit_bins
+            if min_timebins and min_timebins > 0:
+                window_bins = max(int(min_timebins), unit_bins)
+            window_bins = min(window_bins, timebins)
+            if window_bins <= 0:
+                missing_units.append(unit_id)
+                continue
+            planned.append(
+                {
+                    "path": path,
+                    "base_stem": entry["base_stem"],
+                    "chunk_start": entry.get("chunk_start") or 0,
+                    "timebins": timebins,
+                    "onset_bin": onset_bin,
+                    "offset_bin": offset_bin,
+                    "unit_bins": unit_bins,
+                    "window_bins": window_bins,
+                }
+            )
+            used_stems.add(entry["base_stem"])
 
         if missing_units:
             print(f"Warning: Missing units with no available events/specs: {sorted(set(missing_units))}")
-        if total_seconds > seconds:
-            print(
-                f"Warning: unit coverage uses {total_seconds:.3f}s which exceeds target {seconds:.3f}s"
+        total_bins = sum(item["window_bins"] for item in planned)
+        if total_bins > budget_bins:
+            excess_bins = total_bins - budget_bins
+            order = list(range(len(planned)))
+            rng.shuffle(order)
+            for idx in order:
+                if excess_bins <= 0:
+                    break
+                item = planned[idx]
+                reducible = item["window_bins"] - item["unit_bins"]
+                if reducible <= 0:
+                    continue
+                reduce_by = min(reducible, excess_bins)
+                item["window_bins"] -= reduce_by
+                excess_bins -= reduce_by
+            if excess_bins > 0:
+                print(
+                    "Warning: unit coverage exceeds budget even after cropping to unit durations."
+                )
+
+        total_bins = 0
+        for item in planned:
+            path = item["path"]
+            arr = np.load(path, mmap_mode="r")
+            start_bin, end_bin = _center_window_on_unit(
+                item["onset_bin"],
+                item["offset_bin"],
+                item["window_bins"],
+                item["timebins"],
             )
+            chunk = np.array(arr[:, start_bin:end_bin], dtype=np.float32)
+            base_stem, start_ms, end_ms = _chunk_bounds_to_ms(
+                item["base_stem"],
+                item["chunk_start"],
+                start_bin,
+                end_bin,
+                sr,
+                hop_size,
+            )
+            out_name = f"{base_stem}__ms_{start_ms}_{end_ms}.npy"
+            np.save(out_dir / out_name, chunk)
+            total_bins += (end_bin - start_bin)
+
+        if total_bins < budget_bins:
+            for path in iter_files(spec_dir, order_file, seed, allowed_stems=allowed_stems):
+                base_stem, chunk_start, _ = _parse_chunk_ms(path.stem)
+                if base_stem in used_stems:
+                    continue
+                arr = np.load(path, mmap_mode="r")
+                timebins = int(arr.shape[1])
+                if timebins == 0:
+                    continue
+                if total_bins + timebins <= budget_bins:
+                    copy_or_move(path, out_dir / path.name, move)
+                    total_bins += timebins
+                    used_stems.add(base_stem)
+                    if total_bins >= budget_bins:
+                        break
+                    continue
+
+                if not truncate_last:
+                    break
+
+                remainder_bins = budget_bins - total_bins
+                if remainder_bins <= 0:
+                    break
+                remainder_bins = min(timebins, remainder_bins)
+                if remainder_bins >= timebins:
+                    copy_or_move(path, out_dir / path.name, move)
+                    total_bins += timebins
+                    break
+
+                if random_crop and remainder_bins < timebins:
+                    start_bin = rng.randint(0, max(0, timebins - remainder_bins))
+                else:
+                    start_bin = 0
+                end_bin = start_bin + remainder_bins
+                chunk = np.array(arr[:, start_bin:end_bin], dtype=np.float32)
+                base_stem, start_ms, end_ms = _chunk_bounds_to_ms(
+                    base_stem, chunk_start, start_bin, end_bin, sr, hop_size
+                )
+                out_name = f"{base_stem}__ms_{start_ms}_{end_ms}.npy"
+                np.save(out_dir / out_name, chunk)
+
+                if move:
+                    path.unlink()
+
+                total_bins += (end_bin - start_bin)
+                break
+
+        return total_bins * hop_size / sr
 
     if event_chunks:
+        used_event_keys = set()
         rng.shuffle(event_pool)
         for event in event_pool:
             if total_seconds >= seconds:
@@ -366,9 +547,11 @@ def sample_by_seconds(
             start_bin = 0
         end_bin = min(timebins, start_bin + remainder_bins)
         chunk = np.array(arr[:, start_bin:end_bin], dtype=np.float32)
-        start_ms = timebins_to_ms(start_bin, sr, hop_size)
-        end_ms = timebins_to_ms(end_bin, sr, hop_size)
-        out_name = f"{path.stem}__ms_{start_ms}_{end_ms}.npy"
+        base_stem, chunk_start, _ = _parse_chunk_ms(path.stem)
+        base_stem, start_ms, end_ms = _chunk_bounds_to_ms(
+            base_stem, chunk_start, start_bin, end_bin, sr, hop_size
+        )
+        out_name = f"{base_stem}__ms_{start_ms}_{end_ms}.npy"
         np.save(out_dir / out_name, chunk)
 
         if move:
