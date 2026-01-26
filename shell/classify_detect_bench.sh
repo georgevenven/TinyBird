@@ -35,6 +35,7 @@ CLASS_WEIGHTING=0
 SPECIES_FILTER=""
 LR="1e-4"
 FINETUNE_FREEZE_UP_TO=""
+RUNS_SUBDIR="benchmarks"
 
 # Probe Type: "linear", "finetune", or comma-separated list (e.g. "linear,finetune")
 PROBE_MODE="finetune"
@@ -96,6 +97,10 @@ while [[ $# -gt 0 ]]; do
         ;;
         --finetune_freeze_up_to)
         FINETUNE_FREEZE_UP_TO="$2"
+        shift 2
+        ;;
+        --runs_subdir)
+        RUNS_SUBDIR="$2"
         shift 2
         ;;
         --freeze_encoder_up_to)
@@ -219,6 +224,7 @@ if [ -n "$RUN_TAG" ]; then
     RUN_TAG_PREFIX="${RUN_TAG}_"
     RESULTS_DIR="${RESULTS_DIR}/results_${RUN_TAG}"
 fi
+RUNS_SUBDIR="${RUNS_SUBDIR%/}"
 
 # Ensure results directory exists before logging
 mkdir -p "$RESULTS_DIR"
@@ -244,6 +250,7 @@ printf '  "pool_size": %s,\n' "$POOL_SIZE" >> "$PARAMS_JSON"
 printf '  "max_train": %s,\n' "$MAX_TRAIN" >> "$PARAMS_JSON"
 printf '  "pool_seed": %s,\n' "$POOL_SEED" >> "$PARAMS_JSON"
 printf '  "run_tag": "%s",\n' "$RUN_TAG" >> "$PARAMS_JSON"
+printf '  "runs_subdir": "%s",\n' "$RUNS_SUBDIR" >> "$PARAMS_JSON"
 printf '  "class_weighting": %s,\n' "$CLASS_WEIGHTING" >> "$PARAMS_JSON"
 printf '  "lr": %s,\n' "$LR" >> "$PARAMS_JSON"
 if [ -n "$FINETUNE_FREEZE_UP_TO" ]; then
@@ -272,6 +279,7 @@ echo "   POOL_SIZE: $POOL_SIZE"
 echo "   MAX_TRAIN: $MAX_TRAIN"
 echo "   POOL_SEED: $POOL_SEED"
 echo "   RUN_TAG: $RUN_TAG"
+echo "   RUNS_SUBDIR: $RUNS_SUBDIR"
 echo "   CLASS_WEIGHTING: $CLASS_WEIGHTING"
 echo "   LR: $LR"
 if [ -n "$FINETUNE_FREEZE_UP_TO" ]; then
@@ -481,6 +489,7 @@ from pathlib import Path
 
 latest = Path("$latest_csv")
 dest = Path("$EVAL_DIR") / "eval_f1.csv"
+pretrained_run = "$PRETRAINED_RUN"
 if not latest.exists():
     raise SystemExit(0)
 
@@ -489,14 +498,13 @@ with latest.open("r", encoding="utf-8") as f:
 if not rows:
     raise SystemExit(0)
 
-if not dest.exists():
-    dest.write_text(latest.read_text(encoding="utf-8"), encoding="utf-8")
-    raise SystemExit(0)
-
-with dest.open("r", encoding="utf-8") as f:
-    reader = csv.DictReader(f)
-    fieldnames = reader.fieldnames or []
-    existing_rows = list(reader)
+fieldnames = []
+existing_rows = []
+if dest.exists():
+    with dest.open("r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames or []
+        existing_rows = list(reader)
 
 desired_fields = [
     "f1",
@@ -515,6 +523,7 @@ desired_fields = [
     "lr",
     "batch_size",
     "class_weighting",
+    "pretrained_run",
     "run_name",
     "created_at",
 ]
@@ -525,7 +534,10 @@ if missing or fieldnames != desired_fields:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for row in existing_rows:
-            writer.writerow({name: row.get(name, "") for name in fieldnames})
+            out_row = {name: row.get(name, "") for name in fieldnames}
+            if "pretrained_run" in fieldnames and not out_row.get("pretrained_run"):
+                out_row["pretrained_run"] = pretrained_run
+            writer.writerow(out_row)
 
 existing = {row.get("run_name") for row in existing_rows}
 
@@ -536,7 +548,10 @@ if not new_rows:
 with dest.open("a", encoding="utf-8", newline="") as f:
     writer = csv.DictWriter(f, fieldnames=fieldnames)
     for r in new_rows:
-        writer.writerow({name: r.get(name, "") for name in fieldnames})
+        out_row = {name: r.get(name, "") for name in fieldnames}
+        if "pretrained_run" in fieldnames and not out_row.get("pretrained_run"):
+            out_row["pretrained_run"] = pretrained_run
+        writer.writerow(out_row)
 PY
 
     python - <<PY
@@ -545,12 +560,13 @@ from pathlib import Path
 
 latest = Path("$latest_csv")
 run_name = "$run_name"
+base_name = run_name.split("/")[-1]
 f1 = "0"
 fer = "0"
 if latest.exists():
     with latest.open("r", encoding="utf-8") as f:
         for row in csv.DictReader(f):
-            if row.get("run_name") == run_name:
+            if row.get("run_name") in (run_name, base_name):
                 f1 = row.get("f1", "0") or "0"
                 fer = row.get("fer", "0") or "0"
                 break
@@ -627,6 +643,10 @@ PY
 
 
 # Loop over Probe Modes
+RUN_NAME_PREFIX=""
+if [ -n "$RUNS_SUBDIR" ]; then
+    RUN_NAME_PREFIX="${RUNS_SUBDIR}/"
+fi
 for PROBE in "${PROBE_MODES[@]}"; do
     PROBE="${PROBE// /}"
     PROBE_LABELS=()
@@ -668,7 +688,7 @@ for PROBE in "${PROBE_MODES[@]}"; do
     for idx in "${!PROBE_LABELS[@]}"; do
         PROBE_LABEL="${PROBE_LABELS[$idx]}"
         PROBE_ARGS="${PROBE_ARGS_LIST[$idx]}"
-        RUN_PREFIX="${RUN_PREFIX_LIST[$idx]}${RUN_TAG_PREFIX}"
+        RUN_PREFIX="${RUN_NAME_PREFIX}${RUN_PREFIX_LIST[$idx]}${RUN_TAG_PREFIX}"
         if [ "$PROBE" == "linear" ]; then
             echo "Probe Mode: Linear Probe (Frozen Encoder)"
         elif [ "$PROBE" == "finetune" ]; then

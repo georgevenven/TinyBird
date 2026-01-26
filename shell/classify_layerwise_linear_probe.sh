@@ -18,6 +18,7 @@ SPEC_ROOT="/media/george-vengrovski/disk2/specs"
 ANNOTATION_ROOT="/home/george-vengrovski/Documents/projects/TinyBird/files"
 RESULTS_DIR="results/layerwise_linear_probe"
 PRETRAINED_RUN="/home/george-vengrovski/Documents/projects/TinyBird/runs/tinybird_pretrain_20251122_091539"
+RUNS_SUBDIR="layerwise_linear"
 
 # Experiment Settings
 SAMPLE_SIZES=(100)
@@ -48,6 +49,10 @@ while [[ $# -gt 0 ]]; do
         PRETRAINED_RUN="$2"
         shift 2
         ;;
+        --runs_subdir)
+        RUNS_SUBDIR="$2"
+        shift 2
+        ;;
         --steps)
         STEPS="$2"
         shift 2
@@ -73,6 +78,7 @@ done
 
 # Ensure results directory exists before logging
 mkdir -p "$RESULTS_DIR"
+RUNS_SUBDIR="${RUNS_SUBDIR%/}"
 
 # Log resolved parameters (including defaults) to results directory
 PARAMS_JSON="$RESULTS_DIR/run_params_classify_layerwise_linear_probe.json"
@@ -82,6 +88,7 @@ printf '  "spec_root": "%s",\n' "$SPEC_ROOT" >> "$PARAMS_JSON"
 printf '  "annotation_root": "%s",\n' "$ANNOTATION_ROOT" >> "$PARAMS_JSON"
 printf '  "results_dir": "%s",\n' "$RESULTS_DIR" >> "$PARAMS_JSON"
 printf '  "pretrained_run": "%s",\n' "$PRETRAINED_RUN" >> "$PARAMS_JSON"
+printf '  "runs_subdir": "%s",\n' "$RUNS_SUBDIR" >> "$PARAMS_JSON"
 printf '  "steps": %s,\n' "$STEPS" >> "$PARAMS_JSON"
 printf '  "batch_size": %s,\n' "$BATCH_SIZE" >> "$PARAMS_JSON"
 printf '  "num_workers": %s,\n' "$NUM_WORKERS" >> "$PARAMS_JSON"
@@ -98,6 +105,7 @@ echo " Configuration:"
 echo "   SPEC_ROOT: $SPEC_ROOT"
 echo "   RESULTS_DIR: $RESULTS_DIR"
 echo "   PRETRAINED_RUN: $PRETRAINED_RUN"
+echo "   RUNS_SUBDIR: $RUNS_SUBDIR"
 echo "   STEPS: $STEPS"
 echo "   BATCH_SIZE: $BATCH_SIZE"
 echo "   MAX_BIRDS: $MAX_BIRDS"
@@ -201,7 +209,11 @@ for ENTRY in "${SPECIES_LIST[@]}"; do
 
             for N in "${SAMPLE_SIZES[@]}"; do
                 echo "      Running Classification with N=$N samples..."
-                RUN_NAME="${SPECIES}_${BIRD}_classify_${N}_layer${LAYER}"
+                RUN_NAME_PREFIX=""
+                if [ -n "$RUNS_SUBDIR" ]; then
+                    RUN_NAME_PREFIX="${RUNS_SUBDIR}/"
+                fi
+                RUN_NAME="${RUN_NAME_PREFIX}${SPECIES}_${BIRD}_classify_${N}_layer${LAYER}"
                 TRAIN_DIR="$CLS_WORK_DIR/train_${N}"
 
                 if [ ! -d "$TRAIN_DIR" ]; then
@@ -254,5 +266,4 @@ echo "Cleaning up temporary files..."
 rm -rf "$RESULTS_DIR/work"
 
 echo "Layerwise probe completed! Results: $RESULTS_CSV"
-
 

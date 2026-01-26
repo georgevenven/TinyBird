@@ -504,8 +504,13 @@ def sample_by_seconds(
                 continue
             chunk = np.array(arr[:, start_bin:end_bin], dtype=np.float32)
             base_stem = event["base_stem"]
-            start_ms = int(event["abs_onset_ms"])
-            end_ms = int(event["abs_offset_ms"])
+            chunk_start = int(event.get("chunk_start") or 0)
+            start_ms = timebins_to_ms(start_bin, sr, hop_size) + chunk_start
+            end_ms = timebins_to_ms(end_bin, sr, hop_size) + chunk_start
+            if start_ms < 0:
+                start_ms = 0
+            if end_ms <= start_ms:
+                continue
             out_name = f"{base_stem}__ms_{start_ms}_{end_ms}.npy"
             np.save(out_dir / out_name, chunk)
             used_event_keys.add(event_key)

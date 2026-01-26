@@ -185,29 +185,29 @@ def _parse_train_dir_metadata(train_dir: str) -> Tuple[str, str]:
 
 def _iter_run_dirs(runs_root: Path) -> Iterable[Tuple[str, Path]]:
     flat_runs: List[Path] = []
+    probe_dirs: List[Path] = []
     for child in sorted(runs_root.iterdir()):
         if not child.is_dir():
             continue
         if (child / "val_outputs").exists() or (child / "config.json").exists():
             flat_runs.append(child)
+        else:
+            probe_dirs.append(child)
 
-    if flat_runs:
-        for run_dir in flat_runs:
-            run_config = _load_run_config(run_dir)
-            yield _infer_probe_mode(run_dir.name, run_config), run_dir
-        return
+    for run_dir in flat_runs:
+        run_config = _load_run_config(run_dir)
+        yield _infer_probe_mode(run_dir.name, run_config), run_dir
 
-    for probe_dir in sorted(runs_root.iterdir()):
-        if not probe_dir.is_dir():
-            continue
+    for probe_dir in sorted(probe_dirs):
         probe_name = probe_dir.name
         for run_dir in sorted(probe_dir.iterdir()):
-            if run_dir.is_dir():
-                run_config = _load_run_config(run_dir)
-                if run_config:
-                    yield _infer_probe_mode(run_dir.name, run_config), run_dir
-                else:
-                    yield probe_name, run_dir
+            if not run_dir.is_dir():
+                continue
+            run_config = _load_run_config(run_dir)
+            if run_config:
+                yield _infer_probe_mode(run_dir.name, run_config), run_dir
+            else:
+                yield probe_name, run_dir
 
 
 def _valid_patches(length: int, patch_width: int) -> int:
@@ -409,7 +409,12 @@ def main() -> None:
                 run_filter.add(name)
 
     for probe_mode, run_dir in _iter_run_dirs(runs_root):
-        if run_filter and run_dir.name not in run_filter:
+        rel_name = ""
+        try:
+            rel_name = run_dir.relative_to(runs_root).as_posix()
+        except ValueError:
+            rel_name = run_dir.name
+        if run_filter and run_dir.name not in run_filter and rel_name not in run_filter:
             continue
         val_dir = run_dir / "val_outputs"
         if not val_dir.exists():

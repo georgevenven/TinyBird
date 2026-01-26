@@ -10,11 +10,16 @@ cd "$(dirname "$0")/.."
 
 BASE_ARGS=()
 RUN_TAG_PREFIX=""
+RUNS_SUBDIR="sweeps"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --run_tag)
         RUN_TAG_PREFIX="$2"
+        shift 2
+        ;;
+        --runs_subdir)
+        RUNS_SUBDIR="$2"
         shift 2
         ;;
         --help|-h)
@@ -32,6 +37,7 @@ done
 if [ -n "$RUN_TAG_PREFIX" ]; then
     RUN_TAG_PREFIX="${RUN_TAG_PREFIX}_"
 fi
+RUNS_SUBDIR="${RUNS_SUBDIR%/}"
 
 LORA_RANKS=(1 2 4 16)
 FINETUNE_LABELS=("finetune_full" "finetune_freeze3" "finetune_last1")
@@ -56,6 +62,7 @@ for LR in "${LRS[@]}"; do
                 --lora_rank "$RANK" \
                 --lr "$LR" \
                 "$CW_FLAG" \
+                --runs_subdir "$RUNS_SUBDIR" \
                 --run_tag "$RUN_TAG"
         done
 
@@ -70,6 +77,7 @@ for LR in "${LRS[@]}"; do
                 --probe_mode finetune
                 --lr "$LR"
                 "$CW_FLAG"
+                --runs_subdir "$RUNS_SUBDIR"
                 --run_tag "$RUN_TAG"
             )
             if [ -n "$FREEZE_UP_TO" ]; then
