@@ -26,6 +26,25 @@ def find_spec_matches(spec_dir, base_name):
         matches.extend(glob.glob(pattern))
     return matches
 
+
+def _same_path(a, b):
+    try:
+        return os.path.samefile(a, b)
+    except FileNotFoundError:
+        return os.path.abspath(a) == os.path.abspath(b)
+    except OSError:
+        return os.path.abspath(a) == os.path.abspath(b)
+
+
+def _copy_or_move(src, dst, move_files):
+    if _same_path(src, dst):
+        return False
+    if move_files:
+        shutil.move(src, dst)
+    else:
+        shutil.copy2(src, dst)
+    return True
+
 def split_data_random(input_file, spec_dir, train_dir, test_dir, train_percent=80, move_files=False):
     """Randomly split recordings without considering bird_id"""
     
@@ -60,10 +79,7 @@ def split_data_random(input_file, spec_dir, train_dir, test_dir, train_percent=8
         matches = find_spec_matches(spec_dir, base_name)
         for src in matches:
             dst = os.path.join(train_dir, os.path.basename(src))
-            if move_files:
-                shutil.move(src, dst)
-            else:
-                shutil.copy2(src, dst)
+            _copy_or_move(src, dst, move_files)
     
     # Copy/move test spec files
     print(f"{action} test files...")
@@ -73,10 +89,7 @@ def split_data_random(input_file, spec_dir, train_dir, test_dir, train_percent=8
         matches = find_spec_matches(spec_dir, base_name)
         for src in matches:
             dst = os.path.join(test_dir, os.path.basename(src))
-            if move_files:
-                shutil.move(src, dst)
-            else:
-                shutil.copy2(src, dst)
+            _copy_or_move(src, dst, move_files)
     
     # Copy audio_params.json to both directories
     audio_params = os.path.join(spec_dir, "audio_params.json")
@@ -159,10 +172,7 @@ def split_data(input_file, spec_dir, train_dir, test_dir, train_percent=80, move
         matches = find_spec_matches(spec_dir, base_name)
         for src in matches:
             dst = os.path.join(train_dir, os.path.basename(src))
-            if move_files:
-                shutil.move(src, dst)
-            else:
-                shutil.copy2(src, dst)
+            _copy_or_move(src, dst, move_files)
     
     # Copy/move test spec files
     print(f"{action} test files...")
@@ -172,10 +182,7 @@ def split_data(input_file, spec_dir, train_dir, test_dir, train_percent=80, move
         matches = find_spec_matches(spec_dir, base_name)
         for src in matches:
             dst = os.path.join(test_dir, os.path.basename(src))
-            if move_files:
-                shutil.move(src, dst)
-            else:
-                shutil.copy2(src, dst)
+            _copy_or_move(src, dst, move_files)
     
     # Copy audio_params.json to both directories
     audio_params = os.path.join(spec_dir, "audio_params.json")
@@ -216,11 +223,8 @@ def filter_by_bird(input_file, spec_dir, output_dir, bird_id, move_files=False):
         matches = find_spec_matches(spec_dir, base_name)
         for src in matches:
             dst = os.path.join(output_dir, os.path.basename(src))
-            if move_files:
-                shutil.move(src, dst)
-            else:
-                shutil.copy2(src, dst)
-            count += 1
+            if _copy_or_move(src, dst, move_files):
+                count += 1
             
     # Copy audio_params if exists
     audio_params = os.path.join(spec_dir, "audio_params.json")
@@ -253,10 +257,7 @@ def sample_files(spec_dir, output_dir, n_samples, move_files=False):
     
     for src in tqdm(selected_files):
         dst = os.path.join(output_dir, os.path.basename(src))
-        if move_files:
-            shutil.move(src, dst)
-        else:
-            shutil.copy2(src, dst)
+        _copy_or_move(src, dst, move_files)
         
     # Copy audio_params if exists
     audio_params = os.path.join(spec_dir, "audio_params.json")

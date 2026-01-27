@@ -19,7 +19,7 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 
@@ -343,7 +343,9 @@ def _eval_val_outputs_ms(
     val_dir: Path,
     annotation_json: Path,
     mode: str,
-    audio_params: Path,
+    audio_params: Optional[Path],
+    ms_per_timebin: Optional[float],
+    ms_per_timebin_by_file: Optional[Dict[str, float]],
     threshold: float,
 ) -> Dict[str, float]:
     logits = np.load(val_dir / "logits.npy", mmap_mode="r")
@@ -361,21 +363,49 @@ def _eval_val_outputs_ms(
 
     annotations = _load_annotations(str(annotation_json), mode)
 
-    with open(audio_params, "r") as f:
-        audio = json.load(f)
-    if "sr" not in audio or "hop_size" not in audio:
-        raise SystemExit(f"audio_params missing sr/hop_size: {audio_params}")
-    ms_per_timebin = float(audio["hop_size"]) / float(audio["sr"]) * 1000.0
+    default_ms_per_timebin: Optional[float] = float(ms_per_timebin) if ms_per_timebin is not None else None
+    if default_ms_per_timebin is None and audio_params is not None:
+        if not audio_params.exists():
+            raise SystemExit(f"audio_params not found: {audio_params}")
+        with open(audio_params, "r") as f:
+            audio = json.load(f)
+        if "sr" not in audio or "hop_size" not in audio:
+            raise SystemExit(f"audio_params missing sr/hop_size: {audio_params}")
+        default_ms_per_timebin = float(audio["hop_size"]) / float(audio["sr"]) * 1000.0
+
+    ms_by_file = {str(k): float(v) for k, v in (ms_per_timebin_by_file or {}).items()}
+    if default_ms_per_timebin is None and not ms_by_file:
+        raise SystemExit(
+            f"No ms_per_timebin available for run (missing audio_params and ms_per_timebin): {val_dir}"
+        )
+
+    def _ms_per_timebin_for(fn: str) -> float:
+        if fn in ms_by_file:
+            return float(ms_by_file[fn])
+        if default_ms_per_timebin is None:
+            raise SystemExit(f"No ms_per_timebin available for file: {fn}")
+        return float(default_ms_per_timebin)
 
     file_max_timebin: Dict[str, int] = {}
+    ms_per_timebin_by_file: Dict[str, float] = {}
     for fn, start, length in zip(filenames, window_starts, window_lengths):
         end = int(start) + int(length)
         file_max_timebin[fn] = max(file_max_timebin.get(fn, 0), end)
+        if fn not in ms_per_timebin_by_file:
+            ms_per_timebin_by_file[fn] = _ms_per_timebin_for(fn)
 
-    labels_by_file: Dict[str, np.ndarray] = {}
+    file_max_ms: Dict[str, int] = {}
+    for fn, max_t in file_max_timebin.items():
+        ms_ptb = ms_per_timebin_by_file.get(fn, _ms_per_timebin_for(fn))
+        file_max_ms[fn] = int(math.ceil(float(max_t) * float(ms_ptb)))
+
+    labels_ms_by_file: Dict[str, np.ndarray] = {}
+    preds_ms_by_file: Dict[str, np.ndarray] = {}
+    mask_ms_by_file: Dict[str, np.ndarray] = {}
     for fn, max_t in file_max_timebin.items():
         base_filename, chunk_start_ms, chunk_end_ms = parse_chunk_ms(fn)
         units = annotations.get(base_filename, [])
+        ms_ptb = ms_per_timebin_by_file.get(fn, _ms_per_timebin_for(fn))
         if chunk_start_ms is not None:
             clipped = []
             chunk_end = chunk_end_ms if chunk_end_ms is not None else float("inf")
@@ -386,15 +416,33 @@ def _eval_val_outputs_ms(
                 new_offset = min(offset_ms, chunk_end) - chunk_start_ms
                 clipped.append((new_onset, new_offset, class_id))
             units = clipped
-        labels_by_file[fn] = _labels_from_units(units, max_t, ms_per_timebin, mode)
-
-    all_preds = []
-    all_labels = []
+        n_ms = int(file_max_ms.get(fn, 0) or 0)
+        if n_ms <= 0:
+            n_ms = int(math.ceil(float(max_t) * float(ms_ptb)))
+        labels_ms = np.zeros((n_ms,), dtype=np.int64)
+        preds_ms = np.zeros((n_ms,), dtype=np.int64)
+        mask_ms = np.zeros((n_ms,), dtype=np.bool_)
+        for onset_ms, offset_ms, class_id in units:
+            onset_i = int(math.floor(float(onset_ms)))
+            offset_i = int(math.ceil(float(offset_ms)))
+            onset_i = max(0, min(onset_i, n_ms))
+            offset_i = max(0, min(offset_i, n_ms))
+            if offset_i <= onset_i:
+                continue
+            if mode == "classify":
+                labels_ms[onset_i:offset_i] = int(class_id)
+            else:
+                labels_ms[onset_i:offset_i] = 1
+        labels_ms_by_file[fn] = labels_ms
+        preds_ms_by_file[fn] = preds_ms
+        mask_ms_by_file[fn] = mask_ms
 
     for i in range(logits.shape[0]):
         fn = filenames[i]
         start = int(window_starts[i])
         length = int(window_lengths[i])
+        if length <= 0:
+            continue
 
         if mode in ["detect", "unit_detect"]:
             probs = 1.0 / (1.0 + np.exp(-logits[i, :, 0]))
@@ -403,14 +451,47 @@ def _eval_val_outputs_ms(
             pred_patches = np.argmax(logits[i, :, :], axis=-1).astype(np.int64)
 
         pred_time = np.repeat(pred_patches, patch_width)[:length]
-        labels_full = labels_by_file.get(fn, np.zeros((start + length,), dtype=np.int64))
-        label_time = labels_full[start : start + length]
+        ms_ptb = ms_per_timebin_by_file.get(fn, _ms_per_timebin_for(fn))
+        file_len_tb = int(file_max_timebin.get(fn, start + length))
+        file_len_ms = int(file_max_ms.get(fn, 0) or 0)
+        if file_len_ms <= 0:
+            file_len_ms = int(math.ceil(float(file_len_tb) * float(ms_ptb)))
+        preds_ms = preds_ms_by_file.get(fn)
+        labels_ms = labels_ms_by_file.get(fn)
+        mask_ms = mask_ms_by_file.get(fn)
+        if preds_ms is None or labels_ms is None or mask_ms is None:
+            continue
+        if preds_ms.shape[0] < file_len_ms:
+            file_len_ms = preds_ms.shape[0]
 
-        all_preds.append(pred_time)
-        all_labels.append(label_time)
+        for j in range(length):
+            tb_start = int(start + j)
+            tb_end = tb_start + 1
+            ms_start = int(math.floor(float(tb_start) * float(ms_ptb)))
+            if tb_end >= file_len_tb:
+                ms_end = file_len_ms
+            else:
+                ms_end = int(math.floor(float(tb_end) * float(ms_ptb)))
+            ms_start = max(0, min(ms_start, file_len_ms))
+            ms_end = max(ms_start + 1, min(ms_end, file_len_ms))
+            preds_ms[ms_start:ms_end] = int(pred_time[j])
+            mask_ms[ms_start:ms_end] = True
 
-    all_preds = np.concatenate(all_preds) if all_preds else np.array([], dtype=np.int64)
-    all_labels = np.concatenate(all_labels) if all_labels else np.array([], dtype=np.int64)
+    all_preds_list = []
+    all_labels_list = []
+    for fn, preds_ms in preds_ms_by_file.items():
+        labels_ms = labels_ms_by_file.get(fn)
+        mask_ms = mask_ms_by_file.get(fn)
+        if labels_ms is None or mask_ms is None:
+            continue
+        valid = mask_ms.astype(np.bool_)
+        if not valid.any():
+            continue
+        all_preds_list.append(preds_ms[valid])
+        all_labels_list.append(labels_ms[valid])
+
+    all_preds = np.concatenate(all_preds_list) if all_preds_list else np.array([], dtype=np.int64)
+    all_labels = np.concatenate(all_labels_list) if all_labels_list else np.array([], dtype=np.int64)
 
     if mode in ["detect", "unit_detect"]:
         f1 = _f1_binary(all_preds, all_labels)
@@ -565,7 +646,7 @@ def main() -> None:
 
         val_dir_cfg = run_config.get("val_dir")
         train_dir_cfg = run_config.get("train_dir")
-        audio_params_path = None
+        audio_params_path: Optional[Path] = None
         if val_dir_cfg:
             candidate = Path(val_dir_cfg)
             if not candidate.is_absolute():
@@ -580,10 +661,31 @@ def main() -> None:
             candidate = candidate / "audio_params.json"
             if candidate.exists():
                 audio_params_path = candidate
-        if audio_params_path is None:
-            raise SystemExit(f"audio_params.json not found for run: {run_dir}")
+        ms_per_timebin_default: Optional[float] = None
+        if run_config.get("ms_per_timebin") not in (None, ""):
+            try:
+                ms_per_timebin_default = float(run_config.get("ms_per_timebin"))
+            except (TypeError, ValueError):
+                ms_per_timebin_default = None
 
-        stats = _eval_val_outputs_ms(val_dir, annot_path, str(run_config.get("mode") or ""), audio_params_path, args.threshold)
+        ms_map: Optional[Dict[str, float]] = None
+        ms_map_path = val_dir / "ms_per_timebin_by_file.json"
+        if ms_map_path.exists():
+            try:
+                raw = json.loads(ms_map_path.read_text(encoding="utf-8"))
+                ms_map = {str(k): float(v) for k, v in raw.items()}
+            except Exception:
+                ms_map = None
+
+        stats = _eval_val_outputs_ms(
+            val_dir,
+            annot_path,
+            str(run_config.get("mode") or ""),
+            audio_params_path,
+            ms_per_timebin_default,
+            ms_map,
+            args.threshold,
+        )
         species = _species_from_run(run_dir)
         frozen_layers = _frozen_layers(run_config, pretrained_config)
         steps = run_config.get("steps", "")

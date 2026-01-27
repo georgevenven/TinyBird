@@ -19,7 +19,6 @@ from utils import (
     parse_chunk_ms,
     clip_labels_to_chunk,
     get_num_classes_from_annotations,
-    load_audio_params,
 )
 
 try:
@@ -71,6 +70,22 @@ def build_wav_index(wav_root, exts=(".wav", ".flac", ".ogg", ".mp3")):
         raise FileNotFoundError(f"No audio files found under: {wav_root}")
     _WAV_INDEX_CACHE[cache_key] = index
     return index
+
+
+def _load_ms_per_timebin_from_audio_params(spec_dir: Path) -> float | None:
+    audio_path = Path(spec_dir) / "audio_params.json"
+    if not audio_path.exists():
+        return None
+    try:
+        with audio_path.open("r", encoding="utf-8") as f:
+            audio = json.load(f)
+        sr = float(audio.get("sr", 0.0))
+        hop = float(audio.get("hop_size", 0.0))
+        if sr > 0 and hop > 0:
+            return hop / sr * 1000.0
+    except Exception:
+        return None
+    return None
 
 
 def _build_label_index(annotation_file, mode):
@@ -473,6 +488,8 @@ class AvesTrainer:
         trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         print(f"Total parameters: {total_params:,}")
         print(f"Trainable parameters: {trainable_params:,}")
+        self.min_samples = int(self.model.min_input_samples())
+        self._short_clip_warned = False
 
         trainable = [p for p in self.model.parameters() if p.requires_grad]
         self.optimizer = torch.optim.AdamW(
@@ -520,6 +537,25 @@ class AvesTrainer:
         audio = batch["audio"].to(self.device, non_blocking=True)
         lengths = batch["lengths"].to(self.device, non_blocking=True)
         labels = batch["labels"]
+        min_samples = int(self.min_samples)
+
+        if lengths.numel() > 0:
+            valid = (lengths >= min_samples)
+            if not torch.all(valid):
+                valid_list = valid.detach().cpu().tolist()
+                drop_n = int(len(valid_list) - sum(1 for v in valid_list if v))
+                if drop_n > 0 and not self._short_clip_warned:
+                    print(
+                        f"Warning: dropping {drop_n} clips shorter than min_input_samples={min_samples}."
+                    )
+                    self._short_clip_warned = True
+                if not any(valid_list):
+                    zero = torch.tensor(0.0, device=self.device)
+                    return zero, 0.0, 0.0, 0
+                keep_idx = [i for i, v in enumerate(valid_list) if v]
+                audio = audio[keep_idx]
+                lengths = lengths[keep_idx]
+                labels = [labels[i] for i in keep_idx]
 
         if train:
             self.model.set_train_mode()
@@ -669,19 +705,43 @@ class AvesTrainer:
             state_dict = torch.load(final_path, map_location="cpu")
             self.model.load_state_dict(state_dict)
 
-        audio_params = load_audio_params(val_dataset.spec_dir)
-        hop_size = float(audio_params["hop_size"])
-        sr = float(audio_params["sr"])
+        ms_per_timebin_default = float(self.config.get("ms_per_timebin") or 20.0)
+        audio_params_ms = _load_ms_per_timebin_from_audio_params(val_dataset.spec_dir)
+        if audio_params_ms is not None and audio_params_ms > 0:
+            ms_per_timebin_default = float(audio_params_ms)
+            print(
+                f"Using ms_per_timebin from audio_params.json: {ms_per_timebin_default:.4f} ms"
+            )
 
         window_timebins = int(self.config.get("num_timebins") or 0)
+        spec_lengths = {}
+        chunk_bounds = {}
+        lengths = []
+        for path in val_dataset.file_dirs:
+            filename = path.stem
+            base_filename, chunk_start_ms, chunk_end_ms = parse_chunk_ms(filename)
+            chunk_bounds[filename] = (base_filename, chunk_start_ms, chunk_end_ms)
+            total_t = 0
+            try:
+                arr = np.load(path, mmap_mode="r")
+                total_t = int(arr.shape[1])
+            except Exception:
+                total_t = 0
+            if (
+                total_t > 0
+                and chunk_start_ms is not None
+                and chunk_end_ms is not None
+                and ms_per_timebin_default > 0
+            ):
+                expected = int(
+                    round((float(chunk_end_ms) - float(chunk_start_ms)) / float(ms_per_timebin_default))
+                )
+                if expected > 0:
+                    total_t = min(total_t, expected)
+            spec_lengths[filename] = total_t
+            if total_t > 0:
+                lengths.append(total_t)
         if window_timebins <= 0:
-            lengths = []
-            for path in val_dataset.file_dirs[: min(len(val_dataset.file_dirs), 200)]:
-                try:
-                    arr = np.load(path, mmap_mode="r")
-                    lengths.append(int(arr.shape[1]))
-                except Exception:
-                    continue
             if not lengths:
                 raise RuntimeError("Unable to infer num_timebins for export; no files found.")
             window_timebins = int(np.median(lengths))
@@ -691,24 +751,10 @@ class AvesTrainer:
                 f"Warning: num_timebins not set; using inferred window_timebins={window_timebins}"
             )
 
-        meta = {
-            "run_name": self.config.get("run_name"),
-            "mode": self.config.get("mode"),
-            "num_classes": int(self.model.num_classes),
-            "patch_width": 1,
-            "n_timebins": int(window_timebins),
-            "final_weight_path": str(final_path) if final_path is not None else None,
-            "export_strategy": "tiled_full_file",
-            "export_stride_timebins": int(window_timebins),
-        }
-        with open(out_dir / "meta.json", "w") as f:
-            json.dump(meta, f, indent=2)
-
         window_index = []
         for path in val_dataset.file_dirs:
             filename = path.stem
-            arr = np.load(path, mmap_mode="r")
-            total_t = int(arr.shape[1])
+            total_t = int(spec_lengths.get(filename, 0) or 0)
             start = 0
             while start < total_t:
                 length = min(window_timebins, total_t - start)
@@ -724,6 +770,14 @@ class AvesTrainer:
             mode="w+",
             dtype=np.float32,
             shape=(n_windows, window_timebins, c_out),
+        )
+        # Keep the same val_outputs contract as supervised_train.py.
+        # For AVES, patch_width=1 so "patches" align with timebins/tokens.
+        labels_patches_mm = np.lib.format.open_memmap(
+            out_dir / "labels_patches.npy",
+            mode="w+",
+            dtype=np.int64,
+            shape=(n_windows, window_timebins),
         )
         window_starts_mm = np.lib.format.open_memmap(
             out_dir / "window_starts.npy",
@@ -742,17 +796,15 @@ class AvesTrainer:
         self.model.set_eval_mode()
         current_base = None
         current_wav = None
-        current_wav_sr = None
+        current_wav_duration_ms = 0.0
+        ms_per_timebin_by_file = {}
 
         min_samples = self.model.min_input_samples()
 
         for idx, (path, filename, start, length, _total_t) in enumerate(window_index):
-            base_filename, chunk_start_ms, _chunk_end_ms = parse_chunk_ms(filename)
-            start_ms = (float(start) * hop_size / sr * 1000.0)
-            end_ms = (float(start + length) * hop_size / sr * 1000.0)
-            if chunk_start_ms is not None:
-                start_ms += float(chunk_start_ms)
-                end_ms += float(chunk_start_ms)
+            base_filename, chunk_start_ms, chunk_end_ms = chunk_bounds.get(filename, (None, None, None))
+            if base_filename is None:
+                base_filename, chunk_start_ms, chunk_end_ms = parse_chunk_ms(filename)
 
             if base_filename != current_base:
                 wav_path = val_dataset.wav_index.get(base_filename)
@@ -766,8 +818,56 @@ class AvesTrainer:
                     wav_sr = val_dataset.audio_sr
                 current_base = base_filename
                 current_wav = wav
-                current_wav_sr = wav_sr
+                current_wav_duration_ms = float(wav.shape[0]) / float(val_dataset.audio_sr) * 1000.0
             wav = current_wav
+
+            total_t = int(spec_lengths.get(filename, 0) or 0)
+            duration_ms = current_wav_duration_ms
+            if chunk_start_ms is not None:
+                duration_ms = max(0.0, duration_ms - float(chunk_start_ms))
+                if chunk_end_ms is not None:
+                    duration_ms = max(0.0, float(chunk_end_ms) - float(chunk_start_ms))
+            ms_per_timebin = ms_per_timebin_default
+            if chunk_start_ms is None or chunk_end_ms is None:
+                if ms_per_timebin <= 0 and total_t > 0 and duration_ms > 0:
+                    ms_per_timebin = float(duration_ms) / float(total_t)
+            if ms_per_timebin <= 0:
+                ms_per_timebin = 20.0
+            ms_per_timebin_by_file[filename] = ms_per_timebin
+
+            labels_src = val_dataset.label_index.get(base_filename, [])
+            if chunk_start_ms is not None:
+                labels_src = clip_labels_to_chunk(labels_src, chunk_start_ms, chunk_end_ms)
+            labels_win = np.zeros((window_timebins,), dtype=np.int64)
+            if length > 0 and labels_src:
+                win_start_ms = float(start) * ms_per_timebin
+                win_end_ms = float(start + length) * ms_per_timebin
+                for label in labels_src:
+                    onset = float(label.get("onset_ms", 0.0))
+                    offset = float(label.get("offset_ms", 0.0))
+                    if chunk_start_ms is not None:
+                        onset -= float(chunk_start_ms)
+                        offset -= float(chunk_start_ms)
+                    if offset <= win_start_ms or onset >= win_end_ms:
+                        continue
+                    onset_rel = max(onset, win_start_ms) - win_start_ms
+                    offset_rel = min(offset, win_end_ms) - win_start_ms
+                    start_i = int(math.floor(onset_rel / ms_per_timebin))
+                    end_i = int(math.ceil(offset_rel / ms_per_timebin))
+                    start_i = max(0, min(start_i, length))
+                    end_i = max(start_i + 1, min(end_i, length))
+                    if val_dataset.mode in ("detect", "unit_detect"):
+                        labels_win[start_i:end_i] = 1
+                    else:
+                        cls = int(label.get("id", 0)) + 1
+                        labels_win[start_i:end_i] = cls
+            labels_patches_mm[idx, :] = labels_win
+
+            start_ms = float(start) * ms_per_timebin
+            end_ms = float(start + length) * ms_per_timebin
+            if chunk_start_ms is not None:
+                start_ms += float(chunk_start_ms)
+                end_ms += float(chunk_start_ms)
 
             start_sample = int(round(start_ms / 1000.0 * val_dataset.audio_sr))
             end_sample = int(round(end_ms / 1000.0 * val_dataset.audio_sr))
@@ -806,6 +906,23 @@ class AvesTrainer:
 
         with open(out_dir / "filenames.json", "w") as f:
             json.dump(filenames, f, indent=2)
+        with open(out_dir / "ms_per_timebin_by_file.json", "w") as f:
+            json.dump(ms_per_timebin_by_file, f, indent=2)
+
+        meta = {
+            "run_name": self.config.get("run_name"),
+            "mode": self.config.get("mode"),
+            "num_classes": int(self.model.num_classes),
+            "patch_width": 1,
+            "n_timebins": int(window_timebins),
+            "final_weight_path": str(final_path) if final_path is not None else None,
+            "export_strategy": "tiled_full_file",
+            "export_stride_timebins": int(window_timebins),
+            "ms_per_timebin_default": float(ms_per_timebin_default),
+            "ms_per_timebin_by_file": "ms_per_timebin_by_file.json",
+        }
+        with open(out_dir / "meta.json", "w") as f:
+            json.dump(meta, f, indent=2)
 
 
 def main():
@@ -832,6 +949,12 @@ def main():
 
     parser.add_argument("--audio_sr", type=int, default=16000)
     parser.add_argument("--num_timebins", type=int, default=0, help="window size in spectrogram timebins for val export (0 = infer)")
+    parser.add_argument(
+        "--ms_per_timebin",
+        type=float,
+        default=20.0,
+        help="Fallback ms per spectrogram timebin for val export.",
+    )
     parser.add_argument("--clip_seconds", type=float, default=None)
     parser.add_argument("--embedding_dim", type=int, default=768)
     parser.add_argument("--encoder_layer_idx", type=int, default=None)

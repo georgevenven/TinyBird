@@ -70,7 +70,7 @@ def _load_annotations(path: str, mode: str) -> Dict[str, List[Tuple[int, int, in
 def _labels_from_units(
     units: List[Tuple[int, int, int]],
     total_timebins: int,
-    ms_per_timebin: int,
+    ms_per_timebin: float,
     mode: str,
 ) -> np.ndarray:
     labels = np.zeros((total_timebins,), dtype=np.int64)
@@ -126,7 +126,24 @@ def main() -> None:
     parser.add_argument("--val_outputs_dir", type=str, required=True, help="runs/<run_name>/val_outputs")
     parser.add_argument("--annotation_json", type=str, required=True, help="Annotation JSON used for labels")
     parser.add_argument("--mode", type=str, required=True, choices=["detect", "unit_detect", "classify"])
-    parser.add_argument("--audio_params", type=str, required=True, help="audio_params.json (must include sr and hop_size)")
+    parser.add_argument(
+        "--audio_params",
+        type=str,
+        default=None,
+        help="audio_params.json (must include sr and hop_size)",
+    )
+    parser.add_argument(
+        "--ms_per_timebin",
+        type=float,
+        default=None,
+        help="Override ms per timebin when audio_params is unavailable.",
+    )
+    parser.add_argument(
+        "--ms_per_timebin_by_file",
+        type=str,
+        default=None,
+        help="Optional JSON mapping filename -> ms_per_timebin.",
+    )
     parser.add_argument("--threshold", type=float, default=0.5, help="Sigmoid threshold for binary preds")
     args = parser.parse_args()
 
@@ -146,22 +163,56 @@ def main() -> None:
 
     annotations = _load_annotations(args.annotation_json, args.mode)
 
-    with open(args.audio_params, "r") as f:
-        audio = json.load(f)
-    if "sr" not in audio or "hop_size" not in audio:
-        raise SystemExit(f"audio_params missing sr/hop_size: {args.audio_params}")
-    ms_per_timebin = float(audio["hop_size"]) / float(audio["sr"]) * 1000.0
+    default_ms_per_timebin = None
+    if args.ms_per_timebin is not None:
+        default_ms_per_timebin = float(args.ms_per_timebin)
+    elif args.audio_params:
+        with open(args.audio_params, "r") as f:
+            audio = json.load(f)
+        if "sr" not in audio or "hop_size" not in audio:
+            raise SystemExit(f"audio_params missing sr/hop_size: {args.audio_params}")
+        default_ms_per_timebin = float(audio["hop_size"]) / float(audio["sr"]) * 1000.0
+
+    ms_per_timebin_by_file: Dict[str, float] = {}
+    if args.ms_per_timebin_by_file:
+        mapping_path = Path(args.ms_per_timebin_by_file)
+        if not mapping_path.exists():
+            raise SystemExit(f"ms_per_timebin_by_file not found: {mapping_path}")
+        with open(mapping_path, "r") as f:
+            raw = json.load(f)
+        ms_per_timebin_by_file = {str(k): float(v) for k, v in raw.items()}
+
+    if default_ms_per_timebin is None and not ms_per_timebin_by_file:
+        raise SystemExit("Provide --ms_per_timebin, --audio_params, or --ms_per_timebin_by_file.")
+
+    def _ms_per_timebin_for(fn: str) -> float:
+        if fn in ms_per_timebin_by_file:
+            return float(ms_per_timebin_by_file[fn])
+        if default_ms_per_timebin is None:
+            raise SystemExit(f"No ms_per_timebin available for file: {fn}")
+        return float(default_ms_per_timebin)
 
     # Precompute max timebins per file to build label arrays
     file_max_timebin: Dict[str, int] = {}
+    ms_per_timebin_seen: Dict[str, float] = {}
     for fn, start, length in zip(filenames, window_starts, window_lengths):
         end = int(start) + int(length)
         file_max_timebin[fn] = max(file_max_timebin.get(fn, 0), end)
+        if fn not in ms_per_timebin_seen:
+            ms_per_timebin_seen[fn] = _ms_per_timebin_for(fn)
 
-    labels_by_file: Dict[str, np.ndarray] = {}
+    file_max_ms: Dict[str, int] = {}
+    for fn, max_t in file_max_timebin.items():
+        ms_ptb = ms_per_timebin_seen.get(fn, _ms_per_timebin_for(fn))
+        file_max_ms[fn] = int(math.ceil(float(max_t) * float(ms_ptb)))
+
+    labels_ms_by_file: Dict[str, np.ndarray] = {}
+    preds_ms_by_file: Dict[str, np.ndarray] = {}
+    mask_ms_by_file: Dict[str, np.ndarray] = {}
     for fn, max_t in file_max_timebin.items():
         base_filename, chunk_start_ms, chunk_end_ms = parse_chunk_ms(fn)
         units = annotations.get(base_filename, [])
+        ms_per_timebin = ms_per_timebin_seen.get(fn, _ms_per_timebin_for(fn))
         if chunk_start_ms is not None:
             clipped = []
             chunk_end = chunk_end_ms if chunk_end_ms is not None else float("inf")
@@ -172,16 +223,33 @@ def main() -> None:
                 new_offset = min(offset_ms, chunk_end) - chunk_start_ms
                 clipped.append((new_onset, new_offset, class_id))
             units = clipped
-        labels_by_file[fn] = _labels_from_units(units, max_t, ms_per_timebin, args.mode)
-
-    # Compute F1 across all windows
-    all_preds = []
-    all_labels = []
+        n_ms = int(file_max_ms.get(fn, 0) or 0)
+        if n_ms <= 0:
+            n_ms = int(math.ceil(float(max_t) * float(ms_per_timebin)))
+        labels_ms = np.zeros((n_ms,), dtype=np.int64)
+        preds_ms = np.zeros((n_ms,), dtype=np.int64)
+        mask_ms = np.zeros((n_ms,), dtype=np.bool_)
+        for onset_ms, offset_ms, class_id in units:
+            onset_i = int(math.floor(float(onset_ms)))
+            offset_i = int(math.ceil(float(offset_ms)))
+            onset_i = max(0, min(onset_i, n_ms))
+            offset_i = max(0, min(offset_i, n_ms))
+            if offset_i <= onset_i:
+                continue
+            if args.mode == "classify":
+                labels_ms[onset_i:offset_i] = int(class_id)
+            else:
+                labels_ms[onset_i:offset_i] = 1
+        labels_ms_by_file[fn] = labels_ms
+        preds_ms_by_file[fn] = preds_ms
+        mask_ms_by_file[fn] = mask_ms
 
     for i in range(logits.shape[0]):
         fn = filenames[i]
         start = int(window_starts[i])
         length = int(window_lengths[i])
+        if length <= 0:
+            continue
 
         # Convert logits -> per-timebin preds
         if args.mode in ["detect", "unit_detect"]:
@@ -191,15 +259,47 @@ def main() -> None:
             pred_patches = np.argmax(logits[i, :, :], axis=-1).astype(np.int64)
 
         pred_time = np.repeat(pred_patches, patch_width)[: length]
+        ms_ptb = ms_per_timebin_seen.get(fn, _ms_per_timebin_for(fn))
+        file_len_tb = int(file_max_timebin.get(fn, start + length))
+        file_len_ms = int(file_max_ms.get(fn, 0) or 0)
+        if file_len_ms <= 0:
+            file_len_ms = int(math.ceil(float(file_len_tb) * float(ms_ptb)))
+        preds_ms = preds_ms_by_file.get(fn)
+        labels_ms = labels_ms_by_file.get(fn)
+        mask_ms = mask_ms_by_file.get(fn)
+        if preds_ms is None or labels_ms is None or mask_ms is None:
+            continue
+        if preds_ms.shape[0] < file_len_ms:
+            file_len_ms = preds_ms.shape[0]
 
-        labels_full = labels_by_file.get(fn, np.zeros((start + length,), dtype=np.int64))
-        label_time = labels_full[start : start + length]
+        for j in range(length):
+            tb_start = int(start + j)
+            tb_end = tb_start + 1
+            ms_start = int(math.floor(float(tb_start) * float(ms_ptb)))
+            if tb_end >= file_len_tb:
+                ms_end = file_len_ms
+            else:
+                ms_end = int(math.floor(float(tb_end) * float(ms_ptb)))
+            ms_start = max(0, min(ms_start, file_len_ms))
+            ms_end = max(ms_start + 1, min(ms_end, file_len_ms))
+            preds_ms[ms_start:ms_end] = int(pred_time[j])
+            mask_ms[ms_start:ms_end] = True
 
-        all_preds.append(pred_time)
-        all_labels.append(label_time)
+    all_preds_list = []
+    all_labels_list = []
+    for fn, preds_ms in preds_ms_by_file.items():
+        labels_ms = labels_ms_by_file.get(fn)
+        mask_ms = mask_ms_by_file.get(fn)
+        if labels_ms is None or mask_ms is None:
+            continue
+        valid = mask_ms.astype(np.bool_)
+        if not valid.any():
+            continue
+        all_preds_list.append(preds_ms[valid])
+        all_labels_list.append(labels_ms[valid])
 
-    all_preds = np.concatenate(all_preds) if all_preds else np.array([], dtype=np.int64)
-    all_labels = np.concatenate(all_labels) if all_labels else np.array([], dtype=np.int64)
+    all_preds = np.concatenate(all_preds_list) if all_preds_list else np.array([], dtype=np.int64)
+    all_labels = np.concatenate(all_labels_list) if all_labels_list else np.array([], dtype=np.int64)
 
     if args.mode in ["detect", "unit_detect"]:
         f1 = _f1_binary(all_preds, all_labels)

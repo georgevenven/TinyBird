@@ -24,10 +24,14 @@ RESULTS_PREFIX="aves_benchmark"
 AVES_MODEL="/home/george-vengrovski/Documents/projects/TinyBird/files/aves-base-bio.torchaudio.pt"
 AVES_CONFIG="/home/george-vengrovski/Documents/projects/TinyBird/files/aves-base-bio.torchaudio.model_config.json"
 AVES_SR=16000
+AVES_MS_PER_TIMEBIN=20
 EMBEDDING_DIM=768
+CONTEXT_SECONDS=2
 
 # Experiment Settings
-SAMPLE_SECONDS=(100)
+# Default to an effectively "max" budget so we use the full train pool
+# (mirrors classify_detect_linear_probe_sweep.sh behavior).
+SAMPLE_SECONDS=(1000000000)
 TEST_PERCENT=20
 STEPS=100
 BATCH_SIZE=12
@@ -43,6 +47,7 @@ LR="1e-4"
 LR_SET=0
 RUNS_SUBDIR="aves_bench"
 CONTEXT_TIMEBINS=0
+CONTEXT_TIMEBINS_SET=0
 PRETRAINED_RUN=""
 
 # Probe Type: "linear", "finetune", or comma-separated list
@@ -87,6 +92,10 @@ while [[ $# -gt 0 ]]; do
         ;;
         --aves_sr)
         AVES_SR="$2"
+        shift 2
+        ;;
+        --ms_per_timebin)
+        AVES_MS_PER_TIMEBIN="$2"
         shift 2
         ;;
         --embedding_dim)
@@ -164,6 +173,11 @@ while [[ $# -gt 0 ]]; do
         ;;
         --context_timebins)
         CONTEXT_TIMEBINS="$2"
+        CONTEXT_TIMEBINS_SET=1
+        shift 2
+        ;;
+        --context_seconds)
+        CONTEXT_SECONDS="$2"
         shift 2
         ;;
         *)
@@ -205,6 +219,7 @@ printf '  "results_dir": "%s",\n' "$RESULTS_DIR" >> "$PARAMS_JSON"
 printf '  "results_name": "%s",\n' "$RESULTS_NAME" >> "$PARAMS_JSON"
 printf '  "aves_model": "%s",\n' "$AVES_MODEL" >> "$PARAMS_JSON"
 printf '  "aves_config": "%s",\n' "$AVES_CONFIG" >> "$PARAMS_JSON"
+printf '  "ms_per_timebin": %s,\n' "$AVES_MS_PER_TIMEBIN" >> "$PARAMS_JSON"
 printf '  "probe_mode": "%s",\n' "$PROBE_MODE" >> "$PARAMS_JSON"
 printf '  "task_mode": "%s",\n' "$TASK_MODE" >> "$PARAMS_JSON"
 printf '  "steps": %s,\n' "$STEPS" >> "$PARAMS_JSON"
@@ -234,6 +249,7 @@ echo "   RESULTS_DIR: $RESULTS_DIR"
 echo "   RESULTS_NAME: $RESULTS_NAME"
 echo "   AVES_MODEL: $AVES_MODEL"
 echo "   AVES_CONFIG: $AVES_CONFIG"
+echo "   MS_PER_TIMEBIN: $AVES_MS_PER_TIMEBIN"
 echo "   TASK_MODE: $TASK_MODE"
 echo "   PROBE_MODE: $PROBE_MODE"
 echo "   MAX_BIRDS: $MAX_BIRDS"
@@ -466,14 +482,13 @@ eval_val_outputs_f1() {
     local run_name="$1"
     local annot_json="$2"
     local mode="$3"
-    local audio_params="$4"
     local dest_csv="$EVAL_DIR/eval_f1.csv"
 
     if [ -z "$run_name" ]; then
         return
     fi
-    if [ -z "$annot_json" ] || [ -z "$mode" ] || [ -z "$audio_params" ]; then
-        echo "Missing annot_json/mode/audio_params for eval: $run_name" 1>&2
+    if [ -z "$annot_json" ] || [ -z "$mode" ]; then
+        echo "Missing annot_json/mode for eval: $run_name" 1>&2
         return
     fi
 
@@ -486,28 +501,14 @@ eval_val_outputs_f1() {
         --pretrained_run "$PRETRAINED_RUN" 1>&2
 
     ms_f1=$(python - <<PY
-import json
-import math
 import subprocess
 from pathlib import Path
-
-audio_path = Path("$audio_params")
-if not audio_path.exists():
-    raise SystemExit(f"audio_params.json not found: {audio_path}")
-audio = json.loads(audio_path.read_text(encoding="utf-8"))
-sr = audio.get("sr")
-hop = audio.get("hop_size")
-if sr is None or hop is None:
-    raise SystemExit(f"audio_params missing sr/hop_size: {audio_path}")
-ms_per_timebin = float(hop) / float(sr) * 1000.0
-ms_round = int(round(ms_per_timebin))
-if ms_round <= 0 or abs(ms_per_timebin - ms_round) > 1e-6:
-    raise SystemExit(f"Non-integer ms_per_timebin={ms_per_timebin:.6f} from {audio_path}")
 
 val_outputs = Path("$PROJECT_ROOT") / "runs" / "$run_name" / "val_outputs"
 if not val_outputs.exists():
     raise SystemExit(f"val_outputs not found: {val_outputs}")
 
+ms_map = val_outputs / "ms_per_timebin_by_file.json"
 cmd = [
     "python",
     "scripts/eval/eval_ms_f1.py",
@@ -518,8 +519,10 @@ cmd = [
     "--mode",
     "$mode",
     "--ms_per_timebin",
-    str(ms_round),
+    str(float("$AVES_MS_PER_TIMEBIN")),
 ]
+if ms_map.exists():
+    cmd.extend(["--ms_per_timebin_by_file", str(ms_map)])
 out = subprocess.check_output(cmd, text=True).strip().splitlines()
 if not out:
     raise SystemExit("eval_ms_f1 produced no output")
@@ -628,10 +631,43 @@ for PROBE in "${PROBE_MODES[@]}"; do
             WAV_DIR="$WAV_SPEC_DIR"
         fi
         AUDIO_PARAMS_SRC="$SPEC_DIR/audio_params.json"
+        SPEC_MS_PER_TIMEBIN="$AVES_MS_PER_TIMEBIN"
+        if [ -f "$AUDIO_PARAMS_SRC" ]; then
+            SPEC_MS_PER_TIMEBIN=$(python - <<PY
+import json
+from pathlib import Path
+p = Path("$AUDIO_PARAMS_SRC")
+try:
+    data = json.loads(p.read_text())
+    sr = float(data.get("sr", 0.0))
+    hop = float(data.get("hop_size", 0.0))
+    if sr > 0 and hop > 0:
+        print(hop / sr * 1000.0)
+    else:
+        print(float("$AVES_MS_PER_TIMEBIN"))
+except Exception:
+    print(float("$AVES_MS_PER_TIMEBIN"))
+PY
+)
+        fi
+        if [ "$CONTEXT_TIMEBINS_SET" -eq 0 ]; then
+            CONTEXT_TIMEBINS=$(python - <<PY
+ms = float("$SPEC_MS_PER_TIMEBIN")
+if ms <= 0:
+    ms = 20.0
+print(max(1, int(round(float("$CONTEXT_SECONDS") * 1000.0 / ms))))
+PY
+)
+        fi
+        CLIP_SECONDS="$CONTEXT_SECONDS"
+        AVES_MS_PER_TIMEBIN="$SPEC_MS_PER_TIMEBIN"
 
         echo "Processing $SPECIES ($PROBE_LABEL)..."
         echo "  Annotation: $ANNOT_PATH"
         echo "  Spectrograms: $SPEC_DIR"
+        echo "  ms_per_timebin: $SPEC_MS_PER_TIMEBIN"
+        echo "  context_timebins: $CONTEXT_TIMEBINS"
+        echo "  clip_seconds: $CLIP_SECONDS"
 
         if [ ! -f "$ANNOT_PATH" ]; then
             echo "Error: Annotation file not found at $ANNOT_PATH"
@@ -670,6 +706,8 @@ PY
                         --train_percent $((100 - TEST_PERCENT)) \
                         --ignore_bird_id \
                         --mode split
+                    copy_audio_params "$POOL_DIR"
+                    copy_audio_params "$TEST_DIR"
                     make_train_order "$POOL_DIR" "$POOL_SEED"
                 else
                     echo "  Test Set already exists."
@@ -697,7 +735,9 @@ PY
                         --aves_model_path "$AVES_MODEL" \
                         --aves_config_path "$AVES_CONFIG" \
                         --audio_sr "$AVES_SR" \
+                        --ms_per_timebin "$SPEC_MS_PER_TIMEBIN" \
                         --embedding_dim "$EMBEDDING_DIM" \
+                        --clip_seconds "$CLIP_SECONDS" \
                         $([ "$CONTEXT_TIMEBINS" -gt 0 ] && echo "--num_timebins $CONTEXT_TIMEBINS") \
                         --steps "$STEPS" \
                         --batch_size "$BATCH_SIZE" \
@@ -711,7 +751,7 @@ PY
 
                 VAL_F1="0"
                 if [ -d "runs/$RUN_NAME/val_outputs" ]; then
-                    read -r VAL_F1 _ < <(eval_val_outputs_f1 "$RUN_NAME" "$ANNOT_PATH" "detect" "$TEST_DIR/audio_params.json")
+                    read -r VAL_F1 _ < <(eval_val_outputs_f1 "$RUN_NAME" "$ANNOT_PATH" "detect")
                 fi
                 if [ -z "$VAL_F1" ]; then VAL_F1="0"; fi
                 ERROR=$(python - <<PY
@@ -751,6 +791,7 @@ PY
                 mkdir -p "$UNIT_BIRD_DIR"
 
                 BIRD_TRAIN_POOL="$UNIT_BIRD_DIR/pool_train"
+                BIRD_TRAIN_POOL_SPLIT="$UNIT_BIRD_DIR/pool_train_split"
                 BIRD_TEST="$UNIT_BIRD_DIR/test"
                 BIRD_POOL_FIXED="$UNIT_BIRD_DIR/pool_fixed"
                 FILTERED_ANNOT="$UNIT_BIRD_DIR/annotations_filtered.json"
@@ -766,7 +807,7 @@ PY
                     make_fixed_pool_seconds "$SPEC_DIR" "$BIRD_POOL_FIXED" "$BIRD_TEST" "$POOL_SIZE" "$MAX_TRAIN" "$POOL_SEED" "$BIRD_ANNOT" "$BIRD" "$CONTEXT_TIMEBINS"
                     TRAIN_POOL_DIR="$BIRD_POOL_FIXED"
                 else
-                    if [ ! -d "$BIRD_TEST" ] || ! has_npy "$BIRD_TEST"; then
+                    if [ ! -d "$BIRD_TEST" ] || ! has_npy "$BIRD_TEST" || [ ! -d "$BIRD_TRAIN_POOL_SPLIT" ] || ! has_npy "$BIRD_TRAIN_POOL_SPLIT"; then
                         python scripts/split_train_test.py \
                             --mode filter_bird \
                             --spec_dir "$SPEC_DIR" \
@@ -776,13 +817,16 @@ PY
                         python scripts/split_train_test.py \
                             --mode split \
                             --spec_dir "$BIRD_TRAIN_POOL" \
-                            --train_dir "$BIRD_TRAIN_POOL" \
+                            --train_dir "$BIRD_TRAIN_POOL_SPLIT" \
                             --test_dir "$BIRD_TEST" \
                             --annotation_json "$BIRD_ANNOT" \
                             --train_percent $((100 - TEST_PERCENT)) \
                             --ignore_bird_id
+                        copy_audio_params "$BIRD_TRAIN_POOL"
+                        copy_audio_params "$BIRD_TRAIN_POOL_SPLIT"
+                        copy_audio_params "$BIRD_TEST"
                     fi
-                    TRAIN_POOL_DIR="$BIRD_TRAIN_POOL"
+                    TRAIN_POOL_DIR="$BIRD_TRAIN_POOL_SPLIT"
                 fi
 
                 for SECONDS in "${SAMPLE_SECONDS[@]}"; do
@@ -804,7 +848,9 @@ PY
                             --aves_model_path "$AVES_MODEL" \
                             --aves_config_path "$AVES_CONFIG" \
                             --audio_sr "$AVES_SR" \
+                            --ms_per_timebin "$SPEC_MS_PER_TIMEBIN" \
                             --embedding_dim "$EMBEDDING_DIM" \
+                            --clip_seconds "$CLIP_SECONDS" \
                             $([ "$CONTEXT_TIMEBINS" -gt 0 ] && echo "--num_timebins $CONTEXT_TIMEBINS") \
                             --steps "$STEPS" \
                             --batch_size "$BATCH_SIZE" \
@@ -818,7 +864,7 @@ PY
 
                     VAL_F1="0"
                     if [ -d "runs/$RUN_NAME/val_outputs" ]; then
-                        read -r VAL_F1 _ < <(eval_val_outputs_f1 "$RUN_NAME" "$BIRD_ANNOT" "unit_detect" "$BIRD_TEST/audio_params.json")
+                        read -r VAL_F1 _ < <(eval_val_outputs_f1 "$RUN_NAME" "$BIRD_ANNOT" "unit_detect")
                     fi
                     if [ -z "$VAL_F1" ]; then VAL_F1="0"; fi
                     ERROR=$(python - <<PY
@@ -860,6 +906,7 @@ PY
                 mkdir -p "$CLS_BIRD_DIR"
 
                 BIRD_TRAIN_POOL="$CLS_BIRD_DIR/pool_train"
+                BIRD_TRAIN_POOL_SPLIT="$CLS_BIRD_DIR/pool_train_split"
                 BIRD_TEST="$CLS_BIRD_DIR/test"
                 BIRD_POOL_FIXED="$CLS_BIRD_DIR/pool_fixed"
                 FILTERED_ANNOT="$CLS_BIRD_DIR/annotations_filtered.json"
@@ -875,7 +922,7 @@ PY
                     make_fixed_pool_seconds "$SPEC_DIR" "$BIRD_POOL_FIXED" "$BIRD_TEST" "$POOL_SIZE" "$MAX_TRAIN" "$POOL_SEED" "$BIRD_ANNOT" "$BIRD"
                     TRAIN_POOL_DIR="$BIRD_POOL_FIXED"
                 else
-                    if [ ! -d "$BIRD_TEST" ] || ! has_npy "$BIRD_TEST"; then
+                    if [ ! -d "$BIRD_TEST" ] || ! has_npy "$BIRD_TEST" || [ ! -d "$BIRD_TRAIN_POOL_SPLIT" ] || ! has_npy "$BIRD_TRAIN_POOL_SPLIT"; then
                         python scripts/split_train_test.py \
                             --mode filter_bird \
                             --spec_dir "$SPEC_DIR" \
@@ -885,13 +932,16 @@ PY
                         python scripts/split_train_test.py \
                             --mode split \
                             --spec_dir "$BIRD_TRAIN_POOL" \
-                            --train_dir "$BIRD_TRAIN_POOL" \
+                            --train_dir "$BIRD_TRAIN_POOL_SPLIT" \
                             --test_dir "$BIRD_TEST" \
                             --annotation_json "$BIRD_ANNOT" \
                             --train_percent $((100 - TEST_PERCENT)) \
                             --ignore_bird_id
+                        copy_audio_params "$BIRD_TRAIN_POOL"
+                        copy_audio_params "$BIRD_TRAIN_POOL_SPLIT"
+                        copy_audio_params "$BIRD_TEST"
                     fi
-                    TRAIN_POOL_DIR="$BIRD_TRAIN_POOL"
+                    TRAIN_POOL_DIR="$BIRD_TRAIN_POOL_SPLIT"
                 fi
 
                 for SECONDS in "${SAMPLE_SECONDS[@]}"; do
@@ -913,7 +963,9 @@ PY
                             --aves_model_path "$AVES_MODEL" \
                             --aves_config_path "$AVES_CONFIG" \
                             --audio_sr "$AVES_SR" \
+                            --ms_per_timebin "$SPEC_MS_PER_TIMEBIN" \
                             --embedding_dim "$EMBEDDING_DIM" \
+                            --clip_seconds "$CLIP_SECONDS" \
                             $([ "$CONTEXT_TIMEBINS" -gt 0 ] && echo "--num_timebins $CONTEXT_TIMEBINS") \
                             --steps "$STEPS" \
                             --batch_size "$BATCH_SIZE" \
@@ -929,7 +981,7 @@ PY
 
                     VAL_F1="0"
                     if [ -d "runs/$RUN_NAME/val_outputs" ]; then
-                        read -r VAL_F1 VAL_FER < <(eval_val_outputs_f1 "$RUN_NAME" "$BIRD_ANNOT" "classify" "$BIRD_TEST/audio_params.json")
+                        read -r VAL_F1 VAL_FER < <(eval_val_outputs_f1 "$RUN_NAME" "$BIRD_ANNOT" "classify")
                     fi
                     if [ -z "$VAL_F1" ]; then VAL_F1="0"; fi
                     ERROR=$(python - <<PY
