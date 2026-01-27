@@ -12,7 +12,11 @@ PROJECT_ROOT="$(pwd)"
 # ================= CONFIGURATION =================
 SPEC_ROOT="specs"
 ANNOTATION_ROOT="files"
-RESULTS_DIR="results/linear_probe"
+RESULTS_DIR_DEFAULT="results/linear_probe"
+RESULTS_DIR="$RESULTS_DIR_DEFAULT"
+RESULTS_DIR_SET=0
+RESULTS_NAME=""
+RESULTS_PREFIX="linear_probe_sweep"
 PRETRAINED_RUNS=()
 
 # Experiment Settings
@@ -43,6 +47,11 @@ while [[ $# -gt 0 ]]; do
         ;;
         --results_dir)
         RESULTS_DIR="$2"
+        RESULTS_DIR_SET=1
+        shift 2
+        ;;
+        --results_name)
+        RESULTS_NAME="$2"
         shift 2
         ;;
         --pretrained_runs)
@@ -112,7 +121,15 @@ fi
 RUN_TAG_PREFIX=""
 if [ -n "$RUN_TAG" ]; then
     RUN_TAG_PREFIX="${RUN_TAG}_"
-    RESULTS_DIR="${RESULTS_DIR}/results_${RUN_TAG}"
+fi
+if [ -n "$RESULTS_NAME" ]; then
+    if [[ "$RESULTS_NAME" = /* ]]; then
+        RESULTS_DIR="$RESULTS_NAME"
+    else
+        RESULTS_DIR="results/$RESULTS_NAME"
+    fi
+elif [ "$RESULTS_DIR_SET" -eq 0 ] && [ -n "$RUN_TAG" ]; then
+    RESULTS_DIR="results/${RESULTS_PREFIX}_${RUN_TAG}"
 fi
 RUNS_SUBDIR="${RUNS_SUBDIR%/}"
 
@@ -126,6 +143,7 @@ printf '  "command": "%s",\n' "$0 ${ORIGINAL_ARGS[*]}" >> "$PARAMS_JSON"
 printf '  "spec_root": "%s",\n' "$SPEC_ROOT" >> "$PARAMS_JSON"
 printf '  "annotation_root": "%s",\n' "$ANNOTATION_ROOT" >> "$PARAMS_JSON"
 printf '  "results_dir": "%s",\n' "$RESULTS_DIR" >> "$PARAMS_JSON"
+printf '  "results_name": "%s",\n' "$RESULTS_NAME" >> "$PARAMS_JSON"
 printf '  "pretrained_runs": [%s],\n' "$(printf '"%s",' "${PRETRAINED_RUNS[@]}" | sed 's/,$//')" >> "$PARAMS_JSON"
 printf '  "task_mode": "%s",\n' "$TASK_MODE" >> "$PARAMS_JSON"
 printf '  "steps": %s,\n' "$STEPS" >> "$PARAMS_JSON"
@@ -143,6 +161,7 @@ printf '}\n' >> "$PARAMS_JSON"
 echo " Configuration:"
 echo "   SPEC_ROOT: $SPEC_ROOT"
 echo "   RESULTS_DIR: $RESULTS_DIR"
+echo "   RESULTS_NAME: $RESULTS_NAME"
 echo "   TASK_MODE: $TASK_MODE"
 echo "   PRETRAINED_RUNS: ${PRETRAINED_RUNS[*]}"
 echo "   STEPS: $STEPS"
@@ -160,11 +179,6 @@ WORK_ROOT="$PROJECT_ROOT/temp"
 EVAL_DIR="$RESULTS_DIR/eval"
 mkdir -p "$WORK_ROOT"
 mkdir -p "$EVAL_DIR"
-
-RESULTS_CSV="$RESULTS_DIR/results.csv"
-if [ ! -f "$RESULTS_CSV" ]; then
-    echo "pretrained_run,run_name,task,species,individual,metric_name,metric_value" > "$RESULTS_CSV"
-fi
 
 # Species Map: "SpeciesName:AnnotationFile:SpecSubDir"
 SPECIES_LIST=(
@@ -381,8 +395,7 @@ build_event_chunks() {
 eval_val_outputs_f1() {
     local run_name="$1"
     local pretrained_run="$2"
-    local latest_csv="$EVAL_DIR/eval_f1_latest.csv"
-    local latest_summary="$EVAL_DIR/eval_f1_latest_summary.csv"
+    local dest_csv="$EVAL_DIR/eval_f1.csv"
 
     if [ -z "$run_name" ]; then
         return
@@ -391,90 +404,22 @@ eval_val_outputs_f1() {
     python scripts/eval/eval_val_outputs_f1.py \
         --runs_root "$PROJECT_ROOT/runs" \
         --run_names "$run_name" \
-        --out_csv "$latest_csv" \
-        --summary_csv "$latest_summary" 1>&2
+        --out_csv "$dest_csv" \
+        --append \
+        --no_summary \
+        --pretrained_run "$pretrained_run" 1>&2
 
     python - <<PY
 import csv
 from pathlib import Path
 
-latest = Path("$latest_csv")
-dest = Path("$EVAL_DIR") / "eval_f1.csv"
-pretrained_run = "$pretrained_run"
-if not latest.exists():
-    raise SystemExit(0)
-
-with latest.open("r", encoding="utf-8") as f:
-    rows = list(csv.DictReader(f))
-if not rows:
-    raise SystemExit(0)
-
-fieldnames = []
-existing_rows = []
-if dest.exists():
-    with dest.open("r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        fieldnames = reader.fieldnames or []
-        existing_rows = list(reader)
-
-desired_fields = [
-    "f1",
-    "fer",
-    "probe_mode",
-    "mode",
-    "species",
-    "bird",
-    "train_seconds",
-    "num_classes",
-    "num_classes_train",
-    "num_classes_val",
-    "patch_width",
-    "frozen_layers",
-    "steps",
-    "lr",
-    "batch_size",
-    "class_weighting",
-    "pretrained_run",
-    "run_name",
-    "created_at",
-]
-missing = [name for name in desired_fields if name not in fieldnames]
-if missing or fieldnames != desired_fields:
-    fieldnames = desired_fields
-    with dest.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in existing_rows:
-            out_row = {name: row.get(name, "") for name in fieldnames}
-            if "pretrained_run" in fieldnames and not out_row.get("pretrained_run"):
-                out_row["pretrained_run"] = pretrained_run
-            writer.writerow(out_row)
-
-existing = {row.get("run_name") for row in existing_rows}
-new_rows = [r for r in rows if r.get("run_name") not in existing]
-if not new_rows:
-    raise SystemExit(0)
-
-with dest.open("a", encoding="utf-8", newline="") as f:
-    writer = csv.DictWriter(f, fieldnames=fieldnames)
-    for r in new_rows:
-        out_row = {name: r.get(name, "") for name in fieldnames}
-        if "pretrained_run" in fieldnames and not out_row.get("pretrained_run"):
-            out_row["pretrained_run"] = pretrained_run
-        writer.writerow(out_row)
-PY
-
-    python - <<PY
-import csv
-from pathlib import Path
-
-latest = Path("$latest_csv")
+dest = Path("$dest_csv")
 run_name = "$run_name"
 base_name = run_name.split("/")[-1]
 f1 = "0"
 fer = "0"
-if latest.exists():
-    with latest.open("r", encoding="utf-8") as f:
+if dest.exists():
+    with dest.open("r", encoding="utf-8") as f:
         for row in csv.DictReader(f):
             if row.get("run_name") in (run_name, base_name):
                 f1 = row.get("f1", "0") or "0"
@@ -588,7 +533,6 @@ for ENTRY in "${SELECTED_SPECIES_LIST[@]}"; do
                     read -r VAL_F1 _ < <(eval_val_outputs_f1 "$RUN_NAME" "$PRETRAINED_RUN")
                 fi
                 if [ -z "$VAL_F1" ]; then VAL_F1="0"; fi
-                echo "$PRETRAINED_RUN,$RUN_NAME,unit_detect,$SPECIES,$BIRD,F1,$VAL_F1" >> "$RESULTS_CSV"
             fi
 
             if task_enabled "classify"; then
@@ -620,8 +564,6 @@ for ENTRY in "${SELECTED_SPECIES_LIST[@]}"; do
                 fi
                 if [ -z "$VAL_F1" ]; then VAL_F1="0"; fi
                 if [ -z "$VAL_FER" ]; then VAL_FER="0"; fi
-                echo "$PRETRAINED_RUN,$RUN_NAME,classify,$SPECIES,$BIRD,F1,$VAL_F1" >> "$RESULTS_CSV"
-                echo "$PRETRAINED_RUN,$RUN_NAME,classify,$SPECIES,$BIRD,FER,$VAL_FER" >> "$RESULTS_CSV"
             fi
         done
 
@@ -633,4 +575,4 @@ done
 echo "Cleaning up temporary files..."
 rm -rf "$WORK_ROOT"
 
-echo "Linear probe sweep completed! Results: $RESULTS_CSV"
+echo "Linear probe sweep completed! Results: $EVAL_DIR/eval_f1.csv"

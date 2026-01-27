@@ -14,7 +14,11 @@ PROJECT_ROOT="$(pwd)"
 SPEC_ROOT="/media/george-vengrovski/disk2/specs"
 WAV_ROOT="/media/george-vengrovski/disk2/wavs"
 ANNOTATION_ROOT="/home/george-vengrovski/Documents/projects/TinyBird/files"
-RESULTS_DIR="results/aves_benchmark"
+RESULTS_DIR_DEFAULT="results/aves_benchmark"
+RESULTS_DIR="$RESULTS_DIR_DEFAULT"
+RESULTS_DIR_SET=0
+RESULTS_NAME=""
+RESULTS_PREFIX="aves_benchmark"
 
 # AVES model files
 AVES_MODEL="/home/george-vengrovski/Documents/projects/TinyBird/files/aves-base-bio.torchaudio.pt"
@@ -66,6 +70,11 @@ while [[ $# -gt 0 ]]; do
         ;;
         --results_dir)
         RESULTS_DIR="$2"
+        RESULTS_DIR_SET=1
+        shift 2
+        ;;
+        --results_name)
+        RESULTS_NAME="$2"
         shift 2
         ;;
         --aves_model)
@@ -167,7 +176,15 @@ done
 RUN_TAG_PREFIX=""
 if [ -n "$RUN_TAG" ]; then
     RUN_TAG_PREFIX="${RUN_TAG}_"
-    RESULTS_DIR="${RESULTS_DIR}/results_${RUN_TAG}"
+fi
+if [ -n "$RESULTS_NAME" ]; then
+    if [[ "$RESULTS_NAME" = /* ]]; then
+        RESULTS_DIR="$RESULTS_NAME"
+    else
+        RESULTS_DIR="results/$RESULTS_NAME"
+    fi
+elif [ "$RESULTS_DIR_SET" -eq 0 ] && [ -n "$RUN_TAG" ]; then
+    RESULTS_DIR="results/${RESULTS_PREFIX}_${RUN_TAG}"
 fi
 RUNS_SUBDIR="${RUNS_SUBDIR%/}"
 PRETRAINED_RUN="$AVES_MODEL"
@@ -185,6 +202,7 @@ printf '  "spec_root": "%s",\n' "$SPEC_ROOT" >> "$PARAMS_JSON"
 printf '  "wav_root": "%s",\n' "$WAV_ROOT" >> "$PARAMS_JSON"
 printf '  "annotation_root": "%s",\n' "$ANNOTATION_ROOT" >> "$PARAMS_JSON"
 printf '  "results_dir": "%s",\n' "$RESULTS_DIR" >> "$PARAMS_JSON"
+printf '  "results_name": "%s",\n' "$RESULTS_NAME" >> "$PARAMS_JSON"
 printf '  "aves_model": "%s",\n' "$AVES_MODEL" >> "$PARAMS_JSON"
 printf '  "aves_config": "%s",\n' "$AVES_CONFIG" >> "$PARAMS_JSON"
 printf '  "probe_mode": "%s",\n' "$PROBE_MODE" >> "$PARAMS_JSON"
@@ -213,6 +231,7 @@ echo " Configuration:"
 echo "   SPEC_ROOT: $SPEC_ROOT"
 echo "   WAV_ROOT: $WAV_ROOT"
 echo "   RESULTS_DIR: $RESULTS_DIR"
+echo "   RESULTS_NAME: $RESULTS_NAME"
 echo "   AVES_MODEL: $AVES_MODEL"
 echo "   AVES_CONFIG: $AVES_CONFIG"
 echo "   TASK_MODE: $TASK_MODE"
@@ -445,101 +464,112 @@ PY
 
 eval_val_outputs_f1() {
     local run_name="$1"
-    local latest_csv="$EVAL_DIR/eval_f1_latest.csv"
-    local latest_summary="$EVAL_DIR/eval_f1_latest_summary.csv"
+    local annot_json="$2"
+    local mode="$3"
+    local audio_params="$4"
+    local dest_csv="$EVAL_DIR/eval_f1.csv"
 
     if [ -z "$run_name" ]; then
+        return
+    fi
+    if [ -z "$annot_json" ] || [ -z "$mode" ] || [ -z "$audio_params" ]; then
+        echo "Missing annot_json/mode/audio_params for eval: $run_name" 1>&2
         return
     fi
 
     python scripts/eval/eval_val_outputs_f1.py \
         --runs_root "$PROJECT_ROOT/runs" \
         --run_names "$run_name" \
-        --out_csv "$latest_csv" \
-        --summary_csv "$latest_summary" 1>&2
+        --out_csv "$dest_csv" \
+        --append \
+        --no_summary \
+        --pretrained_run "$PRETRAINED_RUN" 1>&2
+
+    ms_f1=$(python - <<PY
+import json
+import math
+import subprocess
+from pathlib import Path
+
+audio_path = Path("$audio_params")
+if not audio_path.exists():
+    raise SystemExit(f"audio_params.json not found: {audio_path}")
+audio = json.loads(audio_path.read_text(encoding="utf-8"))
+sr = audio.get("sr")
+hop = audio.get("hop_size")
+if sr is None or hop is None:
+    raise SystemExit(f"audio_params missing sr/hop_size: {audio_path}")
+ms_per_timebin = float(hop) / float(sr) * 1000.0
+ms_round = int(round(ms_per_timebin))
+if ms_round <= 0 or abs(ms_per_timebin - ms_round) > 1e-6:
+    raise SystemExit(f"Non-integer ms_per_timebin={ms_per_timebin:.6f} from {audio_path}")
+
+val_outputs = Path("$PROJECT_ROOT") / "runs" / "$run_name" / "val_outputs"
+if not val_outputs.exists():
+    raise SystemExit(f"val_outputs not found: {val_outputs}")
+
+cmd = [
+    "python",
+    "scripts/eval/eval_ms_f1.py",
+    "--val_outputs_dir",
+    str(val_outputs),
+    "--annotation_json",
+    "$annot_json",
+    "--mode",
+    "$mode",
+    "--ms_per_timebin",
+    str(ms_round),
+]
+out = subprocess.check_output(cmd, text=True).strip().splitlines()
+if not out:
+    raise SystemExit("eval_ms_f1 produced no output")
+last = out[-1]
+# Expect: "MS-F1 (macro): 96.12" or "MS-F1 (binary): 88.90"
+parts = last.split(":")
+if len(parts) < 2:
+    raise SystemExit(f"Unexpected eval_ms_f1 output: {last}")
+print(parts[-1].strip())
+PY
+)
 
     python - <<PY
 import csv
 from pathlib import Path
 
-latest = Path("$latest_csv")
-dest = Path("$EVAL_DIR") / "eval_f1.csv"
-pretrained_run = "$PRETRAINED_RUN"
-if not latest.exists():
+dest = Path("$dest_csv")
+run_name = "$run_name"
+base_name = run_name.split("/")[-1]
+ms_f1 = "$ms_f1"
+if not dest.exists():
     raise SystemExit(0)
 
-with latest.open("r", encoding="utf-8") as f:
-    rows = list(csv.DictReader(f))
-if not rows:
-    raise SystemExit(0)
+rows = []
+with dest.open("r", encoding="utf-8") as f:
+    reader = csv.DictReader(f)
+    fieldnames = reader.fieldnames or []
+    for row in reader:
+        if row.get("run_name") in (run_name, base_name):
+            row["f1"] = ms_f1
+        rows.append(row)
 
-fieldnames = []
-existing_rows = []
-if dest.exists():
-    with dest.open("r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        fieldnames = reader.fieldnames or []
-        existing_rows = list(reader)
-
-desired_fields = [
-    "f1",
-    "fer",
-    "probe_mode",
-    "mode",
-    "species",
-    "bird",
-    "train_seconds",
-    "num_classes",
-    "num_classes_train",
-    "num_classes_val",
-    "patch_width",
-    "frozen_layers",
-    "steps",
-    "lr",
-    "batch_size",
-    "class_weighting",
-    "pretrained_run",
-    "run_name",
-    "created_at",
-]
-missing = [name for name in desired_fields if name not in fieldnames]
-if missing or fieldnames != desired_fields:
-    fieldnames = desired_fields
-    with dest.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in existing_rows:
-            out_row = {name: row.get(name, "") for name in fieldnames}
-            if "pretrained_run" in fieldnames and not out_row.get("pretrained_run"):
-                out_row["pretrained_run"] = pretrained_run
-            writer.writerow(out_row)
-
-existing = {row.get("run_name") for row in existing_rows}
-
-new_rows = [r for r in rows if r.get("run_name") not in existing]
-if not new_rows:
-    raise SystemExit(0)
-
-with dest.open("a", encoding="utf-8", newline="") as f:
+with dest.open("w", encoding="utf-8", newline="") as f:
     writer = csv.DictWriter(f, fieldnames=fieldnames)
-    for r in new_rows:
-        out_row = {name: r.get(name, "") for name in fieldnames}
-        if "pretrained_run" in fieldnames and not out_row.get("pretrained_run"):
-            out_row["pretrained_run"] = pretrained_run
-        writer.writerow(out_row)
+    writer.writeheader()
+    for row in rows:
+        writer.writerow(row)
 PY
 
     python - <<PY
 import csv
 from pathlib import Path
 
-latest = Path("$latest_csv")
+dest = Path("$dest_csv")
 run_name = "$run_name"
 base_name = run_name.split("/")[-1]
 f1 = "0"
 fer = "0"
-if latest.exists():
-    with latest.open("r", encoding="utf-8") as f:
+if dest.exists():
+    with dest.open("r", encoding="utf-8") as f:
         for row in csv.DictReader(f):
             if row.get("run_name") in (run_name, base_name):
                 f1 = row.get("f1", "0") or "0"
@@ -681,7 +711,7 @@ PY
 
                 VAL_F1="0"
                 if [ -d "runs/$RUN_NAME/val_outputs" ]; then
-                    read -r VAL_F1 _ < <(eval_val_outputs_f1 "$RUN_NAME")
+                    read -r VAL_F1 _ < <(eval_val_outputs_f1 "$RUN_NAME" "$ANNOT_PATH" "detect" "$TEST_DIR/audio_params.json")
                 fi
                 if [ -z "$VAL_F1" ]; then VAL_F1="0"; fi
                 ERROR=$(python - <<PY
@@ -788,7 +818,7 @@ PY
 
                     VAL_F1="0"
                     if [ -d "runs/$RUN_NAME/val_outputs" ]; then
-                        read -r VAL_F1 _ < <(eval_val_outputs_f1 "$RUN_NAME")
+                        read -r VAL_F1 _ < <(eval_val_outputs_f1 "$RUN_NAME" "$BIRD_ANNOT" "unit_detect" "$BIRD_TEST/audio_params.json")
                     fi
                     if [ -z "$VAL_F1" ]; then VAL_F1="0"; fi
                     ERROR=$(python - <<PY
@@ -899,7 +929,7 @@ PY
 
                     VAL_F1="0"
                     if [ -d "runs/$RUN_NAME/val_outputs" ]; then
-                        read -r VAL_F1 VAL_FER < <(eval_val_outputs_f1 "$RUN_NAME")
+                        read -r VAL_F1 VAL_FER < <(eval_val_outputs_f1 "$RUN_NAME" "$BIRD_ANNOT" "classify" "$BIRD_TEST/audio_params.json")
                     fi
                     if [ -z "$VAL_F1" ]; then VAL_F1="0"; fi
                     ERROR=$(python - <<PY

@@ -104,11 +104,11 @@ def _infer_probe_mode(run_name: str, run_config: Dict[str, object]) -> str:
     if int(run_config.get("lora_rank", 0) or 0) > 0:
         return "lora"
     name = run_name.lower()
-    if name.startswith("lora") or name.startswith("lora_") or name.startswith("lora/"):
+    if "lora" in name:
         return "lora"
-    if name.startswith("linear") or name.startswith("linear_") or name.startswith("linear/"):
+    if "linear" in name:
         return "linear"
-    if name.startswith("finetune") or name.startswith("finetune_") or name.startswith("finetune/"):
+    if "finetune" in name:
         return "finetune"
     return "unknown"
 
@@ -244,11 +244,23 @@ def _parse_train_dir_metadata(train_dir: str) -> Tuple[str, str]:
         bird = "all"
     elif task_idx is not None and task_idx + 1 < len(parts):
         bird = parts[task_idx + 1]
+    if not bird:
+        # Common layout: .../<species>/<bird>/(train|test)
+        if path.name in ("train", "test", "val") and path.parent.name:
+            bird = path.parent.name
 
     seconds = ""
     match = re.match(r"train_(?P<seconds>.+)s$", path.name)
     if match:
         seconds = match.group("seconds").replace("p", ".")
+    if not seconds:
+        # Some sweeps store seconds in a sibling split/train_seconds.txt.
+        split_seconds = path.parent / "split" / "train_seconds.txt"
+        if split_seconds.exists():
+            try:
+                seconds = split_seconds.read_text(encoding="utf-8").strip()
+            except Exception:
+                seconds = ""
     return bird, seconds
 
 
@@ -322,7 +334,7 @@ def _species_from_run(run_dir: Path) -> str:
             pass
 
     for sp in ["Bengalese_Finch", "Canary", "Zebra_Finch"]:
-        if run_dir.name.startswith(sp):
+        if run_dir.name.startswith(sp) or sp.lower() in run_dir.name.lower():
             return sp
     return "unknown"
 
@@ -458,6 +470,22 @@ def main() -> None:
         default=None,
         help="Output summary CSV path (default: <results_root>/eval_f1_summary.csv)",
     )
+    parser.add_argument(
+        "--append",
+        action="store_true",
+        help="Append/merge into out_csv instead of overwriting it.",
+    )
+    parser.add_argument(
+        "--no_summary",
+        action="store_true",
+        help="Skip writing the summary CSV.",
+    )
+    parser.add_argument(
+        "--pretrained_run",
+        type=str,
+        default=None,
+        help="Optional pretrained run identifier to include in the output CSV.",
+    )
     parser.add_argument("--threshold", type=float, default=0.5, help="Sigmoid threshold for binary F1")
     args = parser.parse_args()
 
@@ -488,6 +516,15 @@ def main() -> None:
         "run_name",
         "created_at",
     ]
+
+    def _with_pretrained(fieldnames: List[str]) -> List[str]:
+        if "pretrained_run" in fieldnames:
+            return fieldnames
+        if "run_name" in fieldnames:
+            idx = fieldnames.index("run_name")
+            return fieldnames[:idx] + ["pretrained_run"] + fieldnames[idx:]
+        return fieldnames + ["pretrained_run"]
+
     rows: List[Dict[str, object]] = []
     records: List[Dict[str, object]] = []
 
@@ -617,42 +654,87 @@ def main() -> None:
             }
         )
 
+    existing_fieldnames: List[str] = []
+    existing_rows: List[Dict[str, str]] = []
+    if args.append and out_csv.exists():
+        with out_csv.open("r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            existing_fieldnames = reader.fieldnames or []
+            existing_rows = list(reader)
+
+    include_pretrained = args.pretrained_run is not None or ("pretrained_run" in existing_fieldnames)
+    fieldnames = header[:]
+    if include_pretrained:
+        fieldnames = _with_pretrained(fieldnames)
+
+    def _coerce_row(row: Dict[str, object], set_pretrained: bool) -> Dict[str, object]:
+        out_row = {name: row.get(name, "") for name in fieldnames}
+        if include_pretrained:
+            if set_pretrained and args.pretrained_run is not None:
+                out_row["pretrained_run"] = args.pretrained_run
+            elif not out_row.get("pretrained_run"):
+                out_row["pretrained_run"] = ""
+        return out_row
+
     out_csv.parent.mkdir(parents=True, exist_ok=True)
-    with out_csv.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=header)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({name: row.get(name, "") for name in header})
+    if args.append:
+        missing = [name for name in fieldnames if name not in existing_fieldnames]
+        needs_rewrite = bool(existing_fieldnames) and (missing or existing_fieldnames != fieldnames)
+        if needs_rewrite:
+            with out_csv.open("w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                for row in existing_rows:
+                    writer.writerow(_coerce_row(row, set_pretrained=False))
+        elif not out_csv.exists():
+            with out_csv.open("w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
 
-    # Summary: mean/std per (probe_mode, mode, species) and per (probe_mode, mode) across species.
-    summary_rows: List[str] = ["probe_mode,mode,species,n,f1_mean,f1_std"]
-    by_group: Dict[Tuple[str, str, str], List[float]] = {}
-    for rec in records:
-        key = (str(rec["probe_mode"]), str(rec["mode"]), str(rec["species"]))
-        by_group.setdefault(key, []).append(float(rec["f1"]))
+        existing_run_names = {row.get("run_name") for row in existing_rows}
+        new_rows = [row for row in rows if row.get("run_name") not in existing_run_names]
+        if new_rows:
+            with out_csv.open("a", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                for row in new_rows:
+                    writer.writerow(_coerce_row(row, set_pretrained=True))
+    else:
+        with out_csv.open("w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(_coerce_row(row, set_pretrained=True))
 
-    for (probe_mode, mode, species), f1s in sorted(by_group.items()):
-        arr = np.array(f1s, dtype=np.float64)
-        mean = float(arr.mean()) if len(arr) else 0.0
-        std = float(arr.std(ddof=0)) if len(arr) else 0.0
-        summary_rows.append(f"{probe_mode},{mode},{species},{len(arr)},{mean:.4f},{std:.4f}")
-
-    by_species_mean: Dict[Tuple[str, str], List[float]] = {}
-    for (probe_mode, mode, _species), f1s in by_group.items():
-        arr = np.array(f1s, dtype=np.float64)
-        mean = float(arr.mean()) if len(arr) else 0.0
-        by_species_mean.setdefault((probe_mode, mode), []).append(mean)
-
-    for (probe_mode, mode), means in sorted(by_species_mean.items()):
-        arr = np.array(means, dtype=np.float64)
-        mean = float(arr.mean()) if len(arr) else 0.0
-        std = float(arr.std(ddof=0)) if len(arr) else 0.0
-        summary_rows.append(f"{probe_mode},{mode},ALL,{len(arr)},{mean:.4f},{std:.4f}")
-
-    summary_csv.parent.mkdir(parents=True, exist_ok=True)
-    summary_csv.write_text("\n".join(summary_rows) + "\n", encoding="utf-8")
     print(f"Wrote: {out_csv}")
-    print(f"Wrote: {summary_csv}")
+    if not args.no_summary:
+        # Summary: mean/std per (probe_mode, mode, species) and per (probe_mode, mode) across species.
+        summary_rows: List[str] = ["probe_mode,mode,species,n,f1_mean,f1_std"]
+        by_group: Dict[Tuple[str, str, str], List[float]] = {}
+        for rec in records:
+            key = (str(rec["probe_mode"]), str(rec["mode"]), str(rec["species"]))
+            by_group.setdefault(key, []).append(float(rec["f1"]))
+
+        for (probe_mode, mode, species), f1s in sorted(by_group.items()):
+            arr = np.array(f1s, dtype=np.float64)
+            mean = float(arr.mean()) if len(arr) else 0.0
+            std = float(arr.std(ddof=0)) if len(arr) else 0.0
+            summary_rows.append(f"{probe_mode},{mode},{species},{len(arr)},{mean:.4f},{std:.4f}")
+
+        by_species_mean: Dict[Tuple[str, str], List[float]] = {}
+        for (probe_mode, mode, _species), f1s in by_group.items():
+            arr = np.array(f1s, dtype=np.float64)
+            mean = float(arr.mean()) if len(arr) else 0.0
+            by_species_mean.setdefault((probe_mode, mode), []).append(mean)
+
+        for (probe_mode, mode), means in sorted(by_species_mean.items()):
+            arr = np.array(means, dtype=np.float64)
+            mean = float(arr.mean()) if len(arr) else 0.0
+            std = float(arr.std(ddof=0)) if len(arr) else 0.0
+            summary_rows.append(f"{probe_mode},{mode},ALL,{len(arr)},{mean:.4f},{std:.4f}")
+
+        summary_csv.parent.mkdir(parents=True, exist_ok=True)
+        summary_csv.write_text("\n".join(summary_rows) + "\n", encoding="utf-8")
+        print(f"Wrote: {summary_csv}")
 
 
 if __name__ == "__main__":

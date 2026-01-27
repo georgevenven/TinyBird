@@ -203,8 +203,12 @@ _CHUNK_MS_RE = re.compile(r"^(?P<base>.+)__ms_(?P<start>\d+)_(?P<end>\d+)$")
 
 
 def parse_chunk_ms(filename):
-    stem = Path(filename).stem
-    base = stem
+    name = Path(filename).name
+    for ext in (".npy", ".wav"):
+        if name.endswith(ext):
+            name = name[: -len(ext)]
+            break
+    base = name
     last_start = None
     last_end = None
     while True:
