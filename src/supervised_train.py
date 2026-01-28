@@ -773,8 +773,8 @@ class Trainer():
         # Early stopping config:
         # Stop if EMA-smoothed val_loss does not improve for N consecutive eval checks.
         # Set early_stop_patience=0 to disable.
-        es_patience = int(self.config.get("early_stop_patience", 8))
-        es_alpha = float(self.config.get("early_stop_ema_alpha", 0.9))
+        es_patience = int(self.config.get("early_stop_patience", 4))
+        es_alpha = float(self.config.get("early_stop_ema_alpha", 0.75))
         es_min_delta = float(self.config.get("early_stop_min_delta", 0.0))
         if not (0.0 <= es_alpha < 1.0):
             raise ValueError(f"early_stop_ema_alpha must be in [0, 1). Got {es_alpha}")
@@ -946,7 +946,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--num_workers", type=int, default=8, help="number of DataLoader worker processes")
     parser.add_argument("--weight_decay", type=float, default=0.1, help="weight decay")
-    parser.add_argument("--eval_every", type=int, default=25, help="evaluate every N steps")
+    parser.add_argument("--eval_every", type=int, default=100, help="evaluate every N steps")
     parser.add_argument(
         "--warmup_steps",
         type=int,
@@ -961,8 +961,8 @@ if __name__ == "__main__":
     )
 
     # Early stopping
-    parser.add_argument("--early_stop_patience", type=int, default=8, help="stop if EMA-smoothed val_loss does not improve for N consecutive eval checks (0 disables)")
-    parser.add_argument("--early_stop_ema_alpha", type=float, default=0.9, help="EMA alpha for smoothing val_loss (higher = smoother)")
+    parser.add_argument("--early_stop_patience", type=int, default=4, help="stop if EMA-smoothed val_loss does not improve for N consecutive eval checks (0 disables)")
+    parser.add_argument("--early_stop_ema_alpha", type=float, default=0.75, help="EMA alpha for smoothing val_loss (higher = smoother)")
     parser.add_argument("--early_stop_min_delta", type=float, default=0.0, help="minimum decrease in EMA val_loss required to count as improvement")
 
     # Export val logits/labels for posthoc metrics (default: on)

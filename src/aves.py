@@ -229,6 +229,7 @@ class AvesClassifier(nn.Module):
         config_path,
         model_path,
         num_classes,
+        mode="classify",
         embedding_dim=768,
         trainable=False,
         linear_probe=False,
@@ -246,13 +247,21 @@ class AvesClassifier(nn.Module):
         freeze_embedding_weights(self.encoder, self.trainable)
 
         self.num_classes = int(num_classes)
+        self.mode = str(mode)
         self.encoder_layer_idx = encoder_layer_idx
 
         if embedding_dim is None:
             embedding_dim = int(self.config.get("encoder_embed_dim", 768))
         self.embedding_dim = int(embedding_dim)
 
-        out_dim = 1 if self.num_classes == 2 else self.num_classes
+        if self.mode == "classify" and self.trainable:
+            linear_probe = True
+
+        if self.mode == "classify":
+            out_dim = self.num_classes
+        else:
+            out_dim = 1 if self.num_classes == 2 else self.num_classes
+
         if linear_probe:
             self.classifier = nn.Linear(self.embedding_dim, out_dim)
         else:
@@ -369,8 +378,8 @@ def build_frame_targets(labels_list, in_lengths, out_lengths, sr, mode, num_clas
     return targets, mask
 
 
-def compute_loss(logits, targets, mask, num_classes, class_weighting):
-    if num_classes == 2:
+def compute_loss(logits, targets, mask, num_classes, class_weighting, mode):
+    if num_classes == 2 and mode in ("detect", "unit_detect"):
         logits_flat = logits.reshape(-1)
         targets_flat = targets.reshape(-1).float()
         mask_flat = mask.reshape(-1)
@@ -401,8 +410,8 @@ def compute_loss(logits, targets, mask, num_classes, class_weighting):
     return loss
 
 
-def compute_accuracy(logits, targets, mask, num_classes):
-    if num_classes == 2:
+def compute_accuracy(logits, targets, mask, num_classes, mode):
+    if num_classes == 2 and mode in ("detect", "unit_detect"):
         probs = torch.sigmoid(logits)
         preds = (probs > 0.5).long()
     else:
@@ -417,11 +426,11 @@ def compute_accuracy(logits, targets, mask, num_classes):
     return 100.0 * correct / total
 
 
-def compute_f1(logits, targets, mask, num_classes):
+def compute_f1(logits, targets, mask, num_classes, mode):
     mask_flat = mask.reshape(-1)
     if mask_flat.sum().item() == 0:
         return 0.0
-    if num_classes == 2:
+    if num_classes == 2 and mode in ("detect", "unit_detect"):
         probs = torch.sigmoid(logits)
         preds = (probs > 0.5).long()
         preds_flat = preds.reshape(-1)[mask_flat]
@@ -579,10 +588,12 @@ class AvesTrainer:
                 mask,
                 self.model.num_classes,
                 self.config.get("class_weighting", True),
+                self.config["mode"],
             )
 
-        acc = compute_accuracy(logits, targets, mask, self.model.num_classes)
-        f1 = compute_f1(logits, targets, mask, self.model.num_classes) if self.compute_f1 else 0.0
+        mode = self.config["mode"]
+        acc = compute_accuracy(logits, targets, mask, self.model.num_classes, mode)
+        f1 = compute_f1(logits, targets, mask, self.model.num_classes, mode) if self.compute_f1 else 0.0
         return loss, acc, f1, int(mask.sum().item())
 
     def evaluate(self, loader):
@@ -607,6 +618,16 @@ class AvesTrainer:
         eval_every = int(self.config["eval_every"])
         grad_clip = float(self.config.get("grad_clip") or 0.0)
         save_intermediate = bool(self.config.get("save_intermediate_checkpoints", True))
+        es_patience = int(self.config.get("early_stop_patience", 4))
+        es_alpha = float(self.config.get("early_stop_ema_alpha", 0.75))
+        es_min_delta = float(self.config.get("early_stop_min_delta", 0.0))
+        if not (0 <= es_alpha < 1):
+            raise ValueError(f"early_stop_ema_alpha must be in [0, 1). Got {es_alpha}")
+        if es_patience < 0:
+            raise ValueError(f"early_stop_patience must be >= 0. Got {es_patience}")
+        es_ema_val_loss = None
+        es_best_ema_val_loss = None
+        es_bad_evals = 0
 
         train_iter = iter(train_loader)
         samples_processed = 0
@@ -655,6 +676,20 @@ class AvesTrainer:
                 train_f1 = float(np.mean(train_f1s)) if train_f1s else 0.0
 
                 val_loss, val_acc, val_f1 = self.evaluate(val_loader)
+                if es_patience > 0:
+                    if es_ema_val_loss is None:
+                        es_ema_val_loss = float(val_loss)
+                        es_best_ema_val_loss = float(val_loss)
+                        es_bad_evals = 0
+                    else:
+                        es_ema_val_loss = (es_alpha * es_ema_val_loss) + ((1.0 - es_alpha) * float(val_loss))
+                    if es_best_ema_val_loss is None:
+                        es_best_ema_val_loss = float(es_ema_val_loss)
+                    if float(es_ema_val_loss) < (float(es_best_ema_val_loss) - es_min_delta):
+                        es_best_ema_val_loss = float(es_ema_val_loss)
+                        es_bad_evals = 0
+                    else:
+                        es_bad_evals += 1
 
                 current_time = time.time()
                 elapsed_time = current_time - last_eval_time
@@ -686,6 +721,14 @@ class AvesTrainer:
                 train_losses = []
                 train_accs = []
                 train_f1s = []
+                if es_patience > 0 and es_bad_evals >= es_patience:
+                    print(
+                        "Early stopping: EMA-smoothed validation loss did not improve for "
+                        f"{es_patience} consecutive validation checks "
+                        f"(ema_val_loss={es_ema_val_loss:.6f}, best_ema_val_loss={es_best_ema_val_loss:.6f}). "
+                        "Halting training."
+                    )
+                    break
 
         final_path = os.path.join(self.weights_path, "model_final.pth")
         torch.save(self.model.state_dict(), final_path)
@@ -946,6 +989,9 @@ def main():
     parser.add_argument("--eval_every", type=int, default=25)
     parser.add_argument("--warmup_steps", type=int, default=None)
     parser.add_argument("--min_lr", type=float, default=None)
+    parser.add_argument("--early_stop_patience", type=int, default=4, help="stop if EMA-smoothed val_loss does not improve for N consecutive eval checks (0 disables)")
+    parser.add_argument("--early_stop_ema_alpha", type=float, default=0.75, help="EMA alpha for smoothing val_loss (higher = smoother)")
+    parser.add_argument("--early_stop_min_delta", type=float, default=0.0, help="minimum decrease in EMA val_loss required to count as improvement")
 
     parser.add_argument("--audio_sr", type=int, default=16000)
     parser.add_argument("--num_timebins", type=int, default=0, help="window size in spectrogram timebins for val export (0 = infer)")
@@ -1048,6 +1094,7 @@ def main():
         config_path=args.aves_config_path,
         model_path=args.aves_model_path,
         num_classes=train_ds.num_classes,
+        mode=args.mode,
         embedding_dim=args.embedding_dim,
         trainable=args.finetune,
         linear_probe=args.linear_probe,

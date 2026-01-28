@@ -11,6 +11,10 @@ cd "$(dirname "$0")/.."
 BASE_ARGS=()
 RUN_TAG_PREFIX=""
 RUNS_SUBDIR="sweeps"
+EVAL_EVERY=100
+EARLY_STOP_PATIENCE=4
+EARLY_STOP_EMA_ALPHA=0.75
+EARLY_STOP_MIN_DELTA=0.0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -20,6 +24,22 @@ while [[ $# -gt 0 ]]; do
         ;;
         --runs_subdir)
         RUNS_SUBDIR="$2"
+        shift 2
+        ;;
+        --eval_every)
+        EVAL_EVERY="$2"
+        shift 2
+        ;;
+        --early_stop_patience)
+        EARLY_STOP_PATIENCE="$2"
+        shift 2
+        ;;
+        --early_stop_ema_alpha)
+        EARLY_STOP_EMA_ALPHA="$2"
+        shift 2
+        ;;
+        --early_stop_min_delta)
+        EARLY_STOP_MIN_DELTA="$2"
         shift 2
         ;;
         --help|-h)
@@ -62,6 +82,10 @@ for LR in "${LRS[@]}"; do
                 --lora_rank "$RANK" \
                 --lr "$LR" \
                 "$CW_FLAG" \
+                --eval_every "$EVAL_EVERY" \
+                --early_stop_patience "$EARLY_STOP_PATIENCE" \
+                --early_stop_ema_alpha "$EARLY_STOP_EMA_ALPHA" \
+                --early_stop_min_delta "$EARLY_STOP_MIN_DELTA" \
                 --runs_subdir "$RUNS_SUBDIR" \
                 --run_tag "$RUN_TAG"
         done
@@ -77,6 +101,10 @@ for LR in "${LRS[@]}"; do
                 --probe_mode finetune
                 --lr "$LR"
                 "$CW_FLAG"
+                --eval_every "$EVAL_EVERY"
+                --early_stop_patience "$EARLY_STOP_PATIENCE"
+                --early_stop_ema_alpha "$EARLY_STOP_EMA_ALPHA"
+                --early_stop_min_delta "$EARLY_STOP_MIN_DELTA"
                 --runs_subdir "$RUNS_SUBDIR"
                 --run_tag "$RUN_TAG"
             )

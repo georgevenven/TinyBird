@@ -36,6 +36,10 @@ TEST_PERCENT=20
 STEPS=100
 BATCH_SIZE=12
 NUM_WORKERS=4
+EVAL_EVERY=100
+EARLY_STOP_PATIENCE=4
+EARLY_STOP_EMA_ALPHA=0.75
+EARLY_STOP_MIN_DELTA=0.0
 MAX_BIRDS=3
 POOL_SIZE=0
 MAX_TRAIN=0
@@ -129,6 +133,22 @@ while [[ $# -gt 0 ]]; do
         ;;
         --num_workers)
         NUM_WORKERS="$2"
+        shift 2
+        ;;
+        --eval_every)
+        EVAL_EVERY="$2"
+        shift 2
+        ;;
+        --early_stop_patience)
+        EARLY_STOP_PATIENCE="$2"
+        shift 2
+        ;;
+        --early_stop_ema_alpha)
+        EARLY_STOP_EMA_ALPHA="$2"
+        shift 2
+        ;;
+        --early_stop_min_delta)
+        EARLY_STOP_MIN_DELTA="$2"
         shift 2
         ;;
         --max_birds)
@@ -225,6 +245,10 @@ printf '  "task_mode": "%s",\n' "$TASK_MODE" >> "$PARAMS_JSON"
 printf '  "steps": %s,\n' "$STEPS" >> "$PARAMS_JSON"
 printf '  "batch_size": %s,\n' "$BATCH_SIZE" >> "$PARAMS_JSON"
 printf '  "num_workers": %s,\n' "$NUM_WORKERS" >> "$PARAMS_JSON"
+printf '  "eval_every": %s,\n' "$EVAL_EVERY" >> "$PARAMS_JSON"
+printf '  "early_stop_patience": %s,\n' "$EARLY_STOP_PATIENCE" >> "$PARAMS_JSON"
+printf '  "early_stop_ema_alpha": %s,\n' "$EARLY_STOP_EMA_ALPHA" >> "$PARAMS_JSON"
+printf '  "early_stop_min_delta": %s,\n' "$EARLY_STOP_MIN_DELTA" >> "$PARAMS_JSON"
 printf '  "max_birds": %s,\n' "$MAX_BIRDS" >> "$PARAMS_JSON"
 printf '  "pool_size": %s,\n' "$POOL_SIZE" >> "$PARAMS_JSON"
 printf '  "max_train": %s,\n' "$MAX_TRAIN" >> "$PARAMS_JSON"
@@ -258,6 +282,10 @@ echo "   POOL_SIZE: $POOL_SIZE"
 echo "   MAX_TRAIN: $MAX_TRAIN"
 echo "   POOL_SEED: $POOL_SEED"
 echo "   RUN_TAG: $RUN_TAG"
+echo "   EVAL_EVERY: $EVAL_EVERY"
+echo "   EARLY_STOP_PATIENCE: $EARLY_STOP_PATIENCE"
+echo "   EARLY_STOP_EMA_ALPHA: $EARLY_STOP_EMA_ALPHA"
+echo "   EARLY_STOP_MIN_DELTA: $EARLY_STOP_MIN_DELTA"
 echo "   RUNS_SUBDIR: $RUNS_SUBDIR"
 echo "   CLASS_WEIGHTING: $CLASS_WEIGHTING"
 echo "   LR: $LR"
@@ -743,6 +771,10 @@ PY
                         --batch_size "$BATCH_SIZE" \
                         --val_batch_size "$BATCH_SIZE" \
                         --num_workers "$NUM_WORKERS" \
+                        --eval_every "$EVAL_EVERY" \
+                        --early_stop_patience "$EARLY_STOP_PATIENCE" \
+                        --early_stop_ema_alpha "$EARLY_STOP_EMA_ALPHA" \
+                        --early_stop_min_delta "$EARLY_STOP_MIN_DELTA" \
                         --amp \
                         "${PROBE_ARGS[@]}"
                 else
@@ -856,6 +888,10 @@ PY
                             --batch_size "$BATCH_SIZE" \
                             --val_batch_size "$BATCH_SIZE" \
                             --num_workers "$NUM_WORKERS" \
+                            --eval_every "$EVAL_EVERY" \
+                            --early_stop_patience "$EARLY_STOP_PATIENCE" \
+                            --early_stop_ema_alpha "$EARLY_STOP_EMA_ALPHA" \
+                            --early_stop_min_delta "$EARLY_STOP_MIN_DELTA" \
                             --amp \
                             "${PROBE_ARGS[@]}"
                     else
@@ -951,6 +987,11 @@ PY
 
                     copy_train_subset_seconds "$TRAIN_POOL_DIR" "$TRAIN_DIR" "$SECONDS" "$POOL_SEED" "$BIRD_ANNOT" "$BIRD" 1 "$CONTEXT_TIMEBINS"
 
+                    CLS_PROBE_ARGS=("${PROBE_ARGS[@]}")
+                    if [ "$PROBE" == "finetune" ]; then
+                        CLS_PROBE_ARGS+=(--linear_probe)
+                    fi
+
                     LOG_FILE="runs/$RUN_NAME/loss_log.txt"
                     if [ ! -f "$LOG_FILE" ]; then
                         PYTHONWARNINGS=ignore python src/aves.py \
@@ -971,10 +1012,14 @@ PY
                             --batch_size "$BATCH_SIZE" \
                             --val_batch_size "$BATCH_SIZE" \
                             --num_workers "$NUM_WORKERS" \
+                            --eval_every "$EVAL_EVERY" \
+                            --early_stop_patience "$EARLY_STOP_PATIENCE" \
+                            --early_stop_ema_alpha "$EARLY_STOP_EMA_ALPHA" \
+                            --early_stop_min_delta "$EARLY_STOP_MIN_DELTA" \
                             --amp \
                             --log_f1 \
                             $CLASS_WEIGHTING_FLAG \
-                            "${PROBE_ARGS[@]}"
+                            "${CLS_PROBE_ARGS[@]}"
                     else
                         echo "    Skipping training (run exists)"
                     fi
