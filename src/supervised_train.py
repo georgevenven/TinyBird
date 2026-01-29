@@ -497,6 +497,7 @@ class Trainer():
             accuracy: Accuracy percentage
             logits: Model predictions (for visualization)
             grad_norm: L2 norm of gradients for the step (training only)
+            timing: dict of timing breakdowns (seconds)
         """
         spectrograms, labels, _ = batch
         x = spectrograms.to(self.device, non_blocking=True)
@@ -519,7 +520,6 @@ class Trainer():
                 logits = self.model(x)
                 loss = self.model.compute_loss(logits, labels)
                 accuracy = self.model.compute_accuracy(logits, labels)
-        
         grad_norm = None
         # Backward pass only for training
         if is_training:
@@ -545,7 +545,7 @@ class Trainer():
                 self.scaler.update()
             else:
                 self.optimizer.step()
-        
+
         return loss.item(), accuracy, logits, grad_norm
     
     def save_prediction_visualization(self, batch, logits, step_num, split="val"):
@@ -660,6 +660,8 @@ class Trainer():
         print(f"Training for {total_steps} steps")
         
         last_step_num = -1
+        last_train_vis = None
+        last_val_vis = None
         for step_num in range(total_steps):
             last_step_num = step_num
             try:
@@ -686,6 +688,8 @@ class Trainer():
                 
                 # Validation step (no gradients)
                 val_loss, val_acc, val_logits, _ = self.step(val_batch, is_training=False)
+                last_train_vis = (train_batch, train_logits)
+                last_val_vis = (val_batch, val_logits)
 
                 # Store validation loss and accuracy
                 self.val_loss_history.append(val_loss)
@@ -709,6 +713,16 @@ class Trainer():
                 last_eval_time = current_time
                 last_eval_step = step_num
                 
+                # Save intermediate model weights (optional; final checkpoint is always saved at end)
+                if self.config.get("save_intermediate_checkpoints", True):
+                    weight_path = os.path.join(self.weights_path, f"model_step_{step_num:06d}.pth")
+                    torch.save(self.model.state_dict(), weight_path)
+                
+                # Save prediction visualization
+                if not self.config.get("viz_last_only", False):
+                    self.save_prediction_visualization(val_batch, val_logits, step_num, split="val")
+                    self.save_prediction_visualization(train_batch, train_logits, step_num, split="train")
+
                 # Print progress
                 current_lr = self.optimizer.param_groups[0]["lr"]
                 grad_str = f", Grad Norm = {train_grad_norm:.4f}" if train_grad_norm is not None else ""
@@ -719,25 +733,22 @@ class Trainer():
                       f"LR = {current_lr:.2e}{grad_str}, "
                       f"Steps/sec = {steps_per_sec:.2f}, "
                       f"Samples/sec = {samples_per_sec:.1f}")
-                
+
                 # Log losses and accuracies to file
                 with open(self.loss_log_path, 'a') as f:
                     f.write(f"{step_num},{train_loss:.6f},{val_loss:.6f},{train_acc:.2f},{val_acc:.2f},{samples_processed},{steps_per_sec:.2f},{samples_per_sec:.1f}\n")
-                
-                # Save intermediate model weights (optional; final checkpoint is always saved at end)
-                if self.config.get("save_intermediate_checkpoints", True):
-                    weight_path = os.path.join(self.weights_path, f"model_step_{step_num:06d}.pth")
-                    torch.save(self.model.state_dict(), weight_path)
-                
-                # Save prediction visualization
-                self.save_prediction_visualization(val_batch, val_logits, step_num, split="val")
-                self.save_prediction_visualization(train_batch, train_logits, step_num, split="train")
 
         
         # Save final model weights
         final_step = last_step_num if last_step_num >= 0 else 0
         final_weight_path = os.path.join(self.weights_path, f"model_step_{final_step:06d}.pth")
         torch.save(self.model.state_dict(), final_weight_path)
+
+        if self.config.get("viz_last_only", False) and last_train_vis and last_val_vis:
+            train_batch, train_logits = last_train_vis
+            val_batch, val_logits = last_val_vis
+            self.save_prediction_visualization(val_batch, val_logits, final_step, split="val")
+            self.save_prediction_visualization(train_batch, train_logits, final_step, split="train")
 
         # Export validation outputs by default (can be disabled via CLI)
         if self.config.get("save_val_logits", True):
@@ -767,6 +778,7 @@ if __name__ == "__main__":
     parser.add_argument("--eval_every", type=int, default=100, help="evaluate every N steps")
     parser.add_argument("--save_val_logits", action=argparse.BooleanOptionalAction, default=True, help="save validation logits/labels/filenames to runs/<run_name>/val_outputs/ (default: enabled)")
     parser.add_argument("--save_intermediate_checkpoints", action=argparse.BooleanOptionalAction, default=True, help="save intermediate checkpoints during training at eval steps (final checkpoint is always saved)")
+    parser.add_argument("--viz_last_only", action=argparse.BooleanOptionalAction, default=False, help="only render prediction plots at the final step")
     parser.add_argument("--freeze_encoder", action="store_true", help="freeze encoder weights (train classifier only)")
     parser.add_argument("--freeze_encoder_up_to", type=int, default=None, help="freeze encoder layers up to this index (inclusive); negative allowed")
     parser.add_argument("--lora_rank", type=int, default=0, help="LoRA rank for encoder FFN (0 disables)")

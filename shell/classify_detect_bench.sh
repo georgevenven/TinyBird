@@ -268,24 +268,34 @@ elif [ "$PROBE_MODE" == "lora" ]; then
     SUP_ARGS+=(--lora_rank "$LORA_RANK" --lora_alpha "$LORA_ALPHA" --lora_dropout "$LORA_DROPOUT")
 fi
 
-PYTHONWARNINGS=ignore python "$PROJECT_ROOT/src/supervised_train.py" \
-    --train_dir "$TRAIN_DIR" \
-    --val_dir "$TEST_SAMPLE_DIR" \
-    --run_name "$RUN_TAG" \
-    --pretrained_run "$PRETRAINED_RUN" \
-    --annotation_file "$POOL_DIR/annotations_filtered.json" \
-    --mode "$MODE" \
+if [ -d "$PROJECT_ROOT/runs/$RUN_TAG" ]; then
+    :
+else
+    PYTHONWARNINGS=ignore python "$PROJECT_ROOT/src/supervised_train.py" \
+        --train_dir "$TRAIN_DIR" \
+        --val_dir "$TEST_SAMPLE_DIR" \
+        --run_name "$RUN_TAG" \
+        --pretrained_run "$PRETRAINED_RUN" \
+        --annotation_file "$POOL_DIR/annotations_filtered.json" \
+        --mode "$MODE" \
     --steps "$STEPS" \
     --lr "$LR" \
     --batch_size "$BATCH_SIZE" \
     --num_workers "$NUM_WORKERS" \
     --weight_decay "$WEIGHT_DECAY" \
     --eval_every "$EVAL_EVERY" \
+    --viz_last_only \
     "${SUP_ARGS[@]}"
+fi
+
+RESULTS_CSV="$PROJECT_ROOT/results/$RUN_TAG/eval_f1.csv"
+if [[ "$RUN_TAG" == linear_probes/* ]]; then
+    RESULTS_CSV="$PROJECT_ROOT/results/linear_probes/eval_f1.csv"
+fi
 
 python "$PROJECT_ROOT/scripts/eval/eval_val_outputs_f1.py" \
     --runs_root "$PROJECT_ROOT/runs" \
     --run_names "$RUN_TAG" \
-    --out_csv "$PROJECT_ROOT/results/$RUN_TAG/eval_f1.csv" \
+    --out_csv "$RESULTS_CSV" \
     --append \
     --no_summary
