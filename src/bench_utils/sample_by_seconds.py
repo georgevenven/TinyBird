@@ -579,7 +579,13 @@ def main():
     parser.add_argument("--bird_id", type=str, default=None, help="Bird ID to filter (requires --annotation_json)")
     parser.add_argument("--ensure_units", action="store_true", help="ensure at least one instance of each unit (classify only)")
     parser.add_argument("--min_timebins", type=int, default=0, help="minimum timebins for cropped chunks (0 disables)")
-    parser.add_argument("--mode", type=str, default="classify", choices=["detect", "classify", "unit_detect"], help="label mode for unit coverage")
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="classify",
+        choices=["classify", "unit_detect"],
+        help="label mode for unit coverage",
+    )
     parser.add_argument("--random_crop", action="store_true", help="randomly crop partial files instead of taking from start")
     parser.add_argument("--event_chunks", action="store_true", help="write chunks only for detected events/units")
     parser.add_argument("--truncate_last", dest="truncate_last", action="store_true", help="Truncate last file to hit exact seconds")
@@ -587,6 +593,9 @@ def main():
     parser.add_argument("--move", action="store_true", help="Move files instead of copying")
     parser.set_defaults(truncate_last=True)
     args = parser.parse_args()
+
+    if args.mode == "classify":
+        args.ensure_units = True
 
     total = sample_by_seconds(
         args.spec_dir,

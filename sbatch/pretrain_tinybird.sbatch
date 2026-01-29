@@ -35,6 +35,7 @@ python -u src/pretrain.py \
   --train_dir "$TRAIN_DIR" \
   --val_dir "$VAL_DIR" \
   --run_name "$RUN_NAME" \
+  --continue_from "runs/$RUN_NAME" \
   --steps 500000 \
   --batch_size 256 \
   --num_workers 48 \

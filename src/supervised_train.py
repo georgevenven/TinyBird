@@ -39,7 +39,7 @@ class SupervisedTinyBird(nn.Module):
             freeze_encoder: If True, freeze encoder weights (train MLP classifier only)
             freeze_encoder_up_to: If set, freeze encoder layers up to this index (inclusive)
             mode: "detect" for binary detection, "classify" for multi-class classification
-            linear_probe: If True, use a single linear layer instead of MLP
+            linear_probe: If True, freeze the encoder and train only the linear head
             lora_rank: If > 0, apply LoRA adapters to encoder FFN layers
             lora_alpha: LoRA alpha scaling factor
             lora_dropout: LoRA dropout (applied before low-rank projection)
@@ -57,6 +57,14 @@ class SupervisedTinyBird(nn.Module):
         self.lora_rank = int(lora_rank)
         self.lora_alpha = float(lora_alpha)
         self.lora_dropout = float(lora_dropout)
+
+        # linear_probe means: single linear head + fully frozen encoder.
+        if linear_probe:
+            freeze_encoder = True
+            freeze_encoder_up_to = None
+            if self.lora_rank > 0:
+                print("Warning: linear_probe enabled - disabling LoRA.")
+            self.lora_rank = 0
         
         # LoRA mode: inject adapters and train only them (plus classifier).
         if self.lora_rank > 0:
@@ -122,22 +130,11 @@ class SupervisedTinyBird(nn.Module):
         H_patches = self.mels // self.patch_height
         input_dim = H_patches * self.enc_hidden_d
         
-        # Simple MLP classifier: input -> hidden -> output
-        hidden_dim = 256
+        # Linear head: single linear layer for both linear-probe and finetuning
         # For binary classification (2 classes), output 1 logit (BCE)
         # For multi-class, output num_classes logits (CrossEntropy)
         output_dim = 1 if num_classes == 2 else num_classes
-        
-        if linear_probe:
-            print("Using Linear Probe (single linear layer)")
-            self.classifier = nn.Linear(input_dim, output_dim)
-        else:
-            print("Using MLP Classifier")
-            self.classifier = nn.Sequential(
-                nn.Linear(input_dim, hidden_dim),
-                nn.GELU(),
-                nn.Linear(hidden_dim, output_dim)
-            )
+        self.classifier = nn.Linear(input_dim, output_dim)
         
         # Loss function - BCE for binary (2 classes), cross-entropy for multi-class
         # Class 0 is silence in both cases, explicitly trained
@@ -762,9 +759,9 @@ if __name__ == "__main__":
     parser.add_argument("--mode", type=str, required=True, choices=["detect", "unit_detect", "classify"], help="detect, unit_detect, or classify mode")
     
     # Training hyperparameters
-    parser.add_argument("--steps", type=int, default=50_000, help="number of training steps")
+    parser.add_argument("--steps", type=int, default=1000, help="number of training steps")
     parser.add_argument("--lr", type=float, default=1e-3, help="learning rate")
-    parser.add_argument("--batch_size", type=int, default=256, help="batch size")
+    parser.add_argument("--batch_size", type=int, default=24, help="batch size")
     parser.add_argument("--num_workers", type=int, default=8, help="number of DataLoader worker processes")
     parser.add_argument("--weight_decay", type=float, default=0.1, help="weight decay")
     parser.add_argument("--eval_every", type=int, default=100, help="evaluate every N steps")
@@ -775,7 +772,7 @@ if __name__ == "__main__":
     parser.add_argument("--lora_rank", type=int, default=0, help="LoRA rank for encoder FFN (0 disables)")
     parser.add_argument("--lora_alpha", type=float, default=16.0, help="LoRA alpha scaling factor")
     parser.add_argument("--lora_dropout", type=float, default=0.0, help="LoRA dropout before low-rank projection")
-    parser.add_argument("--linear_probe", action="store_true", help="use single linear layer instead of MLP")
+    parser.add_argument("--linear_probe", action="store_true", help="freeze encoder and train only the linear head")
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True, help="enable automatic mixed precision training (default: enabled)")
     parser.add_argument("--grad_clip", type=float, default=5.0, help="clip gradient norm (0 disables)")
     parser.add_argument("--encoder_layer_idx", type=int, default=None, help="encoder layer index to probe (0..enc_n_layer-1). If omitted, uses full encoder output.")
