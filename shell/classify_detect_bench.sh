@@ -192,16 +192,15 @@ if [ -z "$OUT_DIR" ]; then
     fi
 fi
 POOL_DIR="$OUT_DIR/pool"
-TEST_DIR="$OUT_DIR/test"
 TRAIN_DIR="$OUT_DIR/train"
-TEST_SAMPLE_DIR="$OUT_DIR/test_sample"
+TEST_SAMPLE_DIR="$OUT_DIR/test"
 
 echo "Copying pool for bird:"
 echo "  SPEC_DIR: $SPEC_DIR"
 echo "  ANNOTATION_FILE: $ANNOTATION_FILE"
 echo "  BIRD_ID: $BIRD_ID"
 echo "  POOL_DIR: $POOL_DIR"
-echo "  TEST_DIR: $TEST_DIR"
+echo "  TEST_DIR: $TEST_SAMPLE_DIR"
 
 if [ "$USE_PREPARED" -eq 0 ]; then
     python "$PROJECT_ROOT/src/bench_utils/copy_bird_pool.py" \
@@ -216,18 +215,20 @@ print(float("$POOL_SECONDS") * 0.2)
 PY
 )
 
-    python "$PROJECT_ROOT/src/bench_utils/split_pool_by_duration.py" \
-        --pool_dir "$POOL_DIR" \
-        --test_dir "$TEST_DIR" \
-        --annotation_json "$POOL_DIR/annotations_filtered.json" \
-        --train_percent 80 \
-        --seed "$SEED"
-
     if [ -z "$TRAIN_SECONDS" ]; then
         exit 1
     fi
     TRAIN_SECONDS_TAG="${TRAIN_SECONDS//./p}"
-    TRAIN_DIR="$OUT_DIR/classify/$BIRD_ID/train_${TRAIN_SECONDS_TAG}s"
+    TRAIN_DIR="$OUT_DIR/$MODE/$BIRD_ID/train_${TRAIN_SECONDS_TAG}s"
+
+    python "$PROJECT_ROOT/src/bench_utils/sample_by_seconds.py" \
+        --spec_dir "$POOL_DIR" \
+        --out_dir "$TEST_SAMPLE_DIR" \
+        --seconds "$TEST_SECONDS" \
+        --seed "$SEED" \
+        --annotation_json "$POOL_DIR/annotations_filtered.json" \
+        --mode "$MODE" \
+        --move
 
     python "$PROJECT_ROOT/src/bench_utils/sample_by_seconds.py" \
         --spec_dir "$POOL_DIR" \
@@ -235,26 +236,14 @@ PY
         --seconds "$TRAIN_SECONDS" \
         --seed "$SEED" \
         --annotation_json "$POOL_DIR/annotations_filtered.json" \
-        --mode "$MODE"
-
-    python "$PROJECT_ROOT/src/bench_utils/sample_by_seconds.py" \
-        --spec_dir "$TEST_DIR" \
-        --out_dir "$TEST_SAMPLE_DIR" \
-        --seconds "$TEST_SECONDS" \
-        --seed "$SEED" \
-        --annotation_json "$POOL_DIR/annotations_filtered.json" \
-        --mode "$MODE"
+        --mode "$MODE" \
+        --move
 else
     if [ -z "$TRAIN_SECONDS" ]; then
         exit 1
     fi
     TRAIN_SECONDS_TAG="${TRAIN_SECONDS//./p}"
-    TRAIN_DIR="$OUT_DIR/classify/$BIRD_ID/train_${TRAIN_SECONDS_TAG}s"
-    POOL_SECONDS=$(python "$PROJECT_ROOT/src/bench_utils/pool_seconds.py" --spec_dir "$POOL_DIR")
-    TEST_SECONDS=$(python - <<PY
-print(float("$POOL_SECONDS") * 0.2)
-PY
-)
+    TRAIN_DIR="$OUT_DIR/$MODE/$BIRD_ID/train_${TRAIN_SECONDS_TAG}s"
 fi
 
 if [ "$PREP_ONLY" -eq 1 ]; then

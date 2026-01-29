@@ -387,48 +387,109 @@ def sample_by_seconds(
 
         if missing_units:
             print(f"Warning: Missing units with no available events/specs: {sorted(set(missing_units))}")
-        total_bins = sum(item["window_bins"] for item in planned)
-        if total_bins > budget_bins:
-            excess_bins = total_bins - budget_bins
-            order = list(range(len(planned)))
-            rng.shuffle(order)
-            for idx in order:
-                if excess_bins <= 0:
-                    break
-                item = planned[idx]
-                reducible = item["window_bins"] - item["unit_bins"]
-                if reducible <= 0:
-                    continue
-                reduce_by = min(reducible, excess_bins)
-                item["window_bins"] -= reduce_by
-                excess_bins -= reduce_by
-            if excess_bins > 0:
-                print(
-                    "Warning: unit coverage exceeds budget even after cropping to unit durations."
-                )
-
         total_bins = 0
-        for item in planned:
-            path = item["path"]
-            arr = np.load(path, mmap_mode="r")
-            start_bin, end_bin = _center_window_on_unit(
-                item["onset_bin"],
-                item["offset_bin"],
-                item["window_bins"],
-                item["timebins"],
-            )
-            chunk = np.array(arr[:, start_bin:end_bin], dtype=np.float32)
-            base_stem, start_ms, end_ms = _chunk_bounds_to_ms(
-                item["base_stem"],
-                item["chunk_start"],
-                start_bin,
-                end_bin,
-                sr,
-                hop_size,
-            )
-            out_name = f"{base_stem}__ms_{start_ms}_{end_ms}.npy"
-            np.save(out_dir / out_name, chunk)
-            total_bins += (end_bin - start_bin)
+        if move:
+            coverage = []
+            coverage_stems = set()
+            for item in planned:
+                base_stem = item["base_stem"]
+                if base_stem in coverage_stems:
+                    continue
+                coverage.append(item)
+                coverage_stems.add(base_stem)
+
+            for item in coverage:
+                path = item["path"]
+                timebins = item["timebins"]
+                if total_bins + timebins <= budget_bins:
+                    copy_or_move(path, out_dir / path.name, move)
+                    total_bins += timebins
+                    used_stems.add(item["base_stem"])
+                    if total_bins >= budget_bins:
+                        break
+                    continue
+
+                if not truncate_last:
+                    break
+
+                remainder_bins = budget_bins - total_bins
+                if remainder_bins <= 0:
+                    break
+                remainder_bins = min(timebins, remainder_bins)
+                if remainder_bins >= timebins:
+                    copy_or_move(path, out_dir / path.name, move)
+                    total_bins += timebins
+                    break
+
+                if random_crop and remainder_bins < timebins:
+                    start_bin = rng.randint(0, max(0, timebins - remainder_bins))
+                else:
+                    start_bin, end_bin = _center_window_on_unit(
+                        item["onset_bin"],
+                        item["offset_bin"],
+                        remainder_bins,
+                        timebins,
+                    )
+                    start_bin = max(0, min(start_bin, timebins - remainder_bins))
+                end_bin = start_bin + remainder_bins
+                arr = np.load(path, mmap_mode="r")
+                chunk = np.array(arr[:, start_bin:end_bin], dtype=np.float32)
+                base_stem, start_ms, end_ms = _chunk_bounds_to_ms(
+                    item["base_stem"],
+                    item["chunk_start"],
+                    start_bin,
+                    end_bin,
+                    sr,
+                    hop_size,
+                )
+                out_name = f"{base_stem}__ms_{start_ms}_{end_ms}.npy"
+                np.save(out_dir / out_name, chunk)
+                path.unlink()
+                total_bins += (end_bin - start_bin)
+                break
+        else:
+            total_bins = sum(item["window_bins"] for item in planned)
+            if total_bins > budget_bins:
+                excess_bins = total_bins - budget_bins
+                order = list(range(len(planned)))
+                rng.shuffle(order)
+                for idx in order:
+                    if excess_bins <= 0:
+                        break
+                    item = planned[idx]
+                    reducible = item["window_bins"] - item["unit_bins"]
+                    if reducible <= 0:
+                        continue
+                    reduce_by = min(reducible, excess_bins)
+                    item["window_bins"] -= reduce_by
+                    excess_bins -= reduce_by
+                if excess_bins > 0:
+                    print(
+                        "Warning: unit coverage exceeds budget even after cropping to unit durations."
+                    )
+
+            total_bins = 0
+            for item in planned:
+                path = item["path"]
+                arr = np.load(path, mmap_mode="r")
+                start_bin, end_bin = _center_window_on_unit(
+                    item["onset_bin"],
+                    item["offset_bin"],
+                    item["window_bins"],
+                    item["timebins"],
+                )
+                chunk = np.array(arr[:, start_bin:end_bin], dtype=np.float32)
+                base_stem, start_ms, end_ms = _chunk_bounds_to_ms(
+                    item["base_stem"],
+                    item["chunk_start"],
+                    start_bin,
+                    end_bin,
+                    sr,
+                    hop_size,
+                )
+                out_name = f"{base_stem}__ms_{start_ms}_{end_ms}.npy"
+                np.save(out_dir / out_name, chunk)
+                total_bins += (end_bin - start_bin)
 
         if total_bins < budget_bins:
             for path in iter_files(spec_dir, order_file, seed, allowed_stems=allowed_stems):
@@ -465,14 +526,23 @@ def sample_by_seconds(
                     start_bin = 0
                 end_bin = start_bin + remainder_bins
                 chunk = np.array(arr[:, start_bin:end_bin], dtype=np.float32)
-                base_stem, start_ms, end_ms = _chunk_bounds_to_ms(
-                    base_stem, chunk_start, start_bin, end_bin, sr, hop_size
-                )
-                out_name = f"{base_stem}__ms_{start_ms}_{end_ms}.npy"
-                np.save(out_dir / out_name, chunk)
-
                 if move:
-                    path.unlink()
+                    new_path = out_dir / path.name
+                    copy_or_move(path, new_path, move)
+                    arr = np.load(new_path, mmap_mode="r")
+                    chunk = np.array(arr[:, start_bin:end_bin], dtype=np.float32)
+                    base_stem, start_ms, end_ms = _chunk_bounds_to_ms(
+                        base_stem, chunk_start, start_bin, end_bin, sr, hop_size
+                    )
+                    out_name = f"{base_stem}__ms_{start_ms}_{end_ms}.npy"
+                    np.save(out_dir / out_name, chunk)
+                    new_path.unlink()
+                else:
+                    base_stem, start_ms, end_ms = _chunk_bounds_to_ms(
+                        base_stem, chunk_start, start_bin, end_bin, sr, hop_size
+                    )
+                    out_name = f"{base_stem}__ms_{start_ms}_{end_ms}.npy"
+                    np.save(out_dir / out_name, chunk)
 
                 total_bins += (end_bin - start_bin)
                 break
