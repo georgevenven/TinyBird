@@ -7,14 +7,12 @@ import json
 from datetime import datetime
 import time
 from pathlib import Path
-import math
 
 import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import LambdaLR
 from model import apply_lora_to_encoder, LoRALinear
 
 class SupervisedTinyBird(nn.Module):
@@ -56,7 +54,6 @@ class SupervisedTinyBird(nn.Module):
         self.mels = config["mels"]
         self.mode = mode
         self.encoder_layer_idx = config.get("encoder_layer_idx", None)
-        self.class_weighting = bool(config.get("class_weighting", False))
         self.lora_rank = int(lora_rank)
         self.lora_alpha = float(lora_alpha)
         self.lora_dropout = float(lora_dropout)
@@ -214,14 +211,7 @@ class SupervisedTinyBird(nn.Module):
             B, W_patches, num_classes = logits.shape
             logits_flat = logits.reshape(-1, num_classes)  # (B * W_patches, num_classes)
             labels_flat = labels_downsampled.reshape(-1)  # (B * W_patches,)
-            if self.class_weighting:
-                counts = torch.bincount(labels_flat, minlength=num_classes).float()
-                counts_safe = torch.where(counts > 0, counts, torch.ones_like(counts))
-                weights = counts.sum() / (counts_safe * num_classes)
-                weights = torch.where(counts > 0, weights, torch.zeros_like(weights))
-                loss = F.cross_entropy(logits_flat, labels_flat, weight=weights)
-            else:
-                loss = self.loss_fn(logits_flat, labels_flat)
+            loss = self.loss_fn(logits_flat, labels_flat)
         
         return loss
     
@@ -260,62 +250,6 @@ class SupervisedTinyBird(nn.Module):
         
         return accuracy
     
-    def compute_f1_score(self, logits, labels):
-        """
-        Compute F1 score.
-
-        - For binary tasks (detect/unit_detect): F1 for the positive class (1), returned as 0-100%.
-        - For multi-class classify: macro-F1 across all classes (including silence=0), returned as 0-100%.
-        
-        Args:
-            logits: (B, W_patches, 1) for binary or (B, W_patches, num_classes) for multi-class
-            labels: (B, W) where W is n_timebins
-            
-        Returns:
-            f1: F1 score (0-100%)
-        """
-        B_label, W = labels.shape
-        
-        # Downsample labels to match patch width
-        labels_downsampled = labels[:, ::self.patch_width]
-
-        if self.num_classes == 2:
-            # Binary classification: use sigmoid + threshold at 0.5
-            # logits shape: (B, W_patches, 1)
-            logits_flat = logits.reshape(-1)  # (B * W_patches,)
-            probs = torch.sigmoid(logits_flat)  # (B * W_patches,)
-            preds = (probs > 0.5).long()  # (B * W_patches,)
-            labels_flat = labels_downsampled.reshape(-1)  # (B * W_patches,)
-
-            # Calculate TP, FP, FN for positive class 1
-            tp = ((preds == 1) & (labels_flat == 1)).sum().item()
-            fp = ((preds == 1) & (labels_flat == 0)).sum().item()
-            fn = ((preds == 0) & (labels_flat == 1)).sum().item()
-
-            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-            f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
-            return f1 * 100.0
-
-        # Multi-class macro-F1 (include silence=0)
-        preds = torch.argmax(logits, dim=-1)  # (B, W_patches)
-        labels_mc = labels_downsampled  # (B, W_patches)
-
-        f1s = []
-        for c in range(int(self.num_classes)):
-            tp = ((preds == c) & (labels_mc == c)).sum().item()
-            fp = ((preds == c) & (labels_mc != c)).sum().item()
-            fn = ((preds != c) & (labels_mc == c)).sum().item()
-
-            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-            f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
-            f1s.append(f1)
-
-        macro_f1 = float(np.mean(f1s)) if len(f1s) else 0.0
-        return macro_f1 * 100.0
-
-
 SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SRC_DIR)
 RUNS_ROOT = os.path.join(PROJECT_ROOT, "runs")
@@ -325,7 +259,6 @@ class Trainer():
     def __init__(self, model, config):
         self.config = config
         self.model = model
-        self.compute_f1 = config["mode"] in ["detect", "unit_detect"] or config.get("log_f1", False)
         
         # Setup run directory
         os.makedirs(RUNS_ROOT, exist_ok=True)
@@ -370,35 +303,8 @@ class Trainer():
         trainable_params = [p for p in self.model.parameters() if p.requires_grad]
         self.optimizer = AdamW(trainable_params, lr=config["lr"], weight_decay=config["weight_decay"])
         
-        # Initialize LR scheduler (optional warmup + decay to min_lr)
-        warmup_steps = int(config.get("warmup_steps") or 0)
-        min_lr = float(config.get("min_lr") or 0.0)
-        if warmup_steps < 0:
-            raise ValueError(f"warmup_steps must be >= 0. Got {warmup_steps}")
-        if min_lr < 0:
-            raise ValueError(f"min_lr must be >= 0. Got {min_lr}")
-
-        if warmup_steps > 0 or min_lr > 0.0:
-            total_steps = int(config["steps"])
-            base_lr = float(config["lr"])
-            decay_steps = max(1, total_steps - warmup_steps)
-
-            def lr_lambda(step_idx):
-                # LambdaLR passes 0 on the first scheduler.step() call.
-                step_num = step_idx + 1
-                if warmup_steps > 0 and step_num <= warmup_steps:
-                    return step_num / float(warmup_steps)
-                # Cosine decay from base_lr to min_lr
-                decay_step = step_num - warmup_steps
-                decay_step = min(max(decay_step, 0), decay_steps)
-                cosine = 0.5 * (1.0 + math.cos(math.pi * decay_step / float(decay_steps)))
-                target_lr = min_lr + (base_lr - min_lr) * cosine
-                return target_lr / base_lr if base_lr > 0 else 1.0
-
-            self.scheduler = LambdaLR(self.optimizer, lr_lambda=lr_lambda)
-        else:
-            # Default behavior: constant learning rate (no scheduler)
-            self.scheduler = None
+        # Constant learning rate (no scheduler)
+        self.scheduler = None
         
         # Initialize AMP scaler if AMP is enabled
         self.use_amp = config.get("amp", False)
@@ -409,23 +315,13 @@ class Trainer():
         self.val_loss_history = []
         self.train_acc_history = []
         self.val_acc_history = []
-        self.train_f1_history = []
-        self.val_f1_history = []
         self.train_steps = []
         self.val_steps = []
         
-        # Early stopping state (initialized in train())
-        self._es_ema_val_loss = None
-        self._es_best_ema_val_loss = None
-        self._es_bad_evals = 0
-
         # Setup loss logging file
         self.loss_log_path = os.path.join(self.run_path, "loss_log.txt")
         with open(self.loss_log_path, 'w') as f:
-            if self.compute_f1:
-                f.write("step,train_loss,val_loss,train_acc,val_acc,train_f1,val_f1,samples_processed,steps_per_sec,samples_per_sec\n")
-            else:
-                f.write("step,train_loss,val_loss,train_acc,val_acc,samples_processed,steps_per_sec,samples_per_sec\n")
+            f.write("step,train_loss,val_loss,train_acc,val_acc,samples_processed,steps_per_sec,samples_per_sec\n")
     
     def export_validation_outputs(self, val_loader, step_num, final_weight_path=None):
         """
@@ -602,7 +498,6 @@ class Trainer():
         Returns:
             loss: Scalar loss value
             accuracy: Accuracy percentage
-            f1: F1 score (only for detection mode, else None)
             logits: Model predictions (for visualization)
             grad_norm: L2 norm of gradients for the step (training only)
         """
@@ -623,12 +518,10 @@ class Trainer():
                     logits = self.model(x)
                     loss = self.model.compute_loss(logits, labels)
                     accuracy = self.model.compute_accuracy(logits, labels)
-                    f1 = self.model.compute_f1_score(logits, labels) if self.compute_f1 else None
             else:
                 logits = self.model(x)
                 loss = self.model.compute_loss(logits, labels)
                 accuracy = self.model.compute_accuracy(logits, labels)
-                f1 = self.model.compute_f1_score(logits, labels) if self.compute_f1 else None
         
         grad_norm = None
         # Backward pass only for training
@@ -655,10 +548,8 @@ class Trainer():
                 self.scaler.update()
             else:
                 self.optimizer.step()
-            if self.scheduler is not None:
-                self.scheduler.step()
         
-        return loss.item(), accuracy, f1, logits, grad_norm
+        return loss.item(), accuracy, logits, grad_norm
     
     def save_prediction_visualization(self, batch, logits, step_num, split="val"):
         """
@@ -724,7 +615,6 @@ class Trainer():
             annotation_file_path=self.config["annotation_file"],
             n_timebins=self.config["num_timebins"],
             mode=self.config["mode"],
-            white_noise=self.config.get("white_noise", 0.0),
             audio_params_override=self.config.get("audio_params_override"),
         )
         
@@ -733,7 +623,6 @@ class Trainer():
             annotation_file_path=self.config["annotation_file"],
             n_timebins=self.config["num_timebins"],
             mode=self.config["mode"],
-            white_noise=0.0,  # No augmentation on validation set
             audio_params_override=self.config.get("audio_params_override"),
         )
         
@@ -753,12 +642,9 @@ class Trainer():
             pin_memory=True
         )
         
-        val_batch_size = int(self.config.get("val_batch_size", 0))
-        if val_batch_size <= 0:
-            val_batch_size = int(self.config["batch_size"])
         val_loader = DataLoader(
             val_dataset,
-            batch_size=val_batch_size,
+            batch_size=self.config["batch_size"],
             shuffle=False,
             num_workers=self.config["num_workers"],
             pin_memory=True
@@ -770,17 +656,6 @@ class Trainer():
         
         total_steps = self.config["steps"]
 
-        # Early stopping config:
-        # Stop if EMA-smoothed val_loss does not improve for N consecutive eval checks.
-        # Set early_stop_patience=0 to disable.
-        es_patience = int(self.config.get("early_stop_patience", 4))
-        es_alpha = float(self.config.get("early_stop_ema_alpha", 0.75))
-        es_min_delta = float(self.config.get("early_stop_min_delta", 0.0))
-        if not (0.0 <= es_alpha < 1.0):
-            raise ValueError(f"early_stop_ema_alpha must be in [0, 1). Got {es_alpha}")
-        if es_patience < 0:
-            raise ValueError(f"early_stop_patience must be >= 0. Got {es_patience}")
-        
         # Initialize timing
         last_eval_time = time.time()
         last_eval_step = 0
@@ -797,13 +672,11 @@ class Trainer():
                 train_batch = next(train_iter)
             
             # Training step
-            train_loss, train_acc, train_f1, train_logits, train_grad_norm = self.step(train_batch, is_training=True)
+            train_loss, train_acc, train_logits, train_grad_norm = self.step(train_batch, is_training=True)
             
             # Store training loss and accuracy every step
             self.train_loss_history.append(train_loss)
             self.train_acc_history.append(train_acc)
-            if train_f1 is not None:
-                self.train_f1_history.append(train_f1)
             self.train_steps.append(step_num)
             
             # Evaluation and checkpointing
@@ -815,31 +688,11 @@ class Trainer():
                     val_batch = next(val_iter)
                 
                 # Validation step (no gradients)
-                val_loss, val_acc, val_f1, val_logits, _ = self.step(val_batch, is_training=False)
+                val_loss, val_acc, val_logits, _ = self.step(val_batch, is_training=False)
 
-                # Early stopping update (EMA-smoothed val loss)
-                if es_patience > 0:
-                    if self._es_ema_val_loss is None:
-                        self._es_ema_val_loss = float(val_loss)
-                        self._es_best_ema_val_loss = float(val_loss)
-                        self._es_bad_evals = 0
-                    else:
-                        self._es_ema_val_loss = (es_alpha * self._es_ema_val_loss) + ((1.0 - es_alpha) * float(val_loss))
-
-                    if self._es_best_ema_val_loss is None:
-                        self._es_best_ema_val_loss = float(self._es_ema_val_loss)
-
-                    if float(self._es_ema_val_loss) < (float(self._es_best_ema_val_loss) - es_min_delta):
-                        self._es_best_ema_val_loss = float(self._es_ema_val_loss)
-                        self._es_bad_evals = 0
-                    else:
-                        self._es_bad_evals += 1
-                
                 # Store validation loss and accuracy
                 self.val_loss_history.append(val_loss)
                 self.val_acc_history.append(val_acc)
-                if val_f1 is not None:
-                    self.val_f1_history.append(val_f1)
                 self.val_steps.append(step_num)
                 
                 # Calculate samples processed
@@ -860,36 +713,19 @@ class Trainer():
                 last_eval_step = step_num
                 
                 # Print progress
-                if self.scheduler is not None:
-                    current_lr = self.scheduler.get_last_lr()[0]
-                else:
-                    current_lr = self.optimizer.param_groups[0]["lr"]
+                current_lr = self.optimizer.param_groups[0]["lr"]
                 grad_str = f", Grad Norm = {train_grad_norm:.4f}" if train_grad_norm is not None else ""
-                if self.config["mode"] in ["detect", "unit_detect"] or self.config.get("log_f1", False):
-                    # train_f1 / val_f1 are expected to be non-None when log_f1 is enabled
-                    print(f"Step {step_num} ({progress_pct:.1f}%): "
-                          f"Train Loss = {train_loss:.6f}, Val Loss = {val_loss:.6f}, "
-                          f"Train Acc = {train_acc:.2f}%, Val Acc = {val_acc:.2f}%, "
-                          f"Train F1 = {train_f1:.2f}%, Val F1 = {val_f1:.2f}%, "
-                          f"Samples = {samples_processed}, "
-                          f"LR = {current_lr:.2e}{grad_str}, "
-                          f"Steps/sec = {steps_per_sec:.2f}, "
-                          f"Samples/sec = {samples_per_sec:.1f}")
-                else:
-                    print(f"Step {step_num} ({progress_pct:.1f}%): "
-                          f"Train Loss = {train_loss:.6f}, Val Loss = {val_loss:.6f}, "
-                          f"Train Acc = {train_acc:.2f}%, Val Acc = {val_acc:.2f}%, "
-                          f"Samples = {samples_processed}, "
-                          f"LR = {current_lr:.2e}{grad_str}, "
-                          f"Steps/sec = {steps_per_sec:.2f}, "
-                          f"Samples/sec = {samples_per_sec:.1f}")
+                print(f"Step {step_num} ({progress_pct:.1f}%): "
+                      f"Train Loss = {train_loss:.6f}, Val Loss = {val_loss:.6f}, "
+                      f"Train Acc = {train_acc:.2f}%, Val Acc = {val_acc:.2f}%, "
+                      f"Samples = {samples_processed}, "
+                      f"LR = {current_lr:.2e}{grad_str}, "
+                      f"Steps/sec = {steps_per_sec:.2f}, "
+                      f"Samples/sec = {samples_per_sec:.1f}")
                 
                 # Log losses and accuracies to file
                 with open(self.loss_log_path, 'a') as f:
-                    if self.config["mode"] in ["detect", "unit_detect"] or self.config.get("log_f1", False):
-                        f.write(f"{step_num},{train_loss:.6f},{val_loss:.6f},{train_acc:.2f},{val_acc:.2f},{train_f1:.2f},{val_f1:.2f},{samples_processed},{steps_per_sec:.2f},{samples_per_sec:.1f}\n")
-                    else:
-                        f.write(f"{step_num},{train_loss:.6f},{val_loss:.6f},{train_acc:.2f},{val_acc:.2f},{samples_processed},{steps_per_sec:.2f},{samples_per_sec:.1f}\n")
+                    f.write(f"{step_num},{train_loss:.6f},{val_loss:.6f},{train_acc:.2f},{val_acc:.2f},{samples_processed},{steps_per_sec:.2f},{samples_per_sec:.1f}\n")
                 
                 # Save intermediate model weights (optional; final checkpoint is always saved at end)
                 if self.config.get("save_intermediate_checkpoints", True):
@@ -900,15 +736,6 @@ class Trainer():
                 self.save_prediction_visualization(val_batch, val_logits, step_num, split="val")
                 self.save_prediction_visualization(train_batch, train_logits, step_num, split="train")
 
-                # Potentially stop training
-                if es_patience > 0 and self._es_bad_evals >= es_patience:
-                    print(
-                        "Early stopping: EMA-smoothed validation loss did not improve for "
-                        f"{es_patience} consecutive validation checks "
-                        f"(ema_val_loss={self._es_ema_val_loss:.6f}, best_ema_val_loss={self._es_best_ema_val_loss:.6f}). "
-                        "Halting training."
-                    )
-                    break
         
         # Save final model weights
         final_step = last_step_num if last_step_num >= 0 else 0
@@ -938,80 +765,20 @@ if __name__ == "__main__":
     parser.add_argument("--steps", type=int, default=50_000, help="number of training steps")
     parser.add_argument("--lr", type=float, default=1e-3, help="learning rate")
     parser.add_argument("--batch_size", type=int, default=256, help="batch size")
-    parser.add_argument(
-        "--val_batch_size",
-        type=int,
-        default=0,
-        help="validation/inference batch size (0 uses --batch_size)",
-    )
     parser.add_argument("--num_workers", type=int, default=8, help="number of DataLoader worker processes")
     parser.add_argument("--weight_decay", type=float, default=0.1, help="weight decay")
     parser.add_argument("--eval_every", type=int, default=100, help="evaluate every N steps")
-    parser.add_argument(
-        "--warmup_steps",
-        type=int,
-        default=None,
-        help="linear warmup steps before decay (omit to disable scheduler)",
-    )
-    parser.add_argument(
-        "--min_lr",
-        type=float,
-        default=None,
-        help="minimum learning rate after decay (omit to disable scheduler)",
-    )
-
-    # Early stopping
-    parser.add_argument("--early_stop_patience", type=int, default=4, help="stop if EMA-smoothed val_loss does not improve for N consecutive eval checks (0 disables)")
-    parser.add_argument("--early_stop_ema_alpha", type=float, default=0.75, help="EMA alpha for smoothing val_loss (higher = smoother)")
-    parser.add_argument("--early_stop_min_delta", type=float, default=0.0, help="minimum decrease in EMA val_loss required to count as improvement")
-
-    # Export val logits/labels for posthoc metrics (default: on)
-    parser.add_argument(
-        "--save_val_logits",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="save validation logits/labels/filenames to runs/<run_name>/val_outputs/ (default: enabled)",
-    )
-
-    # Checkpointing
-    parser.add_argument(
-        "--save_intermediate_checkpoints",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="save intermediate checkpoints during training at eval steps (final checkpoint is always saved)",
-    )
-    
-    # Model configuration
+    parser.add_argument("--save_val_logits", action=argparse.BooleanOptionalAction, default=True, help="save validation logits/labels/filenames to runs/<run_name>/val_outputs/ (default: enabled)")
+    parser.add_argument("--save_intermediate_checkpoints", action=argparse.BooleanOptionalAction, default=True, help="save intermediate checkpoints during training at eval steps (final checkpoint is always saved)")
     parser.add_argument("--freeze_encoder", action="store_true", help="freeze encoder weights (train classifier only)")
-    parser.add_argument(
-        "--freeze_encoder_up_to",
-        type=int,
-        default=None,
-        help="freeze encoder layers up to this index (inclusive); negative allowed",
-    )
+    parser.add_argument("--freeze_encoder_up_to", type=int, default=None, help="freeze encoder layers up to this index (inclusive); negative allowed")
     parser.add_argument("--lora_rank", type=int, default=0, help="LoRA rank for encoder FFN (0 disables)")
     parser.add_argument("--lora_alpha", type=float, default=16.0, help="LoRA alpha scaling factor")
     parser.add_argument("--lora_dropout", type=float, default=0.0, help="LoRA dropout before low-rank projection")
     parser.add_argument("--linear_probe", action="store_true", help="use single linear layer instead of MLP")
-    parser.add_argument(
-        "--amp",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="enable automatic mixed precision training (default: enabled)",
-    )
+    parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True, help="enable automatic mixed precision training (default: enabled)")
     parser.add_argument("--grad_clip", type=float, default=5.0, help="clip gradient norm (0 disables)")
     parser.add_argument("--encoder_layer_idx", type=int, default=None, help="encoder layer index to probe (0..enc_n_layer-1). If omitted, uses full encoder output.")
-    parser.add_argument("--log_f1", action="store_true", help="log (macro) F1 to loss_log.txt (useful for classify)")
-    parser.add_argument(
-        "--class_weighting",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="weight CE by inverse class frequency per batch (classify only; default: enabled)",
-    )
-    
-    # Data augmentation
-    parser.add_argument("--white_noise", type=float, default=0.0, help="standard deviation of white noise to add after normalization (0.0 = no noise)")
-    
     args = parser.parse_args()
     
     # Load pretrained model and config
@@ -1025,10 +792,6 @@ if __name__ == "__main__":
     
     # Create supervised config
     config = vars(args)
-    if config.get("warmup_steps") is None:
-        config.pop("warmup_steps", None)
-    if config.get("min_lr") is None:
-        config.pop("min_lr", None)
     
     # Add necessary info from pretrained config
     config["num_timebins"] = pretrained_config["num_timebins"]
