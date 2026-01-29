@@ -9,7 +9,7 @@ PROJECT_ROOT="$(pwd)"
 SPEC_ROOT=""
 ANNOTATION_ROOT="files"
 TEMP_ROOT="$PROJECT_ROOT/temp"
-PRETRAINED_RUN="runs/tinybird_pretrain_20251122_091539"
+PRETRAINED_RUN=""
 
 # One bird at a time
 SPECIES=""
@@ -35,6 +35,9 @@ BATCH_SIZE=24
 NUM_WORKERS=8
 WEIGHT_DECAY=0.1
 EVAL_EVERY=100
+RUN_NAME=""
+PREP_ONLY=0
+USE_PREPARED=0
 
 # Species map: "Species:AnnotationFile:SpecSubDir"
 SPECIES_LIST=(
@@ -94,6 +97,10 @@ while [[ $# -gt 0 ]]; do
         RUN_TAG="$2"
         shift 2
         ;;
+        --run_name)
+        RUN_NAME="$2"
+        shift 2
+        ;;
         --probe_mode)
         PROBE_MODE="$2"
         shift 2
@@ -137,6 +144,14 @@ while [[ $# -gt 0 ]]; do
         --pretrained_run)
         PRETRAINED_RUN="$2"
         shift 2
+        ;;
+        --prep_only)
+        PREP_ONLY=1
+        shift 1
+        ;;
+        --use_prepared)
+        USE_PREPARED=1
+        shift 1
         ;;
         *)
         shift 1
@@ -188,47 +203,74 @@ echo "  BIRD_ID: $BIRD_ID"
 echo "  POOL_DIR: $POOL_DIR"
 echo "  TEST_DIR: $TEST_DIR"
 
-python "$PROJECT_ROOT/src/bench_utils/copy_bird_pool.py" \
-    --annotation_file "$ANNOTATION_FILE" \
-    --spec_dir "$SPEC_DIR" \
-    --out_dir "$POOL_DIR" \
-    --bird_id "$BIRD_ID"
+if [ "$USE_PREPARED" -eq 0 ]; then
+    python "$PROJECT_ROOT/src/bench_utils/copy_bird_pool.py" \
+        --annotation_file "$ANNOTATION_FILE" \
+        --spec_dir "$SPEC_DIR" \
+        --out_dir "$POOL_DIR" \
+        --bird_id "$BIRD_ID"
 
-if [ -z "$TRAIN_SECONDS" ]; then
-    exit 1
-fi
-if [ -z "$RUN_TAG" ]; then
-    exit 1
-fi
-
-POOL_SECONDS=$(python "$PROJECT_ROOT/src/bench_utils/pool_seconds.py" --spec_dir "$POOL_DIR")
-TEST_SECONDS=$(python - <<PY
+    POOL_SECONDS=$(python "$PROJECT_ROOT/src/bench_utils/pool_seconds.py" --spec_dir "$POOL_DIR")
+    TEST_SECONDS=$(python - <<PY
 print(float("$POOL_SECONDS") * 0.2)
 PY
 )
 
-python "$PROJECT_ROOT/src/bench_utils/split_pool_by_duration.py" \
-    --pool_dir "$POOL_DIR" \
-    --test_dir "$TEST_DIR" \
-    --annotation_json "$POOL_DIR/annotations_filtered.json" \
-    --train_percent 80 \
-    --seed "$SEED"
+    python "$PROJECT_ROOT/src/bench_utils/split_pool_by_duration.py" \
+        --pool_dir "$POOL_DIR" \
+        --test_dir "$TEST_DIR" \
+        --annotation_json "$POOL_DIR/annotations_filtered.json" \
+        --train_percent 80 \
+        --seed "$SEED"
 
-python "$PROJECT_ROOT/src/bench_utils/sample_by_seconds.py" \
-    --spec_dir "$POOL_DIR" \
-    --out_dir "$TRAIN_DIR" \
-    --seconds "$TRAIN_SECONDS" \
-    --seed "$SEED" \
-    --annotation_json "$POOL_DIR/annotations_filtered.json" \
-    --mode "$MODE"
+    if [ -z "$TRAIN_SECONDS" ]; then
+        exit 1
+    fi
+    TRAIN_SECONDS_TAG="${TRAIN_SECONDS//./p}"
+    TRAIN_DIR="$OUT_DIR/classify/$BIRD_ID/train_${TRAIN_SECONDS_TAG}s"
 
-python "$PROJECT_ROOT/src/bench_utils/sample_by_seconds.py" \
-    --spec_dir "$TEST_DIR" \
-    --out_dir "$TEST_SAMPLE_DIR" \
-    --seconds "$TEST_SECONDS" \
-    --seed "$SEED" \
-    --annotation_json "$POOL_DIR/annotations_filtered.json" \
-    --mode "$MODE"
+    python "$PROJECT_ROOT/src/bench_utils/sample_by_seconds.py" \
+        --spec_dir "$POOL_DIR" \
+        --out_dir "$TRAIN_DIR" \
+        --seconds "$TRAIN_SECONDS" \
+        --seed "$SEED" \
+        --annotation_json "$POOL_DIR/annotations_filtered.json" \
+        --mode "$MODE"
+
+    python "$PROJECT_ROOT/src/bench_utils/sample_by_seconds.py" \
+        --spec_dir "$TEST_DIR" \
+        --out_dir "$TEST_SAMPLE_DIR" \
+        --seconds "$TEST_SECONDS" \
+        --seed "$SEED" \
+        --annotation_json "$POOL_DIR/annotations_filtered.json" \
+        --mode "$MODE"
+else
+    if [ -z "$TRAIN_SECONDS" ]; then
+        exit 1
+    fi
+    TRAIN_SECONDS_TAG="${TRAIN_SECONDS//./p}"
+    TRAIN_DIR="$OUT_DIR/classify/$BIRD_ID/train_${TRAIN_SECONDS_TAG}s"
+    POOL_SECONDS=$(python "$PROJECT_ROOT/src/bench_utils/pool_seconds.py" --spec_dir "$POOL_DIR")
+    TEST_SECONDS=$(python - <<PY
+print(float("$POOL_SECONDS") * 0.2)
+PY
+)
+fi
+
+if [ "$PREP_ONLY" -eq 1 ]; then
+    exit 0
+fi
+
+if [ -z "$RUN_TAG" ]; then
+    exit 1
+fi
+if [ -z "$PRETRAINED_RUN" ]; then
+    exit 1
+fi
+
+if [ -z "$RUN_NAME" ]; then
+    RUN_NAME="$RUN_TAG"
+fi
 
 SUP_ARGS=()
 if [ "$PROBE_MODE" == "linear" ]; then
@@ -251,3 +293,10 @@ PYTHONWARNINGS=ignore python "$PROJECT_ROOT/src/supervised_train.py" \
     --weight_decay "$WEIGHT_DECAY" \
     --eval_every "$EVAL_EVERY" \
     "${SUP_ARGS[@]}"
+
+python "$PROJECT_ROOT/scripts/eval/eval_val_outputs_f1.py" \
+    --runs_root "$PROJECT_ROOT/runs" \
+    --run_names "$RUN_TAG" \
+    --out_csv "$PROJECT_ROOT/results/$RUN_TAG/eval_f1.csv" \
+    --append \
+    --no_summary

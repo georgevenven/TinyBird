@@ -281,17 +281,17 @@ def save_supervised_prediction_plot(
     # Create figure
     if mode in ["detect", "unit_detect"]:
         fig, axes = plt.subplots(
-            5,
-            1,
-            figsize=figsize or (12, 9),
-            gridspec_kw={'height_ratios': [3, 1, 0.5, 0.7, 0.5]},
-        )
-    else:
-        fig, axes = plt.subplots(
             4,
             1,
             figsize=figsize or (12, 8),
-            gridspec_kw={'height_ratios': [3, 0.5, 0.7, 0.5]},
+            gridspec_kw={'height_ratios': [3, 1, 0.7, 0.5]},
+        )
+    else:
+        fig, axes = plt.subplots(
+            3,
+            1,
+            figsize=figsize or (12, 7),
+            gridspec_kw={'height_ratios': [3, 0.7, 0.5]},
         )
     
     # Plot spectrogram
@@ -312,12 +312,10 @@ def save_supervised_prediction_plot(
         axes[1].set_xticks([])
         
         pred_ax_idx = 2
-        logit_ax_idx = 3
-        gt_ax_idx = 4
+        gt_ax_idx = 3
     else:
         pred_ax_idx = 1
-        logit_ax_idx = 2
-        gt_ax_idx = 3
+        gt_ax_idx = 2
     
     # Plot predicted classes as colored bar
     pred_img = predictions.reshape(1, -1)
@@ -327,49 +325,7 @@ def save_supervised_prediction_plot(
     axes[pred_ax_idx].set_yticks([])
     axes[pred_ax_idx].set_xticks([])
 
-    if logits is not None:
-        logits_arr = np.asarray(logits)
-        if logits_arr.ndim == 2 and logits_arr.shape[-1] == 1:
-            logits_arr = logits_arr.reshape(-1)
-
-        if logits_arr.ndim == 1:
-            magnitude = np.abs(logits_arr)
-            x = np.arange(len(magnitude))
-            axes[logit_ax_idx].plot(x, magnitude, color='tab:blue', linewidth=1.5)
-            axes[logit_ax_idx].set_xlim([0, len(magnitude)])
-            axes[logit_ax_idx].set_ylabel('Logit |mag|')
-            axes[logit_ax_idx].grid(True, alpha=0.3)
-            axes[logit_ax_idx].set_xticks([])
-        else:
-            time_len = predictions.shape[-1]
-            if logits_arr.ndim != 2:
-                logits_arr = logits_arr.reshape(logits_arr.shape[0], -1)
-
-            if logits_arr.shape[0] == time_len:
-                class_logits = logits_arr.T
-            elif logits_arr.shape[1] == time_len:
-                class_logits = logits_arr
-            else:
-                class_logits = logits_arr
-
-            class_logits = class_logits[:num_classes]
-            scores = np.mean(np.abs(class_logits), axis=1)
-            k = max(1, min(int(logits_top_k), num_classes))
-            top_ids = np.argsort(scores)[-k:][::-1]
-            x = np.arange(class_logits.shape[1])
-            for class_id in top_ids:
-                color = colors[class_id]
-                axes[logit_ax_idx].plot(
-                    x,
-                    np.abs(class_logits[class_id]),
-                    color=color,
-                    linewidth=1.2,
-                    label=f"{class_id}",
-                )
-            axes[logit_ax_idx].set_xlim([0, len(x)])
-            axes[logit_ax_idx].set_ylabel('Logit |mag|')
-            axes[logit_ax_idx].grid(True, alpha=0.3)
-            axes[logit_ax_idx].set_xticks([])
+    _ = logits, logits_top_k
     
     # Plot ground truth classes as colored bar
     gt_img = labels.reshape(1, -1)

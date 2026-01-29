@@ -35,6 +35,7 @@ bash shell/classify_detect_bench.sh \
     --num_workers "$SLURM_CPUS_PER_TASK" \
     --batch_size 32 \
     --probe_mode "finetune" \
-    --task_mode "classify"
+    --task_mode "classify" \
+    "$@"
 
 echo "Benchmark job completed. Results in: $MY_SCRATCH/benchmark_results"
