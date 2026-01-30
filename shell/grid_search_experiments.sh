@@ -6,7 +6,6 @@ cd "$(dirname "$0")/.."
 PROJECT_ROOT="$(pwd)"
 
 SPEC_ROOT="/media/george/George-SSD/specs"
-TRAIN_SECONDS="100000"
 MODE="classify"
 PROBE_MODE="lora"
 STEPS="1000"
@@ -26,6 +25,11 @@ PRE_NAME="$(basename "$PRETRAINED_RUN")"
 
 while IFS=: read -r SPECIES BIRD_ID; do
     PREP_OUT_DIR="$TEMP_ROOT/tinybird_pool/$SPECIES/$BIRD_ID"
+
+    TRAIN_SECONDS="32"
+    if [ "$SPECIES" == "Canary" ]; then
+        TRAIN_SECONDS="64"
+    fi
 
     bash shell/classify_detect_bench.sh \
         --spec_root "$SPEC_ROOT" \
