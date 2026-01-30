@@ -33,6 +33,7 @@ __all__ = [
     "plot_loss_curves",
     "save_supervised_prediction_plot",
     "plot_theoretical_resolution_limit",
+    "plot_species_f1_curves",
     "generate_umap_plots",
 ]
 
@@ -404,6 +405,151 @@ def plot_theoretical_resolution_limit(results_csv: str, output_dir: str) -> None
         ax.xaxis.set_major_locator(ticker.MaxNLocator(integer=True))
         fig.savefig(os.path.join(output_dir, f"theoretical_resolution_limit_{individual}.png"), bbox_inches='tight')
         plt.close(fig)
+
+
+def plot_species_f1_curves(
+    results_dir: str,
+    output_dir: Optional[str] = None,
+    *,
+    mode: str = "classify",
+    probe_mode: Optional[str] = None,
+    metric: str = "f1",
+    species_filter: Optional[Sequence[str]] = None,
+) -> list[str]:
+    import csv
+    import re
+    import matplotlib.ticker as ticker
+
+    if metric not in {"f1", "fer"}:
+        raise ValueError("metric must be 'f1' or 'fer'")
+
+    results_csv = results_dir
+    if os.path.isdir(results_dir):
+        results_csv = os.path.join(results_dir, "eval_f1.csv")
+    if not os.path.isfile(results_csv):
+        print(f"Results CSV not found: {results_csv}")
+        return []
+
+    data = []
+    with open(results_csv, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if mode and row.get("mode") != mode:
+                continue
+            if probe_mode and row.get("probe_mode") != probe_mode:
+                continue
+            species = (row.get("species") or "").strip()
+            bird = (row.get("bird") or "").strip()
+            train_seconds = row.get("train_seconds")
+            metric_value = row.get(metric)
+            if not species or not train_seconds or metric_value is None:
+                continue
+            try:
+                train_seconds_f = float(train_seconds)
+                metric_f = float(metric_value)
+            except (TypeError, ValueError):
+                continue
+            data.append(
+                {
+                    "species": species,
+                    "bird": bird or "unknown",
+                    "train_seconds": train_seconds_f,
+                    "metric": metric_f,
+                }
+            )
+
+    if not data:
+        print("No matching rows found in results CSV.")
+        return []
+
+    if output_dir is None:
+        if os.path.isdir(results_dir):
+            output_dir = os.path.join(results_dir, "plots")
+        else:
+            output_dir = os.path.join(os.path.dirname(results_csv), "plots")
+    os.makedirs(output_dir, exist_ok=True)
+
+    species_set = {row["species"] for row in data}
+    if species_filter:
+        species_filter_set = {s.strip() for s in species_filter if s.strip()}
+        species_set = {s for s in species_set if s in species_filter_set}
+    if not species_set:
+        print("No species matched the filter.")
+        return []
+
+    def _slugify(text: str) -> str:
+        text = text.strip().lower()
+        text = re.sub(r"[^a-z0-9]+", "_", text)
+        return text.strip("_") or "species"
+
+    saved_paths: list[str] = []
+
+    for idx, species in enumerate(sorted(species_set)):
+        rows = [row for row in data if row["species"] == species]
+        if not rows:
+            continue
+
+        metric_label = "F1 (%)" if metric == "f1" else "Frame Error Rate (%)"
+
+        birds = sorted({row["bird"] for row in rows})
+        base_color = plt.cm.tab10((idx % 10) / 10)
+
+        fig, ax = plt.subplots(figsize=(6.5, 4.5), dpi=SPEC_DPI)
+
+        bird_series: dict[str, dict[float, list[float]]] = {}
+        for row in rows:
+            bird_series.setdefault(row["bird"], {}).setdefault(row["train_seconds"], []).append(row["metric"])
+
+        x_levels = sorted({ts for by_ts in bird_series.values() for ts in by_ts.keys()})
+        x_index = {ts: i for i, ts in enumerate(x_levels)}
+
+        for bird in birds:
+            by_ts = bird_series.get(bird, {})
+            if not by_ts:
+                continue
+            xs = sorted(by_ts.keys())
+            ys = [float(np.mean(by_ts[x])) for x in xs]
+            x_positions = [x_index[x] for x in xs]
+            ax.plot(
+                x_positions,
+                ys,
+                marker="o",
+                linewidth=1.1,
+                alpha=0.35,
+                color=base_color,
+            )
+
+        avg_by_ts: dict[float, list[float]] = {}
+        for by_ts in bird_series.values():
+            for ts, vals in by_ts.items():
+                avg_by_ts.setdefault(ts, []).append(float(np.mean(vals)))
+        avg_xs = sorted(avg_by_ts.keys())
+        avg_ys = [float(np.mean(avg_by_ts[x])) for x in avg_xs]
+        avg_positions = [x_index[x] for x in avg_xs]
+        ax.plot(avg_positions, avg_ys, marker="o", linewidth=3.0, color=base_color, alpha=0.95)
+
+        title_parts = [species, metric_label]
+        if probe_mode:
+            title_parts.append(probe_mode)
+        ax.set_title(" - ".join(title_parts))
+        ax.set_xlabel("Training Data (seconds)")
+        ax.set_ylabel(metric_label)
+        ax.grid(True, alpha=0.2)
+        ax.set_xlim(-0.25, max(0.25, len(x_levels) - 0.75))
+        ax.set_xticks(list(range(len(x_levels))))
+        ax.set_xticklabels([f"{x:g}" for x in x_levels])
+        ax.xaxis.set_major_locator(ticker.FixedLocator(list(range(len(x_levels)))))
+        if metric == "f1":
+            ax.set_ylim(0.0, 100.0)
+
+        tag = "all" if not probe_mode else probe_mode
+        filename = f"eval_{metric}_{mode}_{tag}_{_slugify(species)}.png"
+        save_path = os.path.join(output_dir, filename)
+        fig.savefig(save_path, bbox_inches="tight")
+        plt.close(fig)
+        saved_paths.append(save_path)
+
+    return saved_paths
 
 
 def _build_palette(labels, colormap=cm.tab20):

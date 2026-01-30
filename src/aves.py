@@ -44,7 +44,74 @@ def _require_torchaudio():
 _WAV_INDEX_CACHE = {}
 
 
-def build_wav_index(wav_root, exts=(".wav", ".flac", ".ogg", ".mp3")):
+def _load_wav_manifest(manifest_path):
+    path = Path(manifest_path)
+    if not path.exists():
+        raise FileNotFoundError(f"wav_manifest not found: {manifest_path}")
+    text = path.read_text(encoding="utf-8").strip()
+    if not text:
+        raise FileNotFoundError(f"wav_manifest is empty: {manifest_path}")
+
+    data = None
+    try:
+        data = json.loads(text)
+    except Exception:
+        data = None
+
+    items = []
+    if data is not None:
+        if isinstance(data, dict):
+            items = list(data.items())
+        elif isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict):
+                    if "stem" in item and ("path" in item or "wav" in item):
+                        items.append((item["stem"], item.get("path") or item.get("wav")))
+                    else:
+                        raise ValueError(f"Invalid manifest entry: {item}")
+                elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                    items.append((item[0], item[1]))
+                else:
+                    raise ValueError(f"Invalid manifest entry: {item}")
+        else:
+            raise ValueError("wav_manifest must be a JSON dict or list.")
+    else:
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "\t" in line:
+                stem, wav_path = line.split("\t", 1)
+            else:
+                wav_path = line
+                stem = Path(wav_path).stem
+            items.append((stem, wav_path))
+
+    index = {}
+    dupes = {}
+    for stem, wav_path in items:
+        if not stem or not wav_path:
+            raise ValueError("wav_manifest entries must include a stem and a path.")
+        wav_path = Path(wav_path)
+        if not wav_path.exists():
+            raise FileNotFoundError(f"Wav not found in manifest for {stem}: {wav_path}")
+        if stem in index:
+            dupes.setdefault(stem, []).append(str(wav_path))
+            continue
+        index[stem] = wav_path
+    if dupes:
+        sample = ", ".join(sorted(dupes)[:5])
+        raise ValueError(
+            f"Duplicate stems in wav_manifest: {sample} (total={len(dupes)})"
+        )
+    if not index:
+        raise FileNotFoundError(f"No wav entries found in manifest: {manifest_path}")
+    return index
+
+
+def build_wav_index(wav_root, exts=(".wav", ".flac", ".ogg", ".mp3"), manifest_path=None):
+    if manifest_path:
+        return _load_wav_manifest(manifest_path)
     root = Path(wav_root)
     if not root.exists():
         raise FileNotFoundError(f"wav_root not found: {wav_root}")
@@ -70,22 +137,6 @@ def build_wav_index(wav_root, exts=(".wav", ".flac", ".ogg", ".mp3")):
         raise FileNotFoundError(f"No audio files found under: {wav_root}")
     _WAV_INDEX_CACHE[cache_key] = index
     return index
-
-
-def _load_ms_per_timebin_from_audio_params(spec_dir: Path) -> float | None:
-    audio_path = Path(spec_dir) / "audio_params.json"
-    if not audio_path.exists():
-        return None
-    try:
-        with audio_path.open("r", encoding="utf-8") as f:
-            audio = json.load(f)
-        sr = float(audio.get("sr", 0.0))
-        hop = float(audio.get("hop_size", 0.0))
-        if sr > 0 and hop > 0:
-            return hop / sr * 1000.0
-    except Exception:
-        return None
-    return None
 
 
 def _build_label_index(annotation_file, mode):
@@ -131,6 +182,7 @@ class AvesSupervisedDataset(Dataset):
         mode="detect",
         audio_sr=16000,
         wav_exts=(".wav", ".flac", ".ogg", ".mp3"),
+        wav_manifest=None,
         clip_seconds=None,
         is_train=False,
         max_files=None,
@@ -143,7 +195,9 @@ class AvesSupervisedDataset(Dataset):
         if len(self.file_dirs) == 0:
             raise SystemExit(f"No .npy files found in: {spec_dir}")
 
-        self.wav_index = build_wav_index(wav_root, exts=wav_exts)
+        self.wav_index = build_wav_index(
+            wav_root, exts=wav_exts, manifest_path=wav_manifest
+        )
         self.label_index = _build_label_index(annotation_file, mode)
         self.mode = mode
         self.audio_sr = int(audio_sr)
@@ -505,28 +559,7 @@ class AvesTrainer:
             trainable, lr=config["lr"], weight_decay=config["weight_decay"]
         )
 
-        warmup_steps = int(config.get("warmup_steps") or 0)
-        min_lr = float(config.get("min_lr") or 0.0)
-        if warmup_steps > 0 or min_lr > 0.0:
-            total_steps = int(config["steps"])
-            base_lr = float(config["lr"])
-            decay_steps = max(1, total_steps - warmup_steps)
-
-            def lr_lambda(step_idx):
-                step_num = step_idx + 1
-                if warmup_steps > 0 and step_num <= warmup_steps:
-                    return step_num / float(warmup_steps)
-                decay_step = step_num - warmup_steps
-                decay_step = min(max(decay_step, 0), decay_steps)
-                cosine = 0.5 * (1.0 + math.cos(math.pi * decay_step / float(decay_steps)))
-                target_lr = min_lr + (base_lr - min_lr) * cosine
-                return target_lr / base_lr if base_lr > 0 else 1.0
-
-            self.scheduler = torch.optim.lr_scheduler.LambdaLR(
-                self.optimizer, lr_lambda=lr_lambda
-            )
-        else:
-            self.scheduler = None
+        self.scheduler = None
 
         self.use_amp = bool(config.get("amp", False))
         self.scaler = torch.cuda.amp.GradScaler() if self.use_amp else None
@@ -618,16 +651,6 @@ class AvesTrainer:
         eval_every = int(self.config["eval_every"])
         grad_clip = float(self.config.get("grad_clip") or 0.0)
         save_intermediate = bool(self.config.get("save_intermediate_checkpoints", True))
-        es_patience = int(self.config.get("early_stop_patience", 4))
-        es_alpha = float(self.config.get("early_stop_ema_alpha", 0.75))
-        es_min_delta = float(self.config.get("early_stop_min_delta", 0.0))
-        if not (0 <= es_alpha < 1):
-            raise ValueError(f"early_stop_ema_alpha must be in [0, 1). Got {es_alpha}")
-        if es_patience < 0:
-            raise ValueError(f"early_stop_patience must be >= 0. Got {es_patience}")
-        es_ema_val_loss = None
-        es_best_ema_val_loss = None
-        es_bad_evals = 0
 
         train_iter = iter(train_loader)
         samples_processed = 0
@@ -676,21 +699,6 @@ class AvesTrainer:
                 train_f1 = float(np.mean(train_f1s)) if train_f1s else 0.0
 
                 val_loss, val_acc, val_f1 = self.evaluate(val_loader)
-                if es_patience > 0:
-                    if es_ema_val_loss is None:
-                        es_ema_val_loss = float(val_loss)
-                        es_best_ema_val_loss = float(val_loss)
-                        es_bad_evals = 0
-                    else:
-                        es_ema_val_loss = (es_alpha * es_ema_val_loss) + ((1.0 - es_alpha) * float(val_loss))
-                    if es_best_ema_val_loss is None:
-                        es_best_ema_val_loss = float(es_ema_val_loss)
-                    if float(es_ema_val_loss) < (float(es_best_ema_val_loss) - es_min_delta):
-                        es_best_ema_val_loss = float(es_ema_val_loss)
-                        es_bad_evals = 0
-                    else:
-                        es_bad_evals += 1
-
                 current_time = time.time()
                 elapsed_time = current_time - last_eval_time
                 steps_since_last_eval = step - last_eval_step
@@ -711,7 +719,7 @@ class AvesTrainer:
                         )
 
                 print(
-                    f"Step {step:>6} | train_loss {train_loss:.4f} | val_loss {val_loss:.4f} | val_acc {val_acc:.2f} | val_f1 {val_f1:.2f}"
+                    f"Step {step:>6} | train_loss {train_loss:.4f} | val_loss {val_loss:.4f} | val_acc {val_acc:.2f}"
                 )
 
                 if save_intermediate:
@@ -721,14 +729,6 @@ class AvesTrainer:
                 train_losses = []
                 train_accs = []
                 train_f1s = []
-                if es_patience > 0 and es_bad_evals >= es_patience:
-                    print(
-                        "Early stopping: EMA-smoothed validation loss did not improve for "
-                        f"{es_patience} consecutive validation checks "
-                        f"(ema_val_loss={es_ema_val_loss:.6f}, best_ema_val_loss={es_best_ema_val_loss:.6f}). "
-                        "Halting training."
-                    )
-                    break
 
         final_path = os.path.join(self.weights_path, "model_final.pth")
         torch.save(self.model.state_dict(), final_path)
@@ -748,42 +748,60 @@ class AvesTrainer:
             state_dict = torch.load(final_path, map_location="cpu")
             self.model.load_state_dict(state_dict)
 
-        ms_per_timebin_default = float(self.config.get("ms_per_timebin") or 20.0)
-        audio_params_ms = _load_ms_per_timebin_from_audio_params(val_dataset.spec_dir)
-        if audio_params_ms is not None and audio_params_ms > 0:
-            ms_per_timebin_default = float(audio_params_ms)
-            print(
-                f"Using ms_per_timebin from audio_params.json: {ms_per_timebin_default:.4f} ms"
-            )
-
         window_timebins = int(self.config.get("num_timebins") or 0)
-        spec_lengths = {}
+        token_lengths = {}
+        sample_lengths = {}
         chunk_bounds = {}
         lengths = []
+        min_samples = int(self.model.min_input_samples())
+
+        self.model.set_eval_mode()
+
         for path in val_dataset.file_dirs:
             filename = path.stem
             base_filename, chunk_start_ms, chunk_end_ms = parse_chunk_ms(filename)
             chunk_bounds[filename] = (base_filename, chunk_start_ms, chunk_end_ms)
-            total_t = 0
-            try:
-                arr = np.load(path, mmap_mode="r")
-                total_t = int(arr.shape[1])
-            except Exception:
-                total_t = 0
-            if (
-                total_t > 0
-                and chunk_start_ms is not None
-                and chunk_end_ms is not None
-                and ms_per_timebin_default > 0
-            ):
-                expected = int(
-                    round((float(chunk_end_ms) - float(chunk_start_ms)) / float(ms_per_timebin_default))
+
+            wav_path = val_dataset.wav_index.get(base_filename)
+            if wav_path is None:
+                raise FileNotFoundError(f"Wav not found for stem: {base_filename}")
+
+            wav, wav_sr = torchaudio.load(str(wav_path))
+            if wav.ndim == 2:
+                wav = wav[0]
+            if wav_sr != val_dataset.audio_sr:
+                wav = torchaudio.functional.resample(wav, wav_sr, val_dataset.audio_sr)
+                wav_sr = val_dataset.audio_sr
+
+            if chunk_start_ms is not None:
+                start_sample = int(
+                    round(float(chunk_start_ms) / 1000.0 * val_dataset.audio_sr)
                 )
-                if expected > 0:
-                    total_t = min(total_t, expected)
-            spec_lengths[filename] = total_t
-            if total_t > 0:
-                lengths.append(total_t)
+                if chunk_end_ms is None:
+                    end_sample = wav.shape[0]
+                else:
+                    end_sample = int(
+                        round(float(chunk_end_ms) / 1000.0 * val_dataset.audio_sr)
+                    )
+                end_sample = max(start_sample, min(end_sample, wav.shape[0]))
+                wav = wav[start_sample:end_sample]
+
+            orig_len = int(wav.shape[0])
+            sample_lengths[filename] = orig_len
+            if orig_len <= 0:
+                token_len = 0
+            else:
+                if wav.shape[0] < min_samples:
+                    wav = F.pad(wav, (0, min_samples - wav.shape[0]))
+                audio = wav.unsqueeze(0).to(self.device)
+                lengths_tensor = torch.tensor([orig_len], device=self.device, dtype=torch.long)
+                with torch.no_grad():
+                    logits, _ = self.model(audio, lengths_tensor)
+                token_len = int(logits.shape[1]) if logits.dim() >= 2 else 0
+            token_lengths[filename] = token_len
+            if token_len > 0:
+                lengths.append(token_len)
+
         if window_timebins <= 0:
             if not lengths:
                 raise RuntimeError("Unable to infer num_timebins for export; no files found.")
@@ -791,13 +809,13 @@ class AvesTrainer:
             if window_timebins <= 0:
                 window_timebins = int(max(lengths))
             print(
-                f"Warning: num_timebins not set; using inferred window_timebins={window_timebins}"
+                f"Warning: num_timebins not set; using inferred window_timebins={window_timebins} (AVES tokens)"
             )
 
         window_index = []
         for path in val_dataset.file_dirs:
             filename = path.stem
-            total_t = int(spec_lengths.get(filename, 0) or 0)
+            total_t = int(token_lengths.get(filename, 0) or 0)
             start = 0
             while start < total_t:
                 length = min(window_timebins, total_t - start)
@@ -836,67 +854,92 @@ class AvesTrainer:
         )
         filenames = []
 
-        self.model.set_eval_mode()
-        current_base = None
-        current_wav = None
-        current_wav_duration_ms = 0.0
+        current_filename = None
+        current_logits = None
+        current_labels = []
+        current_ms_per_timebin = 20.0
         ms_per_timebin_by_file = {}
 
-        min_samples = self.model.min_input_samples()
-
         for idx, (path, filename, start, length, _total_t) in enumerate(window_index):
-            base_filename, chunk_start_ms, chunk_end_ms = chunk_bounds.get(filename, (None, None, None))
-            if base_filename is None:
-                base_filename, chunk_start_ms, chunk_end_ms = parse_chunk_ms(filename)
+            if filename != current_filename:
+                base_filename, chunk_start_ms, chunk_end_ms = chunk_bounds.get(
+                    filename, (None, None, None)
+                )
+                if base_filename is None:
+                    base_filename, chunk_start_ms, chunk_end_ms = parse_chunk_ms(filename)
 
-            if base_filename != current_base:
                 wav_path = val_dataset.wav_index.get(base_filename)
                 if wav_path is None:
                     raise FileNotFoundError(f"Wav not found for stem: {base_filename}")
+
                 wav, wav_sr = torchaudio.load(str(wav_path))
                 if wav.ndim == 2:
                     wav = wav[0]
                 if wav_sr != val_dataset.audio_sr:
                     wav = torchaudio.functional.resample(wav, wav_sr, val_dataset.audio_sr)
                     wav_sr = val_dataset.audio_sr
-                current_base = base_filename
-                current_wav = wav
-                current_wav_duration_ms = float(wav.shape[0]) / float(val_dataset.audio_sr) * 1000.0
-            wav = current_wav
 
-            total_t = int(spec_lengths.get(filename, 0) or 0)
-            duration_ms = current_wav_duration_ms
-            if chunk_start_ms is not None:
-                duration_ms = max(0.0, duration_ms - float(chunk_start_ms))
-                if chunk_end_ms is not None:
-                    duration_ms = max(0.0, float(chunk_end_ms) - float(chunk_start_ms))
-            ms_per_timebin = ms_per_timebin_default
-            if chunk_start_ms is None or chunk_end_ms is None:
-                if ms_per_timebin <= 0 and total_t > 0 and duration_ms > 0:
-                    ms_per_timebin = float(duration_ms) / float(total_t)
-            if ms_per_timebin <= 0:
-                ms_per_timebin = 20.0
-            ms_per_timebin_by_file[filename] = ms_per_timebin
+                if chunk_start_ms is not None:
+                    start_sample = int(
+                        round(float(chunk_start_ms) / 1000.0 * val_dataset.audio_sr)
+                    )
+                    if chunk_end_ms is None:
+                        end_sample = wav.shape[0]
+                    else:
+                        end_sample = int(
+                            round(float(chunk_end_ms) / 1000.0 * val_dataset.audio_sr)
+                        )
+                    end_sample = max(start_sample, min(end_sample, wav.shape[0]))
+                    wav = wav[start_sample:end_sample]
 
-            labels_src = val_dataset.label_index.get(base_filename, [])
-            if chunk_start_ms is not None:
-                labels_src = clip_labels_to_chunk(labels_src, chunk_start_ms, chunk_end_ms)
+                orig_len = int(sample_lengths.get(filename, 0) or wav.shape[0])
+                if orig_len > 0:
+                    if wav.shape[0] < min_samples:
+                        wav = F.pad(wav, (0, min_samples - wav.shape[0]))
+
+                    audio = wav.unsqueeze(0).to(self.device)
+                    lengths = torch.tensor([orig_len], device=self.device, dtype=torch.long)
+                    with torch.no_grad():
+                        logits, _ = self.model(audio, lengths)
+
+                    if logits.dim() == 2:
+                        logits = logits.unsqueeze(-1)
+                    logits = logits.squeeze(0).detach().cpu()
+
+                    token_len = int(token_lengths.get(filename, 0) or logits.shape[0])
+                    if token_len > 0 and logits.shape[0] > token_len:
+                        logits = logits[:token_len]
+                    current_logits = logits
+                else:
+                    token_len = 0
+                    current_logits = torch.zeros((0, c_out), dtype=torch.float32)
+
+                duration_ms = float(orig_len) / float(val_dataset.audio_sr) * 1000.0
+                if token_len > 0 and duration_ms > 0:
+                    current_ms_per_timebin = float(duration_ms) / float(token_len)
+                else:
+                    current_ms_per_timebin = 20.0
+                ms_per_timebin_by_file[filename] = current_ms_per_timebin
+
+                labels_src = val_dataset.label_index.get(base_filename, [])
+                if chunk_start_ms is not None:
+                    labels_src = clip_labels_to_chunk(labels_src, chunk_start_ms, chunk_end_ms)
+                current_labels = labels_src
+                current_filename = filename
+
             labels_win = np.zeros((window_timebins,), dtype=np.int64)
-            if length > 0 and labels_src:
-                win_start_ms = float(start) * ms_per_timebin
-                win_end_ms = float(start + length) * ms_per_timebin
-                for label in labels_src:
+            if length > 0 and current_labels:
+                win_start_ms = float(start) * current_ms_per_timebin
+                win_end_ms = float(start + length) * current_ms_per_timebin
+                for label in current_labels:
                     onset = float(label.get("onset_ms", 0.0))
                     offset = float(label.get("offset_ms", 0.0))
-                    if chunk_start_ms is not None:
-                        onset -= float(chunk_start_ms)
-                        offset -= float(chunk_start_ms)
                     if offset <= win_start_ms or onset >= win_end_ms:
                         continue
                     onset_rel = max(onset, win_start_ms) - win_start_ms
                     offset_rel = min(offset, win_end_ms) - win_start_ms
-                    start_i = int(math.floor(onset_rel / ms_per_timebin))
-                    end_i = int(math.ceil(offset_rel / ms_per_timebin))
+                    start_i = int(math.floor(onset_rel / current_ms_per_timebin))
+                    end_i = int(math.ceil(offset_rel / current_ms_per_timebin))
                     start_i = max(0, min(start_i, length))
                     end_i = max(start_i + 1, min(end_i, length))
                     if val_dataset.mode in ("detect", "unit_detect"):
@@ -906,43 +949,16 @@ class AvesTrainer:
                         labels_win[start_i:end_i] = cls
             labels_patches_mm[idx, :] = labels_win
 
-            start_ms = float(start) * ms_per_timebin
-            end_ms = float(start + length) * ms_per_timebin
-            if chunk_start_ms is not None:
-                start_ms += float(chunk_start_ms)
-                end_ms += float(chunk_start_ms)
+            logits_win = np.zeros((window_timebins, c_out), dtype=np.float32)
+            if length > 0 and current_logits is not None:
+                logits_slice = current_logits[start : start + length]
+                logits_np = logits_slice.numpy() if isinstance(logits_slice, torch.Tensor) else np.asarray(logits_slice)
+                if logits_np.ndim == 1:
+                    logits_np = logits_np[:, None]
+                slice_len = min(logits_np.shape[0], window_timebins)
+                logits_win[:slice_len, : logits_np.shape[1]] = logits_np[:slice_len]
 
-            start_sample = int(round(start_ms / 1000.0 * val_dataset.audio_sr))
-            end_sample = int(round(end_ms / 1000.0 * val_dataset.audio_sr))
-            start_sample = max(0, start_sample)
-            end_sample = max(start_sample, end_sample)
-            wav_seg = wav[start_sample:end_sample]
-
-            target_samples = int(round((end_ms - start_ms) / 1000.0 * val_dataset.audio_sr))
-            if target_samples <= 0:
-                target_samples = min_samples
-            else:
-                target_samples = max(target_samples, min_samples)
-            if wav_seg.shape[0] < target_samples:
-                wav_seg = F.pad(wav_seg, (0, target_samples - wav_seg.shape[0]))
-            elif wav_seg.shape[0] > target_samples:
-                wav_seg = wav_seg[:target_samples]
-
-            audio = wav_seg.unsqueeze(0).to(self.device)
-            lengths = torch.tensor([audio.shape[1]], device=self.device, dtype=torch.long)
-            with torch.no_grad():
-                logits, _ = self.model(audio, lengths)
-
-            if logits.dim() == 2:
-                logits = logits.unsqueeze(-1)
-            # logits: (1, T, C) -> (1, C, T) -> interpolate -> (T_out, C)
-            logits_t = logits.transpose(1, 2)
-            logits_res = F.interpolate(
-                logits_t, size=window_timebins, mode="linear", align_corners=False
-            )
-            logits_res = logits_res.transpose(1, 2).squeeze(0).detach().cpu().numpy()
-
-            logits_mm[idx, :, :] = logits_res.astype(np.float32)
+            logits_mm[idx, :, :] = logits_win
             window_starts_mm[idx] = int(start)
             window_lengths_mm[idx] = int(length)
             filenames.append(filename)
@@ -951,6 +967,12 @@ class AvesTrainer:
             json.dump(filenames, f, indent=2)
         with open(out_dir / "ms_per_timebin_by_file.json", "w") as f:
             json.dump(ms_per_timebin_by_file, f, indent=2)
+
+        ms_per_timebin_default = 20.0
+        if ms_per_timebin_by_file:
+            ms_per_timebin_default = float(
+                np.median(list(ms_per_timebin_by_file.values()))
+            )
 
         meta = {
             "run_name": self.config.get("run_name"),
@@ -976,6 +998,12 @@ def main():
     parser.add_argument("--annotation_file", type=str, required=True)
     parser.add_argument("--mode", type=str, required=True, choices=["detect", "unit_detect", "classify"])
     parser.add_argument("--wav_root", type=str, required=True)
+    parser.add_argument(
+        "--wav_manifest",
+        type=str,
+        default=None,
+        help="Optional manifest mapping stems to wav paths (JSON dict/list or TSV).",
+    )
     parser.add_argument("--wav_exts", type=str, default=".wav,.flac,.ogg,.mp3")
     parser.add_argument("--aves_model_path", type=str, required=True)
     parser.add_argument("--aves_config_path", type=str, required=True)
@@ -987,11 +1015,7 @@ def main():
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--weight_decay", type=float, default=0.1)
     parser.add_argument("--eval_every", type=int, default=25)
-    parser.add_argument("--warmup_steps", type=int, default=None)
-    parser.add_argument("--min_lr", type=float, default=None)
-    parser.add_argument("--early_stop_patience", type=int, default=4, help="stop if EMA-smoothed val_loss does not improve for N consecutive eval checks (0 disables)")
-    parser.add_argument("--early_stop_ema_alpha", type=float, default=0.75, help="EMA alpha for smoothing val_loss (higher = smoother)")
-    parser.add_argument("--early_stop_min_delta", type=float, default=0.0, help="minimum decrease in EMA val_loss required to count as improvement")
+    # warmup/min_lr/early_stop removed: keep training schedule fixed.
 
     parser.add_argument("--audio_sr", type=int, default=16000)
     parser.add_argument("--num_timebins", type=int, default=0, help="window size in spectrogram timebins for val export (0 = infer)")
@@ -1053,6 +1077,7 @@ def main():
         mode=args.mode,
         audio_sr=args.audio_sr,
         wav_exts=wav_exts,
+        wav_manifest=args.wav_manifest,
         clip_seconds=args.clip_seconds,
         is_train=True,
         max_files=args.max_train_files,
@@ -1064,6 +1089,7 @@ def main():
         mode=args.mode,
         audio_sr=args.audio_sr,
         wav_exts=wav_exts,
+        wav_manifest=args.wav_manifest,
         clip_seconds=args.clip_seconds,
         is_train=False,
         max_files=args.max_val_files,
@@ -1103,10 +1129,6 @@ def main():
     )
 
     config = vars(args)
-    if config.get("warmup_steps") is None:
-        config.pop("warmup_steps", None)
-    if config.get("min_lr") is None:
-        config.pop("min_lr", None)
     config["num_classes"] = int(train_ds.num_classes)
 
     trainer = AvesTrainer(model, config)
