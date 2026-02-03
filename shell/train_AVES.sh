@@ -256,17 +256,13 @@ POOL_DIR="$OUT_DIR/pool"
 TEST_SAMPLE_DIR="$OUT_DIR/test"
 
 if [ "$USE_PREPARED" -eq 0 ]; then
+    rm -rf "$OUT_DIR"
+
     python "$PROJECT_ROOT/src/bench_utils/copy_bird_pool.py" \
         --annotation_file "$ANNOTATION_FILE" \
         --spec_dir "$SPEC_DIR" \
         --out_dir "$POOL_DIR" \
         --bird_id "$BIRD_ID"
-
-    POOL_SECONDS=$(python "$PROJECT_ROOT/src/bench_utils/pool_seconds.py" --spec_dir "$POOL_DIR")
-    TEST_SECONDS=$(python - <<PY
-print(float("$POOL_SECONDS") * 0.2)
-PY
-)
 
     if [ -z "$TRAIN_SECONDS" ]; then
         echo "Missing --train_seconds" 1>&2
@@ -276,23 +272,14 @@ PY
     TRAIN_DIR="$OUT_DIR/$MODE/$BIRD_ID/train_${TRAIN_SECONDS_TAG}s"
     TEST_SAMPLE_DIR="$OUT_DIR/$MODE/$BIRD_ID/test"
 
-    python "$PROJECT_ROOT/src/bench_utils/sample_by_seconds.py" \
-        --spec_dir "$POOL_DIR" \
-        --out_dir "$TEST_SAMPLE_DIR" \
-        --seconds "$TEST_SECONDS" \
-        --seed "$SEED" \
+    python "$PROJECT_ROOT/src/bench_utils/solver_split_by_seconds.py" \
+        --pool_dir "$POOL_DIR" \
         --annotation_json "$POOL_DIR/annotations_filtered.json" \
-        --mode "$MODE" \
-        --move
-
-    python "$PROJECT_ROOT/src/bench_utils/sample_by_seconds.py" \
-        --spec_dir "$POOL_DIR" \
-        --out_dir "$TRAIN_DIR" \
-        --seconds "$TRAIN_SECONDS" \
-        --seed "$SEED" \
-        --annotation_json "$POOL_DIR/annotations_filtered.json" \
-        --mode "$MODE" \
-        --move
+        --test_dir "$TEST_SAMPLE_DIR" \
+        --train_dir "$TRAIN_DIR" \
+        --train_seconds "$TRAIN_SECONDS" \
+        --test_ratio "0.2" \
+        --seed "$SEED"
 else
     if [ -z "$TRAIN_SECONDS" ]; then
         echo "Missing --train_seconds" 1>&2

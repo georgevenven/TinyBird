@@ -7,7 +7,7 @@ PROJECT_ROOT="$(pwd)"
 
 SPEC_ROOT="/media/george-vengrovski/disk2/specs"
 WAV_ROOT="/media/george-vengrovski/disk2/raw_data/wav_files_canary_zf_bf_songmae"
-TRAIN_SECONDS="1000000000"
+TRAIN_SECONDS="MAX"
 MODE="classify"
 PROBE_MODE="linear"
 LR="1e-2"

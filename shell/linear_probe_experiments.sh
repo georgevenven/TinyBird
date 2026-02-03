@@ -3,7 +3,7 @@
 set -euo pipefail
 
 SPEC_ROOT="/media/george/George-SSD/specs"
-TRAIN_SECONDS="100000"
+TRAIN_SECONDS="MAX"
 MODE="classify"
 PROBE_MODE="linear"
 LR="1e-2"
