@@ -28,21 +28,32 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SRC_ROOT = PROJECT_ROOT / "src"
 sys.path.insert(0, str(SRC_ROOT))
 
-from utils import parse_chunk_ms, clip_labels_to_chunk
+from utils import parse_chunk_ms, clip_labels_to_chunk, get_class_id_map_from_annotations
 
 
 def _round_ms(x: float) -> int:
     return int(round(float(x)))
 
 
-def _load_annotations(path: str, mode: str) -> Dict[str, List[Tuple[int, int, int]]]:
+def _load_annotations(
+    path: str,
+    mode: str,
+    contiguous_classify_ids: bool = False,
+) -> Dict[str, List[Tuple[int, int, int]]]:
     """
     Return mapping: filename -> list of (onset_ms, offset_ms, class_id).
     For detect: class_id is 1 for any event.
-    For unit_detect/classify: class_id is unit["id"] + 1 (silence=0).
+    For unit_detect: class_id is 1 for any unit event.
+    For classify: class_id is contiguous remapped id + 1 (silence=0).
     """
     with open(path, "r") as f:
         data = json.load(f)
+
+    class_id_map = (
+        get_class_id_map_from_annotations(path, mode)
+        if (mode == "classify" and contiguous_classify_ids)
+        else {}
+    )
 
     out: Dict[str, List[Tuple[int, int, int]]] = {}
     for rec in data.get("recordings", []):
@@ -63,7 +74,18 @@ def _load_annotations(path: str, mode: str) -> Dict[str, List[Tuple[int, int, in
                     offset = unit.get("offset_ms")
                     if onset is None or offset is None:
                         continue
-                    class_id = int(unit.get("id", 0)) + 1
+                    if mode == "classify" and contiguous_classify_ids:
+                        unit_id = unit.get("id")
+                        if unit_id is None:
+                            continue
+                        mapped = class_id_map.get(int(unit_id))
+                        if mapped is None:
+                            continue
+                        class_id = int(mapped) + 1
+                    elif mode == "classify":
+                        class_id = int(unit.get("id", 0)) + 1
+                    else:
+                        class_id = 1
                     items.append((_round_ms(onset), _round_ms(offset), class_id))
 
         items.sort(key=lambda x: x[0])
@@ -182,7 +204,12 @@ def _frozen_layers(run_config: Dict[str, object], pretrained_config: Dict[str, o
     return ",".join(str(i) for i in range(idx + 1))
 
 
-def _build_label_index(annotations: Dict[str, object], mode: str) -> Dict[str, list]:
+def _build_label_index(
+    annotations: Dict[str, object],
+    mode: str,
+    class_id_map: Optional[Dict[int, int]] = None,
+    contiguous_classify_ids: bool = False,
+) -> Dict[str, list]:
     if mode not in ["detect", "classify", "unit_detect"]:
         raise ValueError("mode must be 'detect', 'classify', or 'unit_detect'")
 
@@ -195,6 +222,23 @@ def _build_label_index(annotations: Dict[str, object], mode: str) -> Dict[str, l
                 {"onset_ms": event["onset_ms"], "offset_ms": event["offset_ms"]}
                 for event in events
             ]
+        elif mode == "classify":
+            labels = []
+            for event in events:
+                for unit in event.get("units", []):
+                    unit_id = unit.get("id")
+                    if unit_id is None:
+                        continue
+                    unit_id = int(unit_id)
+                    if contiguous_classify_ids:
+                        mapped_id = class_id_map.get(unit_id) if class_id_map is not None else None
+                    else:
+                        mapped_id = unit_id
+                    if mapped_id is None:
+                        continue
+                    remapped = dict(unit)
+                    remapped["id"] = int(mapped_id)
+                    labels.append(remapped)
         else:
             labels = [unit for event in events for unit in event.get("units", [])]
         label_index[rec_filename] = labels
@@ -347,6 +391,7 @@ def _eval_val_outputs_ms(
     ms_per_timebin: Optional[float],
     ms_per_timebin_by_file: Optional[Dict[str, float]],
     threshold: float,
+    contiguous_classify_ids: bool = False,
 ) -> Dict[str, float]:
     logits = np.load(val_dir / "logits.npy", mmap_mode="r")
     window_starts = np.load(val_dir / "window_starts.npy", mmap_mode="r")
@@ -361,7 +406,11 @@ def _eval_val_outputs_ms(
     patch_width = int(meta["patch_width"])
     mode = mode or meta.get("mode", "unknown")
 
-    annotations = _load_annotations(str(annotation_json), mode)
+    annotations = _load_annotations(
+        str(annotation_json),
+        mode,
+        contiguous_classify_ids=contiguous_classify_ids,
+    )
 
     default_ms_per_timebin: Optional[float] = float(ms_per_timebin) if ms_per_timebin is not None else None
     if default_ms_per_timebin is None and audio_params is not None:
@@ -634,6 +683,9 @@ def main() -> None:
             continue
         run_config = _load_run_config(run_dir)
         pretrained_config = _load_pretrained_config(run_config)
+        contiguous_classify_ids = (
+            str(run_config.get("class_id_remap", "")).lower() == "contiguous"
+        )
         annotation_path = run_config.get("annotation_file")
         if not annotation_path:
             raise SystemExit(f"Missing annotation_file in config for run: {run_dir}")
@@ -685,6 +737,7 @@ def main() -> None:
             ms_per_timebin_default,
             ms_map,
             args.threshold,
+            contiguous_classify_ids=contiguous_classify_ids,
         )
         species = _species_from_run(run_dir)
         frozen_layers = _frozen_layers(run_config, pretrained_config)
@@ -714,7 +767,17 @@ def main() -> None:
                 val_path = (PROJECT_ROOT / val_path).resolve()
             try:
                 annotations = json.loads(annot_path.read_text(encoding="utf-8"))
-                label_index = _build_label_index(annotations, str(mode))
+                class_id_map = (
+                    get_class_id_map_from_annotations(str(annot_path), str(mode))
+                    if contiguous_classify_ids
+                    else {}
+                )
+                label_index = _build_label_index(
+                    annotations,
+                    str(mode),
+                    class_id_map=class_id_map,
+                    contiguous_classify_ids=contiguous_classify_ids,
+                )
                 train_classes = _unique_classes_in_dir(train_path, label_index, str(mode))
                 val_classes = _unique_classes_in_dir(val_path, label_index, str(mode))
                 num_classes_train = len(train_classes)

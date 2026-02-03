@@ -801,6 +801,7 @@ if __name__ == "__main__":
     
     # Create supervised config
     config = vars(args)
+    config["class_id_remap"] = "contiguous" if args.mode == "classify" else "none"
     
     # Add necessary info from pretrained config
     config["num_timebins"] = pretrained_config["num_timebins"]

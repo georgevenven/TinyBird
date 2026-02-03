@@ -270,6 +270,35 @@ def load_audio_labels(path, filename, mode):
     raise ValueError(f"No matching recording found for: {base_filename}")
 
 
+def get_class_id_map_from_annotations(path, mode):
+    """
+    Build a contiguous class-id mapping for classify mode.
+
+    Returns:
+        dict[int, int]: raw_unit_id -> contiguous_unit_id (0..N-1)
+    """
+    if mode not in ["detect", "classify", "unit_detect"]:
+        raise ValueError("mode must be 'detect', 'classify', or 'unit_detect'")
+
+    if mode != "classify":
+        return {}
+
+    with open(path, "r") as f:
+        annotations = json.load(f)
+
+    all_ids = set()
+    for rec in annotations["recordings"]:
+        for event in rec["detected_events"]:
+            for unit in event["units"]:
+                all_ids.add(int(unit["id"]))
+
+    if not all_ids:
+        raise ValueError(f"No syllable labels found in annotation file: {path}")
+
+    sorted_ids = sorted(all_ids)
+    return {raw_id: idx for idx, raw_id in enumerate(sorted_ids)}
+
+
 ## Make this function simpler, no need for this complexity 
 def get_num_classes_from_annotations(path, mode):
     """
@@ -283,32 +312,19 @@ def get_num_classes_from_annotations(path, mode):
         int: Number of classes including silence class 0
              - For detect: 2 (silence=0, vocalization=1)
              - For unit_detect: 2 (silence=0, unit_present=1)
-             - For classify: max_syllable_id + 2 (silence=0, syllables=1,2,3,...)
+             - For classify: num_unique_syllable_ids + 1 (silence=0, syllables=1,2,3,...)
     """
     if mode not in ["detect", "classify", "unit_detect"]:
         raise ValueError("mode must be 'detect', 'classify', or 'unit_detect'")
     
     if mode in ["detect", "unit_detect"]:
         return 2  # silence and vocalization
-    
-    # For classify mode, find all unique syllable IDs
-    with open(path, "r") as f:
-        annotations = json.load(f)
-    
-    all_ids = set()
-    for rec in annotations["recordings"]:
-        for event in rec["detected_events"]:
-            for unit in event["units"]:
-                all_ids.add(unit["id"])
-    
-    if not all_ids:
-        raise ValueError(f"No syllable labels found in annotation file: {path}")
-    
-    max_id = max(all_ids)
-    # +2 because: +1 for shifting syllable IDs up by 1, +1 for silence class at 0
-    num_classes = max_id + 2
-    
-    print(f"Found {len(all_ids)} unique syllable IDs (range: {min(all_ids)} to {max_id})")
+
+    class_id_map = get_class_id_map_from_annotations(path, mode)
+    num_classes = len(class_id_map) + 1  # +1 for silence class at 0
+
+    raw_ids = sorted(class_id_map.keys())
+    print(f"Found {len(raw_ids)} unique syllable IDs (range: {raw_ids[0]} to {raw_ids[-1]})")
     print(f"Total classes including silence: {num_classes}")
     
     return num_classes

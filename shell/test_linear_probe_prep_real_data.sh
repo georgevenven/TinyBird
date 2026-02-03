@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 PROJECT_ROOT="$(pwd)"
 
-SPEC_ROOT="/media/george-vengrovski/disk2/specs"
+SPEC_ROOT="/media/george/George-SSD/specs"
 TRAIN_SECONDS="16"
 MODE="classify"
 SEED="42"

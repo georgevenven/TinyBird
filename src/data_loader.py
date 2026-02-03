@@ -8,7 +8,13 @@ from pathlib import Path
 import torch
 import random
 import numpy as np
-from utils import load_audio_params, parse_chunk_ms, clip_labels_to_chunk
+from utils import (
+    load_audio_params,
+    parse_chunk_ms,
+    clip_labels_to_chunk,
+    get_class_id_map_from_annotations,
+    get_num_classes_from_annotations,
+)
 
 class SpectogramDataset(Dataset):
     def __init__(self, dir, n_timebins=1024):
@@ -116,10 +122,14 @@ class SupervisedSpectogramDataset(Dataset):
 
         with open(annotation_file_path, "r", encoding="utf-8") as f:
             annotations = json.load(f)
-        self._label_index = self._build_label_index(annotations, mode)
+        self.class_id_map = get_class_id_map_from_annotations(annotation_file_path, mode)
+        self._label_index = self._build_label_index(
+            annotations,
+            mode,
+            class_id_map=self.class_id_map,
+        )
         
         # Automatically determine number of classes from annotations
-        from utils import get_num_classes_from_annotations
         self.num_classes = get_num_classes_from_annotations(annotation_file_path, mode)
 
         if len(self.file_dirs) == 0:
@@ -139,7 +149,7 @@ class SupervisedSpectogramDataset(Dataset):
         return int((ms_value / 1000) * self.sr / self.hop_size)
 
     @staticmethod
-    def _build_label_index(annotations, mode):
+    def _build_label_index(annotations, mode, class_id_map=None):
         if mode not in ["detect", "classify", "unit_detect"]:
             raise ValueError("mode must be 'detect', 'classify', or 'unit_detect'")
 
@@ -152,6 +162,20 @@ class SupervisedSpectogramDataset(Dataset):
                     {"onset_ms": event["onset_ms"], "offset_ms": event["offset_ms"]}
                     for event in events
                 ]
+            elif mode == "classify":
+                labels = []
+                for event in events:
+                    for unit in event.get("units", []):
+                        unit_id = unit.get("id")
+                        if unit_id is None:
+                            continue
+                        unit_id = int(unit_id)
+                        mapped_id = class_id_map.get(unit_id) if class_id_map is not None else unit_id
+                        if mapped_id is None:
+                            continue
+                        remapped = dict(unit)
+                        remapped["id"] = int(mapped_id)
+                        labels.append(remapped)
             else:
                 labels = [unit for event in events for unit in event.get("units", [])]
             label_index[rec_filename] = labels

@@ -18,6 +18,7 @@ import torch.nn.functional as F
 from utils import (
     parse_chunk_ms,
     clip_labels_to_chunk,
+    get_class_id_map_from_annotations,
     get_num_classes_from_annotations,
 )
 
@@ -139,7 +140,7 @@ def build_wav_index(wav_root, exts=(".wav", ".flac", ".ogg", ".mp3"), manifest_p
     return index
 
 
-def _build_label_index(annotation_file, mode):
+def _build_label_index(annotation_file, mode, class_id_map=None):
     if mode not in ("detect", "unit_detect", "classify"):
         raise ValueError("mode must be detect, unit_detect, or classify")
     data = json.loads(Path(annotation_file).read_text(encoding="utf-8"))
@@ -152,6 +153,20 @@ def _build_label_index(annotation_file, mode):
                 {"onset_ms": event["onset_ms"], "offset_ms": event["offset_ms"]}
                 for event in events
             ]
+        elif mode == "classify":
+            labels = []
+            for event in events:
+                for unit in event.get("units", []):
+                    unit_id = unit.get("id")
+                    if unit_id is None:
+                        continue
+                    unit_id = int(unit_id)
+                    mapped_id = class_id_map.get(unit_id) if class_id_map is not None else unit_id
+                    if mapped_id is None:
+                        continue
+                    remapped = dict(unit)
+                    remapped["id"] = int(mapped_id)
+                    labels.append(remapped)
         else:
             labels = [unit for event in events for unit in event.get("units", [])]
         label_index[rec_filename] = labels
@@ -198,7 +213,12 @@ class AvesSupervisedDataset(Dataset):
         self.wav_index = build_wav_index(
             wav_root, exts=wav_exts, manifest_path=wav_manifest
         )
-        self.label_index = _build_label_index(annotation_file, mode)
+        self.class_id_map = get_class_id_map_from_annotations(annotation_file, mode)
+        self.label_index = _build_label_index(
+            annotation_file,
+            mode,
+            class_id_map=self.class_id_map,
+        )
         self.mode = mode
         self.audio_sr = int(audio_sr)
         self.clip_seconds = float(clip_seconds) if clip_seconds else None
@@ -1130,6 +1150,7 @@ def main():
 
     config = vars(args)
     config["num_classes"] = int(train_ds.num_classes)
+    config["class_id_remap"] = "contiguous" if args.mode == "classify" else "none"
 
     trainer = AvesTrainer(model, config)
     trainer.train(train_loader, val_loader)

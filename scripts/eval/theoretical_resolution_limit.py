@@ -32,7 +32,16 @@ def _load_recordings(path: str, mode: str) -> Tuple[List[Tuple[str, List[Tuple[i
         data = json.load(f)
 
     recordings: List[Tuple[str, List[Tuple[int, int, int]]]] = []
-    max_class_id = 1  # silence=0, so start at 1
+    class_id_map: Dict[int, int] = {}
+    if mode == "classify":
+        raw_ids = set()
+        for rec in data.get("recordings", []):
+            for event in rec.get("detected_events", []):
+                for unit in event.get("units", []):
+                    if "id" in unit:
+                        raw_ids.add(int(unit["id"]))
+        sorted_ids = sorted(raw_ids)
+        class_id_map = {raw_id: idx + 1 for idx, raw_id in enumerate(sorted_ids)}
 
     for rec in data.get("recordings", []):
         filename = Path(rec["recording"]["filename"]).stem
@@ -45,7 +54,6 @@ def _load_recordings(path: str, mode: str) -> Tuple[List[Tuple[str, List[Tuple[i
                 if onset is None or offset is None:
                     continue
                 items.append((_round_ms(onset), _round_ms(offset), 1))
-            max_class_id = max(max_class_id, 1)
         else:
             for event in rec.get("detected_events", []):
                 for unit in event.get("units", []):
@@ -53,14 +61,24 @@ def _load_recordings(path: str, mode: str) -> Tuple[List[Tuple[str, List[Tuple[i
                     offset = unit.get("offset_ms")
                     if onset is None or offset is None:
                         continue
-                    class_id = int(unit.get("id", 0)) + 1
+                    if mode == "classify":
+                        unit_id = unit.get("id")
+                        if unit_id is None:
+                            continue
+                        class_id = class_id_map.get(int(unit_id))
+                        if class_id is None:
+                            continue
+                    else:
+                        class_id = 1
                     items.append((_round_ms(onset), _round_ms(offset), class_id))
-                    max_class_id = max(max_class_id, class_id)
 
         items.sort(key=lambda x: x[0])
         recordings.append((filename, items))
 
-    num_classes = max_class_id + 1  # include silence=0
+    if mode == "classify":
+        num_classes = len(class_id_map) + 1  # include silence=0
+    else:
+        num_classes = 2
     return recordings, num_classes
 
 
@@ -265,4 +283,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
