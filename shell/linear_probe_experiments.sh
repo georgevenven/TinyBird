@@ -17,13 +17,17 @@ fi
 
 while IFS=: read -r SPECIES BIRD_ID; do
     PREP_OUT_DIR="$TEMP_ROOT/tinybird_pool/$SPECIES/$BIRD_ID"
-    bash shell/classify_detect_bench.sh \
+    if ! bash shell/classify_detect_bench.sh \
         --spec_root "$SPEC_ROOT" \
         --species "$SPECIES" \
         --bird_id "$BIRD_ID" \
         --train_seconds "$TRAIN_SECONDS" \
         --mode "$MODE" \
-        --prep_only
+        --prep_only; then
+        echo "prep failed/infeasible: ${SPECIES} ${BIRD_ID} (skipping)"
+        rm -rf "$PREP_OUT_DIR"
+        continue
+    fi
 
     for PRETRAINED_RUN in "${PRETRAINED_RUNS[@]}"; do
         PRE_NAME="$(basename "$PRETRAINED_RUN")"

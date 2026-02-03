@@ -21,14 +21,18 @@ mkdir -p "$RESULTS_DIR"
 while IFS=: read -r SPECIES BIRD_ID; do
     PREP_OUT_DIR="$TEMP_ROOT/aves_pool/$SPECIES/$BIRD_ID"
 
-    bash shell/train_AVES.sh \
+    if ! bash shell/train_AVES.sh \
         --spec_root "$SPEC_ROOT" \
         --wav_root "$WAV_ROOT" \
         --species "$SPECIES" \
         --bird_id "$BIRD_ID" \
         --train_seconds "$TRAIN_SECONDS" \
         --mode "$MODE" \
-        --prep_only
+        --prep_only; then
+        echo "prep failed/infeasible: ${SPECIES} ${BIRD_ID} (skipping)"
+        rm -rf "$PREP_OUT_DIR"
+        continue
+    fi
 
     RUN_TAG="linear_aves/${SPECIES}_${BIRD_ID}"
     if ! bash shell/train_AVES.sh \
