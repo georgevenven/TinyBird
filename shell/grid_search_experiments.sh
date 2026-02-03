@@ -31,13 +31,17 @@ while IFS=: read -r SPECIES BIRD_ID; do
         TRAIN_SECONDS="64"
     fi
 
-    bash shell/classify_detect_bench.sh \
+    if ! bash shell/classify_detect_bench.sh \
         --spec_root "$SPEC_ROOT" \
         --species "$SPECIES" \
         --bird_id "$BIRD_ID" \
         --train_seconds "$TRAIN_SECONDS" \
         --mode "$MODE" \
-        --prep_only
+        --prep_only; then
+        echo "prep failed/infeasible: ${SPECIES} ${BIRD_ID} (skipping)"
+        rm -rf "$PREP_OUT_DIR"
+        continue
+    fi
 
     for LORA_RANK in "${LORA_RANK_LIST[@]}"; do
         for LR in "${LR_LIST[@]}"; do
