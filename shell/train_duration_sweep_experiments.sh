@@ -14,34 +14,61 @@ BIRD_LIST_JSON="files/SFT_experiment_birds.json"
 TEMP_ROOT="temp"
 RUN_TAG_PREFIX="duration_sweep"
 
-if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
-    echo "Usage: $0 /path/to/pretrained_run [Bengalese_Finch|Zebra_Finch|Canary]" 1>&2
+if [ "$#" -lt 1 ] || [ "$#" -gt 3 ]; then
+    echo "Usage: $0 /path/to/pretrained_run [Bengalese_Finch|Zebra_Finch|Canary] [--unit_detection]" 1>&2
     exit 1
 fi
 if [ "$1" == "-h" ] || [ "$1" == "--help" ]; then
-    echo "Usage: $0 /path/to/pretrained_run [Bengalese_Finch|Zebra_Finch|Canary]"
+    echo "Usage: $0 /path/to/pretrained_run [Bengalese_Finch|Zebra_Finch|Canary] [--unit_detection]"
     exit 0
 fi
 
-PRETRAINED_RUN="$1"
+PRETRAINED_RUN=""
+TARGET_SPECIES=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --unit_detection)
+            MODE="unit_detect"
+            RUN_TAG_PREFIX="duration_sweep_unit_detect"
+            shift
+            ;;
+        Bengalese_Finch|bengalese|bf)
+            TARGET_SPECIES="Bengalese_Finch"
+            shift
+            ;;
+        Zebra_Finch|zebra|zf)
+            TARGET_SPECIES="Zebra_Finch"
+            shift
+            ;;
+        Canary|canary)
+            TARGET_SPECIES="Canary"
+            shift
+            ;;
+        *)
+            if [ -z "$PRETRAINED_RUN" ]; then
+                PRETRAINED_RUN="$1"
+                shift
+            else
+                echo "Unknown arg: $1" 1>&2
+                exit 1
+            fi
+            ;;
+    esac
+done
+
+if [ -z "$PRETRAINED_RUN" ]; then
+    echo "Missing /path/to/pretrained_run" 1>&2
+    exit 1
+fi
+
 if [ -d "runs/$PRETRAINED_RUN" ]; then
     PRETRAINED_RUN="runs/$PRETRAINED_RUN"
 fi
 if [ ! -d "$PRETRAINED_RUN" ]; then
-    echo "Pretrained run not found: $1" 1>&2
+    echo "Pretrained run not found: $PRETRAINED_RUN" 1>&2
     exit 1
 fi
 PRE_NAME="$(basename "$PRETRAINED_RUN")"
-
-TARGET_SPECIES=""
-if [ "$#" -eq 2 ]; then
-    case "$2" in
-        Bengalese_Finch|bengalese|bf) TARGET_SPECIES="Bengalese_Finch" ;;
-        Zebra_Finch|zebra|zf) TARGET_SPECIES="Zebra_Finch" ;;
-        Canary|canary) TARGET_SPECIES="Canary" ;;
-        *) echo "Unsupported species: $2" 1>&2; exit 1 ;;
-    esac
-fi
 
 if [ ! -f "$BIRD_LIST_JSON" ]; then
     echo "Bird list JSON not found: $BIRD_LIST_JSON" 1>&2
@@ -57,7 +84,9 @@ while IFS=: read -r SPECIES BIRD_ID; do
     fi
     PREP_OUT_DIR="$TEMP_ROOT/tinybird_pool/$SPECIES/$BIRD_ID"
 
-    if [ "$SPECIES" == "Canary" ]; then
+    if [ "$MODE" == "unit_detect" ]; then
+        TRAIN_SECONDS_LIST=("8" "16" "32" "64" "128" "256" "MAX")
+    elif [ "$SPECIES" == "Canary" ]; then
         TRAIN_SECONDS_LIST=("32" "64" "128" "256" "512" "MAX")
     elif [ "$SPECIES" == "Bengalese_Finch" ] || [ "$SPECIES" == "Zebra_Finch" ]; then
         TRAIN_SECONDS_LIST=("16" "32" "64" "128" "256" "MAX")
