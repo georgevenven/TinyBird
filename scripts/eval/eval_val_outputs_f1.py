@@ -543,7 +543,10 @@ def _eval_val_outputs_ms(
     all_labels = np.concatenate(all_labels_list) if all_labels_list else np.array([], dtype=np.int64)
 
     if mode in ["detect", "unit_detect"]:
-        f1 = _f1_binary(all_preds, all_labels)
+        tp = int(((all_preds == 1) & (all_labels == 1)).sum())
+        fp = int(((all_preds == 1) & (all_labels == 0)).sum())
+        fn = int(((all_preds == 0) & (all_labels == 1)).sum())
+        f1 = _f1_binary(tp, fp, fn)
     else:
         f1 = _f1_macro(all_preds, all_labels, num_classes)
 
