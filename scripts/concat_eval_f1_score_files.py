@@ -59,6 +59,12 @@ def parse_args() -> argparse.Namespace:
         description="Concatenate eval_f1.csv files across nested results directories."
     )
     parser.add_argument(
+        "csv_files",
+        nargs="*",
+        type=Path,
+        help="Optional explicit eval_f1.csv files to concatenate.",
+    )
+    parser.add_argument(
         "--base-dir",
         type=Path,
         default=DEFAULT_BASE_DIR,
@@ -73,13 +79,28 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def resolve_input_files(csv_files: List[Path], base_dir: Path) -> List[Path]:
+    if csv_files:
+        resolved = sorted({p.resolve() for p in csv_files})
+        missing = [p for p in resolved if not p.exists()]
+        if missing:
+            raise SystemExit(f"Missing input CSV file(s): {', '.join(str(p) for p in missing)}")
+        non_files = [p for p in resolved if not p.is_file()]
+        if non_files:
+            raise SystemExit(f"Input path(s) are not files: {', '.join(str(p) for p in non_files)}")
+        return resolved
+    return find_eval_files(base_dir)
+
+
 def main() -> None:
     args = parse_args()
     base_dir: Path = args.base_dir
     output_path: Path = args.output
 
-    files = find_eval_files(base_dir)
+    files = resolve_input_files(args.csv_files, base_dir)
     if not files:
+        if args.csv_files:
+            raise SystemExit("No input CSV files provided.")
         raise SystemExit(f"No eval_f1.csv files found under {base_dir}")
 
     row_count = concat_csvs(files, output_path)

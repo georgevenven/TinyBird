@@ -11,3 +11,5 @@
 /files
 /wandb
 /temp
+scripts/concat_eval_f1_score_files.py
+processed_results.zip
