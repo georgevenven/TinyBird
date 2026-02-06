@@ -53,6 +53,7 @@ while IFS=: read -r SPECIES BIRD_ID; do
             --lr "$LR" \
             --steps "$STEPS" \
             --run_tag "$RUN_TAG" \
+            --no-save_intermediate_checkpoints \
             --use_prepared; then
             echo "run failed: ${SPECIES} ${BIRD_ID} lr=${LR}"
         else

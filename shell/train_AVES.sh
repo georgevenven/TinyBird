@@ -27,6 +27,7 @@ RUN_NAME=""
 PROBE_MODE="linear"
 PREP_ONLY=0
 USE_PREPARED=0
+SAVE_INTERMEDIATE_CHECKPOINTS=0
 
 STEPS=1000
 LR=1e-3
@@ -204,6 +205,14 @@ while [[ $# -gt 0 ]]; do
         USE_PREPARED=1
         shift 1
         ;;
+        --save_intermediate_checkpoints)
+        SAVE_INTERMEDIATE_CHECKPOINTS=1
+        shift 1
+        ;;
+        --no-save_intermediate_checkpoints)
+        SAVE_INTERMEDIATE_CHECKPOINTS=0
+        shift 1
+        ;;
         *)
         shift 1
         ;;
@@ -344,6 +353,9 @@ if [ "$NUM_TIMEBINS" -gt 0 ]; then
 fi
 if [ "$VAL_BATCH_SIZE" -gt 0 ]; then
     EXTRA_ARGS+=(--val_batch_size "$VAL_BATCH_SIZE")
+fi
+if [ "$SAVE_INTERMEDIATE_CHECKPOINTS" -eq 0 ]; then
+    EXTRA_ARGS+=(--no-save_intermediate_checkpoints)
 fi
 
 PYTHONWARNINGS=ignore python "$PROJECT_ROOT/src/aves.py" \

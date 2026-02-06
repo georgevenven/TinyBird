@@ -445,15 +445,28 @@ def plot_species_f1_curves(
             if not species or not train_seconds or metric_value is None:
                 continue
             try:
-                train_seconds_f = float(train_seconds)
                 metric_f = float(metric_value)
             except (TypeError, ValueError):
                 continue
+            train_seconds_token = str(train_seconds).strip()
+            if not train_seconds_token:
+                continue
+            if train_seconds_token.upper() == "MAX":
+                train_seconds_label = "MAX"
+                train_seconds_sort_key = (1, float("inf"))
+            else:
+                try:
+                    train_seconds_numeric = float(train_seconds_token)
+                except (TypeError, ValueError):
+                    continue
+                train_seconds_label = f"{train_seconds_numeric:g}"
+                train_seconds_sort_key = (0, train_seconds_numeric)
             data.append(
                 {
                     "species": species,
                     "bird": bird or "unknown",
-                    "train_seconds": train_seconds_f,
+                    "train_seconds": train_seconds_label,
+                    "train_seconds_sort_key": train_seconds_sort_key,
                     "metric": metric_f,
                 }
             )
@@ -496,18 +509,20 @@ def plot_species_f1_curves(
 
         fig, ax = plt.subplots(figsize=(6.5, 4.5), dpi=SPEC_DPI)
 
-        bird_series: dict[str, dict[float, list[float]]] = {}
+        bird_series: dict[str, dict[str, list[float]]] = {}
+        x_sort_keys: dict[str, tuple[int, float]] = {}
         for row in rows:
             bird_series.setdefault(row["bird"], {}).setdefault(row["train_seconds"], []).append(row["metric"])
+            x_sort_keys[row["train_seconds"]] = row["train_seconds_sort_key"]
 
-        x_levels = sorted({ts for by_ts in bird_series.values() for ts in by_ts.keys()})
+        x_levels = sorted({ts for by_ts in bird_series.values() for ts in by_ts.keys()}, key=lambda ts: x_sort_keys[ts])
         x_index = {ts: i for i, ts in enumerate(x_levels)}
 
         for bird in birds:
             by_ts = bird_series.get(bird, {})
             if not by_ts:
                 continue
-            xs = sorted(by_ts.keys())
+            xs = sorted(by_ts.keys(), key=lambda ts: x_sort_keys[ts])
             ys = [float(np.mean(by_ts[x])) for x in xs]
             x_positions = [x_index[x] for x in xs]
             ax.plot(
@@ -519,11 +534,11 @@ def plot_species_f1_curves(
                 color=base_color,
             )
 
-        avg_by_ts: dict[float, list[float]] = {}
+        avg_by_ts: dict[str, list[float]] = {}
         for by_ts in bird_series.values():
             for ts, vals in by_ts.items():
                 avg_by_ts.setdefault(ts, []).append(float(np.mean(vals)))
-        avg_xs = sorted(avg_by_ts.keys())
+        avg_xs = sorted(avg_by_ts.keys(), key=lambda ts: x_sort_keys[ts])
         avg_ys = [float(np.mean(avg_by_ts[x])) for x in avg_xs]
         avg_positions = [x_index[x] for x in avg_xs]
         ax.plot(avg_positions, avg_ys, marker="o", linewidth=3.0, color=base_color, alpha=0.95)
@@ -537,7 +552,7 @@ def plot_species_f1_curves(
         ax.grid(True, alpha=0.2)
         ax.set_xlim(-0.25, max(0.25, len(x_levels) - 0.75))
         ax.set_xticks(list(range(len(x_levels))))
-        ax.set_xticklabels([f"{x:g}" for x in x_levels])
+        ax.set_xticklabels(x_levels)
         ax.xaxis.set_major_locator(ticker.FixedLocator(list(range(len(x_levels)))))
         if metric == "f1":
             ax.set_ylim(0.0, 100.0)
