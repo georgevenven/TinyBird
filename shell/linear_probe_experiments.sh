@@ -9,9 +9,33 @@ PROBE_MODE="linear"
 LR="1e-2"
 BIRD_LIST_JSON="files/SFT_experiment_birds.json"
 TEMP_ROOT="temp"
+AUDIO_PARAMS_SOURCE="spec"
 
-PRETRAINED_RUNS=("$@")
+if [ "$#" -lt 1 ]; then
+    echo "Usage: $0 /path/to/pretrained_run [/path/to/pretrained_run ...] [--audio_params_source pretrain|spec]" 1>&2
+    exit 1
+fi
+if [ "$1" == "-h" ] || [ "$1" == "--help" ]; then
+    echo "Usage: $0 /path/to/pretrained_run [/path/to/pretrained_run ...] [--audio_params_source pretrain|spec]"
+    exit 0
+fi
+
+PRETRAINED_RUNS=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --audio_params_source)
+            AUDIO_PARAMS_SOURCE="$2"
+            shift 2
+            ;;
+        *)
+            PRETRAINED_RUNS+=("$1")
+            shift
+            ;;
+    esac
+done
+
 if [ "${#PRETRAINED_RUNS[@]}" -eq 0 ]; then
+    echo "Missing /path/to/pretrained_run" 1>&2
     exit 1
 fi
 
@@ -23,6 +47,7 @@ while IFS=: read -r SPECIES BIRD_ID; do
         --bird_id "$BIRD_ID" \
         --train_seconds "$TRAIN_SECONDS" \
         --mode "$MODE" \
+        --audio_params_source "$AUDIO_PARAMS_SOURCE" \
         --prep_only; then
         echo "prep failed/infeasible: ${SPECIES} ${BIRD_ID} (skipping)"
         rm -rf "$PREP_OUT_DIR"
@@ -42,6 +67,7 @@ while IFS=: read -r SPECIES BIRD_ID; do
             --lr "$LR" \
             --run_tag "$RUN_TAG" \
             --pretrained_run "$PRETRAINED_RUN" \
+            --audio_params_source "$AUDIO_PARAMS_SOURCE" \
             --use_prepared; then
             echo "run failed: ${PRETRAINED_RUN} ${SPECIES} ${BIRD_ID}"
         fi

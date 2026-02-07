@@ -36,6 +36,7 @@ NUM_WORKERS=8
 WEIGHT_DECAY=0.1
 EVAL_EVERY=100
 RUN_NAME=""
+AUDIO_PARAMS_SOURCE="spec"
 PREP_ONLY=0
 USE_PREPARED=0
 
@@ -99,6 +100,10 @@ while [[ $# -gt 0 ]]; do
         ;;
         --run_name)
         RUN_NAME="$2"
+        shift 2
+        ;;
+        --audio_params_source)
+        AUDIO_PARAMS_SOURCE="$2"
         shift 2
         ;;
         --probe_mode)
@@ -263,6 +268,7 @@ else
         --pretrained_run "$PRETRAINED_RUN" \
         --annotation_file "$POOL_DIR/annotations_filtered.json" \
         --mode "$MODE" \
+    --audio_params_source "$AUDIO_PARAMS_SOURCE" \
     --steps "$STEPS" \
     --lr "$LR" \
     --batch_size "$BATCH_SIZE" \

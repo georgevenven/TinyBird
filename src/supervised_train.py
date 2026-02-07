@@ -768,6 +768,13 @@ if __name__ == "__main__":
     parser.add_argument("--pretrained_run", type=str, required=True, help="path to pretrained run directory")
     parser.add_argument("--annotation_file", type=str, required=True, help="path to annotation JSON file")
     parser.add_argument("--mode", type=str, required=True, choices=["detect", "unit_detect", "classify"], help="detect, unit_detect, or classify mode")
+    parser.add_argument(
+        "--audio_params_source",
+        type=str,
+        default="spec",
+        choices=["pretrain", "spec"],
+        help="where to load audio_params.json for supervised normalization: pretrain run or spec/train_dir",
+    )
     
     # Training hyperparameters
     parser.add_argument("--steps", type=int, default=1000, help="number of training steps")
@@ -811,9 +818,14 @@ if __name__ == "__main__":
     config["mels"] = pretrained_config["mels"]
     config["pretrained_run"] = pretrained_path
 
-    # Use audio params (mean/std, sr/hop_size, mels) from the pretrain run for supervised scaling
-    config["audio_params_override"] = load_audio_params(pretrained_path)
-    config["audio_params_source"] = pretrained_path
+    # Configure audio params source for supervised scaling/normalization
+    if args.audio_params_source == "pretrain":
+        # Use audio params (mean/std, sr/hop_size, mels) from the pretrain run
+        config["audio_params_override"] = load_audio_params(pretrained_path)
+        config["audio_params_source"] = pretrained_path
+    else:
+        # Use audio params from the spec/train_dir (no override)
+        config["audio_params_source"] = "spec"
     
     # Automatically determine number of classes from annotations
     num_classes = get_num_classes_from_annotations(config["annotation_file"], config["mode"])

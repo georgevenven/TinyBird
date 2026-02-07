@@ -13,13 +13,14 @@ STEPS="1000"
 BIRD_LIST_JSON="files/SFT_experiment_birds.json"
 TEMP_ROOT="temp"
 RUN_TAG_PREFIX="duration_sweep"
+AUDIO_PARAMS_SOURCE="spec"
 
-if [ "$#" -lt 1 ] || [ "$#" -gt 3 ]; then
-    echo "Usage: $0 /path/to/pretrained_run [Bengalese_Finch|Zebra_Finch|Canary] [--unit_detection]" 1>&2
+if [ "$#" -lt 1 ]; then
+    echo "Usage: $0 /path/to/pretrained_run [Bengalese_Finch|Zebra_Finch|Canary] [--unit_detection] [--audio_params_source pretrain|spec]" 1>&2
     exit 1
 fi
 if [ "$1" == "-h" ] || [ "$1" == "--help" ]; then
-    echo "Usage: $0 /path/to/pretrained_run [Bengalese_Finch|Zebra_Finch|Canary] [--unit_detection]"
+    echo "Usage: $0 /path/to/pretrained_run [Bengalese_Finch|Zebra_Finch|Canary] [--unit_detection] [--audio_params_source pretrain|spec]"
     exit 0
 fi
 
@@ -31,6 +32,10 @@ while [[ $# -gt 0 ]]; do
             MODE="unit_detect"
             RUN_TAG_PREFIX="duration_sweep_unit_detect"
             shift
+            ;;
+        --audio_params_source)
+            AUDIO_PARAMS_SOURCE="$2"
+            shift 2
             ;;
         Bengalese_Finch|bengalese|bf)
             TARGET_SPECIES="Bengalese_Finch"
@@ -111,7 +116,8 @@ while IFS=: read -r SPECIES BIRD_ID; do
             --lr "$LR" \
             --steps "$STEPS" \
             --run_tag "$RUN_TAG" \
-            --pretrained_run "$PRETRAINED_RUN"; then
+            --pretrained_run "$PRETRAINED_RUN" \
+            --audio_params_source "$AUDIO_PARAMS_SOURCE"; then
             echo "run failed: ${PRE_NAME} ${SPECIES} ${BIRD_ID} train_seconds=${TRAIN_SECONDS}"
         fi
     done
