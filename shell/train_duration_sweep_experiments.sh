@@ -4,23 +4,24 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-SPEC_ROOT="/media/george/George-SSD/specs"
+SPEC_ROOT="/spec/SongMAE_Bench_Data"
 MODE="classify"
 PROBE_MODE="lora"
 LORA_RANK="32"
-LR="1e-3"
+LR="5e-3"
 STEPS="1000"
 BIRD_LIST_JSON="files/SFT_experiment_birds.json"
 TEMP_ROOT="temp"
 RUN_TAG_PREFIX="duration_sweep"
 AUDIO_PARAMS_SOURCE="spec"
+SPLIT=""
 
 if [ "$#" -lt 1 ]; then
-    echo "Usage: $0 /path/to/pretrained_run [Bengalese_Finch|Zebra_Finch|Canary] [--unit_detection] [--audio_params_source pretrain|spec]" 1>&2
+    echo "Usage: $0 /path/to/pretrained_run [Bengalese_Finch|Zebra_Finch|Canary] [--unit_detection] [--audio_params_source pretrain|spec] [--split 1|2|3]" 1>&2
     exit 1
 fi
 if [ "$1" == "-h" ] || [ "$1" == "--help" ]; then
-    echo "Usage: $0 /path/to/pretrained_run [Bengalese_Finch|Zebra_Finch|Canary] [--unit_detection] [--audio_params_source pretrain|spec]"
+    echo "Usage: $0 /path/to/pretrained_run [Bengalese_Finch|Zebra_Finch|Canary] [--unit_detection] [--audio_params_source pretrain|spec] [--split 1|2|3]"
     exit 0
 fi
 
@@ -35,6 +36,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --audio_params_source)
             AUDIO_PARAMS_SOURCE="$2"
+            shift 2
+            ;;
+        --split)
+            SPLIT="$2"
             shift 2
             ;;
         Bengalese_Finch|bengalese|bf)
@@ -97,6 +102,14 @@ while IFS=: read -r SPECIES BIRD_ID; do
         TRAIN_SECONDS_LIST=("16" "32" "64" "128" "256" "MAX")
     else
         continue
+    fi
+    if [ -n "$SPLIT" ]; then
+        case "$SPLIT" in
+            1) TRAIN_SECONDS_LIST=("${TRAIN_SECONDS_LIST[@]:0:2}") ;;
+            2) TRAIN_SECONDS_LIST=("${TRAIN_SECONDS_LIST[@]:2:2}") ;;
+            3) TRAIN_SECONDS_LIST=("${TRAIN_SECONDS_LIST[@]:4}") ;;
+            *) echo "Invalid --split: $SPLIT (expected 1, 2, or 3)" 1>&2; exit 1 ;;
+        esac
     fi
 
     BIRD_COUNT=$((BIRD_COUNT + 1))

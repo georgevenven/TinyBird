@@ -15,7 +15,7 @@ AUDIO_PARAMS_SOURCE="spec"
 TARGET_SPECIES=""
 TARGET_BIRD_ID=""
 
-LORA_RANK_LIST=("2" "4" "8" "16" "32" "64")
+LORA_RANK_LIST=("4" "8" "16" "32" "64" "128")
 LR_LIST=("5e-3" "1e-3" "5e-4" "1e-4")
 
 if [ "$#" -lt 1 ]; then
