@@ -413,15 +413,14 @@ def plot_species_f1_curves(
     *,
     mode: str = "classify",
     probe_mode: Optional[str] = None,
-    metric: str = "f1",
+    metric: str = "both",
     species_filter: Optional[Sequence[str]] = None,
 ) -> list[str]:
     import csv
-    import re
     import matplotlib.ticker as ticker
 
-    if metric not in {"f1", "fer"}:
-        raise ValueError("metric must be 'f1' or 'fer'")
+    if metric not in {"f1", "fer", "both"}:
+        raise ValueError("metric must be 'f1', 'fer', or 'both'")
 
     results_csv = results_dir
     if os.path.isdir(results_dir):
@@ -441,12 +440,8 @@ def plot_species_f1_curves(
             species = (row.get("species") or "").strip()
             bird = (row.get("bird") or "").strip()
             train_seconds = row.get("train_seconds")
-            metric_value = row.get(metric)
-            if not species or not train_seconds or metric_value is None:
-                continue
-            try:
-                metric_f = float(metric_value)
-            except (TypeError, ValueError):
+            lr_value = row.get("lr")
+            if not species or not train_seconds:
                 continue
             train_seconds_token = str(train_seconds).strip()
             if not train_seconds_token:
@@ -461,13 +456,46 @@ def plot_species_f1_curves(
                     continue
                 train_seconds_label = f"{train_seconds_numeric:g}"
                 train_seconds_sort_key = (0, train_seconds_numeric)
+
+            lr_label = None
+            lr_sort_key = None
+            if lr_value not in (None, ""):
+                try:
+                    lr_numeric = float(lr_value)
+                except (TypeError, ValueError):
+                    lr_numeric = None
+                if lr_numeric is not None:
+                    lr_label = f"{lr_numeric:g}"
+                    lr_sort_key = lr_numeric
+
+            f1_value = row.get("f1")
+            fer_value = row.get("fer")
+            try:
+                f1_metric = float(f1_value) if f1_value not in (None, "") else None
+            except (TypeError, ValueError):
+                f1_metric = None
+            try:
+                fer_metric = float(fer_value) if fer_value not in (None, "") else None
+            except (TypeError, ValueError):
+                fer_metric = None
+
+            if metric == "f1" and f1_metric is None:
+                continue
+            if metric == "fer" and fer_metric is None:
+                continue
+            if metric == "both" and f1_metric is None and fer_metric is None:
+                continue
+
             data.append(
                 {
                     "species": species,
                     "bird": bird or "unknown",
                     "train_seconds": train_seconds_label,
                     "train_seconds_sort_key": train_seconds_sort_key,
-                    "metric": metric_f,
+                    "lr": lr_label,
+                    "lr_sort_key": lr_sort_key,
+                    "f1": f1_metric,
+                    "fer": fer_metric,
                 }
             )
 
@@ -490,49 +518,72 @@ def plot_species_f1_curves(
         print("No species matched the filter.")
         return []
 
+    preferred_species_order = ["Bengalese_Finch", "Zebra_Finch", "Canary"]
+    ordered_species = [sp for sp in preferred_species_order if sp in species_set]
+    ordered_species.extend(sorted(species_set - set(ordered_species)))
+
+    species_display = {
+        "Bengalese_Finch": "Bengalese Finch",
+        "Zebra_Finch": "Zebra Finch",
+        "Canary": "Canary",
+    }
+
     def _slugify(text: str) -> str:
+        import re
+
         text = text.strip().lower()
         text = re.sub(r"[^a-z0-9]+", "_", text)
         return text.strip("_") or "species"
 
-    saved_paths: list[str] = []
+    def _save_plot_with_svg(fig, png_path: str) -> str:
+        fig.savefig(png_path, bbox_inches="tight")
+        svg_path = os.path.splitext(png_path)[0] + ".svg"
+        fig.savefig(svg_path, format="svg", bbox_inches="tight")
+        return svg_path
 
-    for idx, species in enumerate(sorted(species_set)):
-        rows = [row for row in data if row["species"] == species]
-        if not rows:
-            continue
+    metrics = ["f1", "fer"] if metric == "both" else [metric]
+    metric_labels = {"f1": "F1 Score (%)", "fer": "Frame Error Rate (%)"}
+    metric_titles = {"f1": "F1", "fer": "FER"}
+    # Paper-friendly portrait ratio so two figures can sit side-by-side.
+    # Keep width stable and reduce height slightly for tighter page fit.
+    single_plot_figsize = (4.8, 6.8)
 
-        metric_label = "F1 (%)" if metric == "f1" else "Frame Error Rate (%)"
-
+    def _build_species_metric_series(rows: list[dict], metric_name: str):
         birds = sorted({row["bird"] for row in rows})
-        base_color = plt.cm.tab10((idx % 10) / 10)
+        train_levels = {row["train_seconds"] for row in rows}
+        lr_levels = {row["lr"] for row in rows if row["lr"] is not None}
+        if len(train_levels) > 1:
+            x_field = "train_seconds"
+            x_label = "# Training Seconds"
+        elif len(lr_levels) > 1:
+            x_field = "lr"
+            x_label = "Learning Rate"
+        else:
+            x_field = "train_seconds"
+            x_label = "# Training Seconds"
 
-        fig, ax = plt.subplots(figsize=(6.5, 4.5), dpi=SPEC_DPI)
-
-        bird_series: dict[str, dict[str, list[float]]] = {}
         x_sort_keys: dict[str, tuple[int, float]] = {}
         for row in rows:
-            bird_series.setdefault(row["bird"], {}).setdefault(row["train_seconds"], []).append(row["metric"])
-            x_sort_keys[row["train_seconds"]] = row["train_seconds_sort_key"]
-
-        x_levels = sorted({ts for by_ts in bird_series.values() for ts in by_ts.keys()}, key=lambda ts: x_sort_keys[ts])
+            x_value = row.get(x_field)
+            if x_value is None:
+                continue
+            if x_field == "train_seconds":
+                x_sort_keys[x_value] = row["train_seconds_sort_key"]
+            else:
+                x_sort_keys[x_value] = (0, row["lr_sort_key"])
+        x_levels = sorted(x_sort_keys.keys(), key=lambda ts: x_sort_keys[ts])
         x_index = {ts: i for i, ts in enumerate(x_levels)}
 
-        for bird in birds:
-            by_ts = bird_series.get(bird, {})
-            if not by_ts:
+        bird_series: dict[str, dict[str, list[float]]] = {}
+        for row in rows:
+            metric_value = row[metric_name]
+            x_value = row.get(x_field)
+            if metric_value is None or x_value is None:
                 continue
-            xs = sorted(by_ts.keys(), key=lambda ts: x_sort_keys[ts])
-            ys = [float(np.mean(by_ts[x])) for x in xs]
-            x_positions = [x_index[x] for x in xs]
-            ax.plot(
-                x_positions,
-                ys,
-                marker="o",
-                linewidth=1.1,
-                alpha=0.35,
-                color=base_color,
-            )
+            bird_series.setdefault(row["bird"], {}).setdefault(x_value, []).append(metric_value)
+
+        if not bird_series:
+            return None
 
         avg_by_ts: dict[str, list[float]] = {}
         for by_ts in bird_series.values():
@@ -541,28 +592,150 @@ def plot_species_f1_curves(
         avg_xs = sorted(avg_by_ts.keys(), key=lambda ts: x_sort_keys[ts])
         avg_ys = [float(np.mean(avg_by_ts[x])) for x in avg_xs]
         avg_positions = [x_index[x] for x in avg_xs]
-        ax.plot(avg_positions, avg_ys, marker="o", linewidth=3.0, color=base_color, alpha=0.95)
 
-        title_parts = [species, metric_label]
-        if probe_mode:
-            title_parts.append(probe_mode)
-        ax.set_title(" - ".join(title_parts))
-        ax.set_xlabel("Training Data (seconds)")
-        ax.set_ylabel(metric_label)
-        ax.grid(True, alpha=0.2)
-        ax.set_xlim(-0.25, max(0.25, len(x_levels) - 0.75))
-        ax.set_xticks(list(range(len(x_levels))))
-        ax.set_xticklabels(x_levels)
-        ax.xaxis.set_major_locator(ticker.FixedLocator(list(range(len(x_levels)))))
-        if metric == "f1":
-            ax.set_ylim(0.0, 100.0)
+        return {
+            "birds": birds,
+            "x_label": x_label,
+            "x_levels": x_levels,
+            "x_sort_keys": x_sort_keys,
+            "x_index": x_index,
+            "bird_series": bird_series,
+            "avg_ys": avg_ys,
+            "avg_positions": avg_positions,
+        }
 
-        tag = "all" if not probe_mode else probe_mode
-        filename = f"eval_{metric}_{mode}_{tag}_{_slugify(species)}.png"
-        save_path = os.path.join(output_dir, filename)
-        fig.savefig(save_path, bbox_inches="tight")
+    def _draw_species_metric_ax(ax, *, species_idx: int, species: str, metric_name: str, series):
+        base_color = plt.cm.tab10((species_idx % 10) / 10)
+        for bird in series["birds"]:
+            by_ts = series["bird_series"].get(bird, {})
+            if not by_ts:
+                continue
+            xs = sorted(by_ts.keys(), key=lambda ts: series["x_sort_keys"][ts])
+            ys = [float(np.mean(by_ts[x])) for x in xs]
+            x_positions = [series["x_index"][x] for x in xs]
+            ax.plot(
+                x_positions,
+                ys,
+                marker="o",
+                markersize=4.5,
+                linewidth=1.0,
+                alpha=0.35,
+                color=base_color,
+            )
+
+        ax.plot(
+            series["avg_positions"],
+            series["avg_ys"],
+            marker="o",
+            markersize=5.8,
+            linewidth=2.5,
+            color=base_color,
+            alpha=0.95,
+        )
+
+        species_title = species_display.get(species, species.replace("_", " "))
+        ax.set_title(f"{species_title} - {metric_titles[metric_name]}", fontsize=20, fontweight="bold")
+        ax.set_xlabel(series["x_label"], fontsize=16, fontweight="bold")
+        ax.set_ylabel(metric_labels[metric_name], fontsize=16, fontweight="bold")
+        ax.grid(True, alpha=0.22)
+        ax.set_xlim(-0.25, max(0.25, len(series["x_levels"]) - 0.75))
+        ax.set_xticks(list(range(len(series["x_levels"]))))
+        ax.set_xticklabels(series["x_levels"])
+        ax.xaxis.set_major_locator(ticker.FixedLocator(list(range(len(series["x_levels"]))))
+        )
+        ax.tick_params(axis="both", labelsize=16, width=1.2)
+        for tick_label in ax.get_xticklabels() + ax.get_yticklabels():
+            tick_label.set_fontweight("bold")
+        if metric_name == "f1":
+            ax.set_ylim(40.0, 100.0)
+        else:
+            max_y = max(series["avg_ys"]) if series["avg_ys"] else 0.0
+            upper = max(10.0, np.ceil((max_y + 1.0) / 5.0) * 5.0)
+            ax.set_ylim(0.0, upper)
+
+        # Keep borders consistent across panels.
+        for side in ("top", "bottom", "left", "right"):
+            spine = ax.spines[side]
+            if spine.get_visible():
+                spine.set_linewidth(1.0)
+                spine.set_color("#404040")
+
+    saved_paths: list[str] = []
+    tag = "all" if not probe_mode else probe_mode
+
+    for metric_name in metrics:
+        for species_idx, species in enumerate(ordered_species):
+            rows = [row for row in data if row["species"] == species]
+            if not rows:
+                continue
+
+            series = _build_species_metric_series(rows, metric_name)
+            if series is None:
+                continue
+
+            fig, ax = plt.subplots(figsize=single_plot_figsize, dpi=SPEC_DPI)
+            _draw_species_metric_ax(
+                ax,
+                species_idx=species_idx,
+                species=species,
+                metric_name=metric_name,
+                series=series,
+            )
+
+            mode_tag = mode or "all_modes"
+            filename = f"eval_{metric_name}_{mode_tag}_{tag}_{_slugify(species)}.png"
+            save_path = os.path.join(output_dir, filename)
+            fig.tight_layout()
+            svg_path = _save_plot_with_svg(fig, save_path)
+            plt.close(fig)
+            saved_paths.append(save_path)
+            saved_paths.append(svg_path)
+
+    # Additional joined F1 figure with all species in one image.
+    if "f1" in metrics and len(ordered_species) > 1:
+        # Keep joined subplot height consistent with individual plots.
+        joined_figsize = (single_plot_figsize[0] * len(ordered_species), single_plot_figsize[1])
+        fig, axes = plt.subplots(
+            1,
+            len(ordered_species),
+            figsize=joined_figsize,
+            dpi=SPEC_DPI,
+            squeeze=False,
+            sharey=True,
+        )
+        axes_row = axes[0]
+        any_drawn = False
+        for species_idx, species in enumerate(ordered_species):
+            ax = axes_row[species_idx]
+            rows = [row for row in data if row["species"] == species]
+            if not rows:
+                ax.set_visible(False)
+                continue
+            series = _build_species_metric_series(rows, "f1")
+            if series is None:
+                ax.set_visible(False)
+                continue
+            _draw_species_metric_ax(
+                ax,
+                species_idx=species_idx,
+                species=species,
+                metric_name="f1",
+                series=series,
+            )
+            if species_idx > 0:
+                # Joined layout: keep only the left y-axis to reduce clutter.
+                ax.set_ylabel("")
+                ax.tick_params(axis="y", left=False, labelleft=False)
+            any_drawn = True
+
+        if any_drawn:
+            mode_tag = mode or "all_modes"
+            joined_path = os.path.join(output_dir, f"eval_f1_{mode_tag}_{tag}_species_joined.png")
+            fig.subplots_adjust(left=0.055, right=0.995, bottom=0.14, top=0.90, wspace=0.10)
+            joined_svg = _save_plot_with_svg(fig, joined_path)
+            saved_paths.append(joined_path)
+            saved_paths.append(joined_svg)
         plt.close(fig)
-        saved_paths.append(save_path)
 
     return saved_paths
 

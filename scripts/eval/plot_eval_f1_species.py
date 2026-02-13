@@ -57,16 +57,14 @@ def main() -> None:
     if args.species:
         species_filter = [s.strip() for s in args.species.split(",") if s.strip()]
 
-    metrics = ["f1", "fer"] if args.metric == "both" else [args.metric]
-    for metric in metrics:
-        plot_species_f1_curves(
-            args.results_dir,
-            output_dir=args.output_dir,
-            mode=args.mode,
-            probe_mode=args.probe_mode,
-            metric=metric,
-            species_filter=species_filter,
-        )
+    plot_species_f1_curves(
+        args.results_dir,
+        output_dir=args.output_dir,
+        mode=args.mode,
+        probe_mode=args.probe_mode,
+        metric=args.metric,
+        species_filter=species_filter,
+    )
 
 
 if __name__ == "__main__":
