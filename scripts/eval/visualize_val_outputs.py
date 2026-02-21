@@ -13,7 +13,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Iterable, List
+from typing import Dict, Iterable, List
 
 import numpy as np
 
@@ -76,12 +76,121 @@ def _sigmoid(x: np.ndarray) -> np.ndarray:
 def _pad_spec_window(spec: np.ndarray, start: int, window_len: int) -> np.ndarray:
     """Slice a spectrogram window and right-pad to window_len if needed."""
     mel_bins = int(spec.shape[0])
-    out = np.zeros((mel_bins, int(window_len)), dtype=spec.dtype)
+    pad_value = float(np.min(spec)) if spec.size else 0.0
+    out = np.full((mel_bins, int(window_len)), pad_value, dtype=spec.dtype)
     if start < 0:
         start = 0
     end = min(spec.shape[1], start + window_len)
     if end > start:
         out[:, : end - start] = spec[:, start:end]
+    return out
+
+
+def _spec_ms_per_timebin(spec_dir: Path) -> float | None:
+    """Read spectrogram ms-per-timebin from audio_params.json."""
+    path = spec_dir / "audio_params.json"
+    if not path.exists():
+        return None
+    try:
+        payload = _load_json(path)
+        sr = float(payload.get("sr"))
+        hop = float(payload.get("hop_size"))
+        if sr <= 0 or hop <= 0:
+            return None
+        return (hop / sr) * 1000.0
+    except Exception:
+        return None
+
+
+def _load_token_ms_by_file(val_dir: Path, meta: dict) -> tuple[float | None, Dict[str, float]]:
+    """Load AVES token ms-per-timebin metadata."""
+    token_ms_default = None
+    try:
+        if meta.get("ms_per_timebin_default") is not None:
+            token_ms_default = float(meta.get("ms_per_timebin_default"))
+    except (TypeError, ValueError):
+        token_ms_default = None
+
+    token_ms_by_file: Dict[str, float] = {}
+    rel_map = meta.get("ms_per_timebin_by_file")
+    map_path = val_dir / str(rel_map) if rel_map else (val_dir / "ms_per_timebin_by_file.json")
+    if map_path.exists():
+        try:
+            payload = _load_json(map_path)
+            for key, value in payload.items():
+                try:
+                    token_ms_by_file[str(key)] = float(value)
+                except (TypeError, ValueError):
+                    continue
+        except Exception:
+            token_ms_by_file = {}
+    return token_ms_default, token_ms_by_file
+
+
+def _resample_time_axis(spec: np.ndarray, target_len: int) -> np.ndarray:
+    """Resample a spectrogram's time axis to target_len bins."""
+    target_len = int(target_len)
+    mel_bins = int(spec.shape[0])
+    if target_len <= 0:
+        return np.zeros((mel_bins, 0), dtype=np.float32)
+
+    src_len = int(spec.shape[1])
+    if src_len <= 0:
+        return np.zeros((mel_bins, target_len), dtype=np.float32)
+    if src_len == target_len:
+        return spec.astype(np.float32, copy=False)
+
+    x_old = np.arange(src_len, dtype=np.float32)
+    x_new = np.linspace(0.0, float(src_len - 1), target_len, dtype=np.float32)
+    out = np.empty((mel_bins, target_len), dtype=np.float32)
+    for i in range(mel_bins):
+        out[i] = np.interp(x_new, x_old, spec[i].astype(np.float32, copy=False))
+    return out
+
+
+def _token_aligned_spec_window(
+    spec: np.ndarray,
+    *,
+    token_start: int,
+    token_length: int,
+    window_len: int,
+    token_ms_per_bin: float | None,
+    spec_ms_per_bin: float | None,
+) -> np.ndarray:
+    """
+    Build a token-aligned spectrogram window.
+
+    AVES logits/labels are indexed in token bins, while spectrograms are often
+    indexed in finer-grained STFT bins. This maps token-time windows to
+    spectrogram-time windows, then resamples to token width so bars align.
+    """
+    if (
+        token_ms_per_bin is None
+        or spec_ms_per_bin is None
+        or token_ms_per_bin <= 0
+        or spec_ms_per_bin <= 0
+    ):
+        return _pad_spec_window(spec, start=token_start, window_len=window_len)
+
+    mel_bins = int(spec.shape[0])
+    pad_value = float(np.min(spec)) if spec.size else 0.0
+    out = np.full((mel_bins, int(window_len)), pad_value, dtype=np.float32)
+    active_tokens = max(0, min(int(token_length), int(window_len)))
+    if active_tokens == 0:
+        return out
+
+    start_ms = float(token_start) * float(token_ms_per_bin)
+    end_ms = float(token_start + active_tokens) * float(token_ms_per_bin)
+    spec_start = int(round(start_ms / float(spec_ms_per_bin)))
+    spec_end = int(round(end_ms / float(spec_ms_per_bin)))
+
+    spec_start = max(0, min(spec_start, int(spec.shape[1])))
+    spec_end = max(spec_start, min(spec_end, int(spec.shape[1])))
+    if spec_end == spec_start and int(spec.shape[1]) > 0:
+        spec_end = min(int(spec.shape[1]), spec_start + 1)
+
+    segment = np.asarray(spec[:, spec_start:spec_end], dtype=np.float32)
+    out[:, :active_tokens] = _resample_time_axis(segment, active_tokens)
     return out
 
 
@@ -133,6 +242,8 @@ def visualize_val_outputs(
     window_starts = np.load(val_dir / "window_starts.npy", mmap_mode="r")
     window_lengths = np.load(val_dir / "window_lengths.npy", mmap_mode="r")
     filenames = _load_json(val_dir / "filenames.json")
+    spec_ms_per_bin = _spec_ms_per_timebin(spec_dir)
+    token_ms_default, token_ms_by_file = _load_token_ms_by_file(val_dir, meta)
 
     n_windows = int(logits.shape[0])
     if len(filenames) != n_windows:
@@ -172,7 +283,15 @@ def visualize_val_outputs(
             continue
 
         spec = np.load(spec_path)
-        spec_win = _pad_spec_window(spec, start=start, window_len=window_len)
+        token_ms = token_ms_by_file.get(filename, token_ms_default)
+        spec_win = _token_aligned_spec_window(
+            spec,
+            token_start=start,
+            token_length=length,
+            window_len=window_len,
+            token_ms_per_bin=token_ms,
+            spec_ms_per_bin=spec_ms_per_bin,
+        )
 
         logits_win = np.asarray(logits[idx])
         labels_win = np.asarray(labels_patches[idx]).astype(np.int64, copy=False)
@@ -292,4 +411,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
