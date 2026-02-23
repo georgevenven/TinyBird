@@ -4,7 +4,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-SPEC_ROOT="/spec/SongMAE_Bench_Data"
+SPEC_ROOT="/media/george/George-SSD/specs"
 MODE="classify"
 PROBE_MODE="lora"
 LORA_RANK="32"

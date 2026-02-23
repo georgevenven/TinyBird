@@ -101,9 +101,9 @@ while IFS=: read -r SPECIES BIRD_ID; do
     BIRD_COUNT=$((BIRD_COUNT + 1))
     PREP_OUT_DIR="$TEMP_ROOT/tinybird_pool/$SPECIES/$BIRD_ID"
 
-    TRAIN_SECONDS="32"
+    TRAIN_SECONDS="16"
     if [ "$SPECIES" == "Canary" ]; then
-        TRAIN_SECONDS="64"
+        TRAIN_SECONDS="32"
     fi
 
     if ! bash shell/classify_detect_bench.sh \
