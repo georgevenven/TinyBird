@@ -535,18 +535,17 @@ def plot_species_f1_curves(
         text = re.sub(r"[^a-z0-9]+", "_", text)
         return text.strip("_") or "species"
 
-    def _save_plot_with_svg(fig, png_path: str) -> str:
+    def _save_plot_with_pdf(fig, png_path: str) -> str:
         fig.savefig(png_path, bbox_inches="tight")
-        svg_path = os.path.splitext(png_path)[0] + ".svg"
-        fig.savefig(svg_path, format="svg", bbox_inches="tight")
-        return svg_path
+        pdf_path = os.path.splitext(png_path)[0] + ".pdf"
+        fig.savefig(pdf_path, format="pdf", bbox_inches="tight")
+        return pdf_path
 
     metrics = ["f1", "fer"] if metric == "both" else [metric]
     metric_labels = {"f1": "F1 Score (%)", "fer": "Frame Error Rate (%)"}
     metric_titles = {"f1": "F1", "fer": "FER"}
-    # Paper-friendly portrait ratio so two figures can sit side-by-side.
-    # Keep width stable and reduce height slightly for tighter page fit.
-    single_plot_figsize = (4.8, 6.8)
+    # Square panels for consistent width/height across exported figures.
+    single_plot_figsize = (4.8, 4.8)
 
     def _build_species_metric_series(rows: list[dict], metric_name: str):
         birds = sorted({row["bird"] for row in rows})
@@ -686,10 +685,10 @@ def plot_species_f1_curves(
             filename = f"eval_{metric_name}_{mode_tag}_{tag}_{_slugify(species)}.png"
             save_path = os.path.join(output_dir, filename)
             fig.tight_layout()
-            svg_path = _save_plot_with_svg(fig, save_path)
+            pdf_path = _save_plot_with_pdf(fig, save_path)
             plt.close(fig)
             saved_paths.append(save_path)
-            saved_paths.append(svg_path)
+            saved_paths.append(pdf_path)
 
     # Additional joined F1 figure with all species in one image.
     if "f1" in metrics and len(ordered_species) > 1:
@@ -732,9 +731,59 @@ def plot_species_f1_curves(
             mode_tag = mode or "all_modes"
             joined_path = os.path.join(output_dir, f"eval_f1_{mode_tag}_{tag}_species_joined.png")
             fig.subplots_adjust(left=0.055, right=0.995, bottom=0.14, top=0.90, wspace=0.10)
-            joined_svg = _save_plot_with_svg(fig, joined_path)
+            joined_pdf = _save_plot_with_pdf(fig, joined_path)
             saved_paths.append(joined_path)
-            saved_paths.append(joined_svg)
+            saved_paths.append(joined_pdf)
+        plt.close(fig)
+
+    # Additional joined figure with F1 on the first row and FER on the second row.
+    if "f1" in metrics and "fer" in metrics and len(ordered_species) > 0:
+        joined_figsize = (single_plot_figsize[0] * len(ordered_species), single_plot_figsize[1] * 2)
+        fig, axes = plt.subplots(
+            2,
+            len(ordered_species),
+            figsize=joined_figsize,
+            dpi=SPEC_DPI,
+            squeeze=False,
+            sharey="row",
+        )
+        any_drawn = False
+        for metric_row_idx, metric_name in enumerate(("f1", "fer")):
+            axes_row = axes[metric_row_idx]
+            for species_idx, species in enumerate(ordered_species):
+                ax = axes_row[species_idx]
+                rows = [row for row in data if row["species"] == species]
+                if not rows:
+                    ax.set_visible(False)
+                    continue
+                series = _build_species_metric_series(rows, metric_name)
+                if series is None:
+                    ax.set_visible(False)
+                    continue
+                _draw_species_metric_ax(
+                    ax,
+                    species_idx=species_idx,
+                    species=species,
+                    metric_name=metric_name,
+                    series=series,
+                )
+                if species_idx > 0:
+                    # Joined layout: keep only the left y-axis per row to reduce clutter.
+                    ax.set_ylabel("")
+                    ax.tick_params(axis="y", left=False, labelleft=False)
+                if metric_row_idx == 0:
+                    # Keep x-axis labels only on the bottom row.
+                    ax.set_xlabel("")
+                    ax.tick_params(axis="x", labelbottom=False)
+                any_drawn = True
+
+        if any_drawn:
+            mode_tag = mode or "all_modes"
+            joined_path = os.path.join(output_dir, f"eval_f1_fer_{mode_tag}_{tag}_species_joined.png")
+            fig.subplots_adjust(left=0.055, right=0.995, bottom=0.08, top=0.94, wspace=0.10, hspace=0.16)
+            joined_pdf = _save_plot_with_pdf(fig, joined_path)
+            saved_paths.append(joined_path)
+            saved_paths.append(joined_pdf)
         plt.close(fig)
 
     return saved_paths
@@ -764,13 +813,12 @@ def _scatter_umap(xy, labels, palette, path, title):
         idx = labels == lab
         if idx.any():
             plt.scatter(xy[idx, 0], xy[idx, 1], s=10, color=color, alpha=0.15, edgecolors="none")
-    plt.title(title, fontsize=24, fontweight="bold", loc="center")
     plt.xlabel("UMAP 1", fontsize=20, fontweight="bold")
     plt.ylabel("UMAP 2", fontsize=20, fontweight="bold")
     plt.xticks([])
     plt.yticks([])
     plt.tight_layout()
-    plt.savefig(path, dpi=300, format="png")
+    plt.savefig(path, dpi=300, format="pdf")
     plt.close()
 
 
@@ -779,7 +827,7 @@ def _fit_umap_embedding(embeddings, n_neighbors, deterministic):
         "n_components": 2,
         "n_neighbors": n_neighbors,
         "metric": "cosine",
-        "min_dist": 0.01,
+        "min_dist": 0.1,
     }
     if deterministic:
         reducer_kwargs["random_state"] = 42
@@ -802,32 +850,28 @@ def generate_umap_plots(npz_path: str, output_dir: str, umap_neighbors: int = 20
     
     base_palette = _build_palette(labels_down)
     
-    # Check available keys
-    keys = ["encoded_embeddings_after_pos_removal", "encoded_embeddings_before_pos_removal"]
-    encoded_variants = {}
-    for k in keys:
-        if k in npz:
-            encoded_variants[k.replace("encoded_embeddings_", "")] = npz[k]
+    if "patch_embeddings_before_pos_removal" not in npz:
+        raise KeyError(
+            f"`patch_embeddings_before_pos_removal` is missing in {npz_path}. "
+            f"Available keys: {list(npz.keys())}"
+        )
+    embedding_array = npz["patch_embeddings_before_pos_removal"]
     
     umap_dir = os.path.join(output_dir, "umap")
     os.makedirs(umap_dir, exist_ok=True)
     
     paths = {}
     
-    for variant_name, embedding_array in encoded_variants.items():
-        xy = _fit_umap_embedding(embedding_array, umap_neighbors, deterministic)
-        umap_path = os.path.join(umap_dir, f"encoded_{variant_name}.png")
-        
-        title_text = "Pos. Removal" if "after" in variant_name else "No Pos. Removal"
-        
-        _scatter_umap(
-            xy,
-            labels_down,
-            base_palette,
-            umap_path,
-            title=title_text,
-        )
-        paths[variant_name] = umap_path
-        print(f"Generated UMAP plot: {umap_path}")
+    xy = _fit_umap_embedding(embedding_array, umap_neighbors, deterministic)
+    umap_path = os.path.join(umap_dir, "patch_before_pos_removal.pdf")
+    _scatter_umap(
+        xy,
+        labels_down,
+        base_palette,
+        umap_path,
+        title="",
+    )
+    paths["patch_before_pos_removal"] = umap_path
+    print(f"Generated UMAP plot from `patch_embeddings_before_pos_removal`: {umap_path}")
         
     return paths

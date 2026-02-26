@@ -13,7 +13,7 @@ if __name__ == "__main__":
     
     parser.add_argument("--npz_path", type=str, required=True, help="Path to embeddings NPZ file")
     parser.add_argument("--output_dir", type=str, required=True, help="Directory to save plots")
-    parser.add_argument("--neighbors", type=int, default=100, help="Number of UMAP neighbors (default: 200)")
+    parser.add_argument("--neighbors", type=int, default=200, help="Number of UMAP neighbors (default: 200)")
     parser.add_argument("--deterministic", action="store_true", help="Use deterministic UMAP")
     
     args = parser.parse_args()

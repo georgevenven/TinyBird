@@ -42,6 +42,13 @@ def main():
     parser.add_argument("--checkpoint", type=str, default=None, help="Optional checkpoint filename to load")
     parser.add_argument("--per_patch_norm", action="store_true", help="Enable per-patch normalization for visualization")
     parser.add_argument("--inference_mode", action="store_true", help="Disable masking (autoencoder-style reconstruction)")
+    parser.add_argument(
+        "--image_format",
+        type=str,
+        default="png",
+        choices=["png", "pdf"],
+        help="Output format for saved visualizations",
+    )
     args = parser.parse_args()
 
     # Load model + config
@@ -188,9 +195,11 @@ def main():
             ax3.axis("off")
 
             fig2.tight_layout()
-            out_png2 = os.path.join(imgs_dir, f"{i:06d}_{fname}_overlay.png")
-            fig2.savefig(out_png2, dpi=300, facecolor='white', 
-                       edgecolor='none')
+            out_image = os.path.join(imgs_dir, f"{i:06d}_{fname}_overlay.{args.image_format}")
+            save_kwargs = {"facecolor": "white", "edgecolor": "none"}
+            if args.image_format == "png":
+                save_kwargs["dpi"] = 300
+            fig2.savefig(out_image, **save_kwargs)
             plt.close(fig2)
 
             # Append CSV

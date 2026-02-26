@@ -31,8 +31,8 @@ def _build_palette(labels, colormap=cm.tab20):
     return palette
 
 
-def _scatter(xy, labels, palette, path, title):
-    plt.figure(figsize=(8, 8), dpi=300)
+def _scatter(xy, labels, palette, path_base):
+    plt.figure(figsize=(5.5, 5.5), dpi=300)
     mask = labels >= 0
     if (~mask).any():
         plt.scatter(xy[~mask, 0], xy[~mask, 1], s=10, color="#404040", alpha=0.1, edgecolors="none")
@@ -40,12 +40,13 @@ def _scatter(xy, labels, palette, path, title):
         idx = labels == lab
         if idx.any():
             plt.scatter(xy[idx, 0], xy[idx, 1], s=10, color=color, alpha=0.15, edgecolors="none")
-    plt.title(title, fontsize=28, fontweight="bold", loc="left")
     plt.xlabel("UMAP 1", fontsize=20, fontweight="bold")
     plt.ylabel("UMAP 2", fontsize=20, fontweight="bold")
     plt.xticks([])
     plt.yticks([])
-    plt.savefig(path, bbox_inches="tight", dpi=300)
+    plt.tight_layout()
+    plt.savefig(f"{path_base}.png", bbox_inches="tight", dpi=300)
+    plt.savefig(f"{path_base}.pdf", bbox_inches="tight", dpi=300, format="pdf")
     plt.close()
 
 
@@ -54,7 +55,7 @@ def _fit_umap(embeddings, args):
         "n_components": 2,
         "n_neighbors": args.umap_neighbors,
         "metric": "cosine",
-        "min_dist": 0.01,
+        "min_dist": 0.1,
     }
     if args.deterministic:
         reducer_kwargs["random_state"] = 42
@@ -160,15 +161,14 @@ def main():
     umap_paths = {}
     for variant_name, embedding_array in encoded_variants.items():
         xy = _fit_umap(embedding_array, args)
-        umap_path = umap_dir / f"encoded_{variant_name}.png"
+        umap_path = umap_dir / f"encoded_{variant_name}_n{xy.shape[0]}"
         _scatter(
             xy,
             labels_down,
             base_palette,
             umap_path,
-            title=f"encoded | {variant_name}",
         )
-        umap_paths[variant_name] = str(umap_path)
+        umap_paths[variant_name] = str(umap_path.with_suffix(".png"))
 
     spectrogram_array = npz.get("spectrograms")
     if spectrogram_array is None:
