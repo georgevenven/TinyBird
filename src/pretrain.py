@@ -109,7 +109,7 @@ class Trainer():
         # Print parameter counts
         from utils import count_parameters
         count_parameters(self.tinybird)
-        
+
         # Initialize optimizer
         self.optimizer = AdamW(self.tinybird.parameters(), lr=config["lr"], weight_decay=config["weight_decay"])
         
@@ -161,10 +161,11 @@ class Trainer():
             
             # Apply loaded state to trainer
             self.starting_step = training_state['starting_step']
-            self.train_steps = training_state['steps']
-            self.train_loss_history = training_state['train_losses']
-            self.val_steps = training_state['steps']
-            self.val_loss_history = training_state['val_losses']
+            # Copy to avoid aliasing train/val step buffers to the same list.
+            self.train_steps = list(training_state.get('steps', []))
+            self.train_loss_history = list(training_state.get('train_losses', []))
+            self.val_steps = list(training_state.get('val_steps', []))
+            self.val_loss_history = list(training_state.get('val_losses', []))
             
             # Advance scheduler to correct step if training state was found
             if training_state['found_state']:
@@ -181,6 +182,8 @@ class Trainer():
             # Verify loss log exists for continuing training
             if not os.path.exists(self.loss_log_path):
                 print(f"Warning: Loss log not found at {self.loss_log_path}, starting fresh")
+                with open(self.loss_log_path, 'w') as f:
+                    f.write("step,train_loss,val_loss,gnorm,samples_processed,steps_per_sec,samples_per_sec\n")
 
 
     def step(self, batch, is_training=True):
@@ -197,7 +200,7 @@ class Trainer():
         """
         spectrograms, _ = batch
         x = spectrograms.to(self.device, non_blocking=True)  # (B, 1, H, W)
-        
+
         if is_training:
             self.tinybird.train()
             self.optimizer.zero_grad(set_to_none=True)
@@ -357,18 +360,16 @@ class Trainer():
                       f"Samples/sec = {samples_per_sec:.1f}")
 
                 if self.use_wandb:
-                    wandb.log(
-                        {
-                            "train_loss": train_loss,
-                            "val_loss": val_loss,
-                            "gnorm": gnorm,
-                            "samples_processed": samples_processed,
-                            "steps_per_sec": steps_per_sec,
-                            "samples_per_sec": samples_per_sec,
-                            "lr": current_lr,
-                        },
-                        step=step_num,
-                    )
+                    payload = {
+                        "train_loss": train_loss,
+                        "val_loss": val_loss,
+                        "gnorm": gnorm,
+                        "samples_processed": samples_processed,
+                        "steps_per_sec": steps_per_sec,
+                        "samples_per_sec": samples_per_sec,
+                        "lr": current_lr,
+                    }
+                    wandb.log(payload, step=step_num)
                 
                 # Save model weights
                 weight_path = os.path.join(self.weights_path, f"model_step_{step_num:06d}.pth")
@@ -474,7 +475,6 @@ if __name__ == "__main__":
         config.setdefault("mask_type", args.mask_type)
         config.setdefault("normalize_patches", True)  # Default to True for backward compatibility
         config["wandb"] = args.wandb
-
     else:
         # New training mode - validate required args
         if not args.train_dir or not args.val_dir or not args.run_name:

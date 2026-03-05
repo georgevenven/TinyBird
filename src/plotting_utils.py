@@ -217,8 +217,43 @@ def plot_loss_curves(
 
     fig, ax = plt.subplots(1, 1, figsize=figsize)
 
-    ax.plot(train_steps, train_losses, label="Training Loss", alpha=0.7, linewidth=1, color=TRAIN_COLOR)
-    ax.plot(val_steps, val_losses, label="Validation Loss", marker="o", markersize=3, linewidth=2, color=VAL_COLOR)
+    train_steps = list(train_steps)
+    train_losses = list(train_losses)
+    val_steps = list(val_steps)
+    val_losses = list(val_losses)
+
+    n_train = min(len(train_steps), len(train_losses))
+    n_val = min(len(val_steps), len(val_losses))
+    if len(train_steps) != len(train_losses):
+        print(
+            f"Warning: train loss history mismatch ({len(train_steps)} steps vs "
+            f"{len(train_losses)} losses); plotting first {n_train} points."
+        )
+    if len(val_steps) != len(val_losses):
+        print(
+            f"Warning: val loss history mismatch ({len(val_steps)} steps vs "
+            f"{len(val_losses)} losses); plotting first {n_val} points."
+        )
+
+    if n_train:
+        ax.plot(
+            train_steps[:n_train],
+            train_losses[:n_train],
+            label="Training Loss",
+            alpha=0.7,
+            linewidth=1,
+            color=TRAIN_COLOR,
+        )
+    if n_val:
+        ax.plot(
+            val_steps[:n_val],
+            val_losses[:n_val],
+            label="Validation Loss",
+            marker="o",
+            markersize=3,
+            linewidth=2,
+            color=VAL_COLOR,
+        )
     ax.set_xlabel("Training Steps")
     ax.set_ylabel("Loss")
     ax.set_title("Training and Validation Loss")

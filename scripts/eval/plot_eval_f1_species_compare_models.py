@@ -19,7 +19,7 @@ class ModelConfig:
 
 MODELS = (
     ModelConfig("songmae", "SongMAE", "#1f77b4"),  # blue
-    ModelConfig("aves", "AVES", "#d62728"),  # red
+    ModelConfig("aves", "birdAVES", "#d62728"),  # red
 )
 
 PREFERRED_SPECIES_ORDER = ["Bengalese_Finch", "Zebra_Finch", "Canary"]
@@ -375,7 +375,9 @@ def main() -> None:
 
     mode_tag = _make_slug(args.mode or "all_modes")
     probe_tag = _make_slug(args.probe_mode or "all")
-    out_png = os.path.join(output_dir, f"eval_f1_fer_{mode_tag}_{probe_tag}_songmae_vs_aves_joined.png")
+    out_png = os.path.join(
+        output_dir, f"eval_f1_fer_{mode_tag}_{probe_tag}_songmae_vs_birdaves_joined.png"
+    )
     saved_png, saved_pdf = _save_plot_with_pdf(fig, out_png)
     plt.close(fig)
 

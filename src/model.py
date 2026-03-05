@@ -113,6 +113,59 @@ class TinyBird(nn.Module):
         
         self.pos_enc = nn.Parameter(torch.randn(1, config["enc_hidden_d"], max_h, max_w))
 
+        # Optional homeostatic regularization bookkeeping.
+        # We collect FFN pre-activations from Transformer linear1 modules via forward hooks.
+        self._homeo_pre_acts = []
+        self._homeo_hook_handles = []
+
+    def _iter_homeo_target_modules(self):
+        """Yield modules whose outputs are treated as pre-activations for homeostatic loss."""
+        enc_layers = getattr(self.encoder, "layers", [])
+        dec_layers = getattr(self.decoder, "layers", [])
+        for layer in enc_layers:
+            mod = getattr(layer, "linear1", None)
+            if mod is not None:
+                yield mod
+        for layer in dec_layers:
+            mod = getattr(layer, "linear1", None)
+            if mod is not None:
+                yield mod
+
+    def _homeo_hook(self, module, inputs, output):
+        if isinstance(output, torch.Tensor):
+            self._homeo_pre_acts.append(output)
+
+    def set_homeostatic_tracking(self, enabled: bool):
+        """Enable/disable forward-hook collection for homeostatic pre-activations."""
+        enabled = bool(enabled)
+        if enabled and not self._homeo_hook_handles:
+            for mod in self._iter_homeo_target_modules():
+                self._homeo_hook_handles.append(mod.register_forward_hook(self._homeo_hook))
+        elif not enabled and self._homeo_hook_handles:
+            for handle in self._homeo_hook_handles:
+                handle.remove()
+            self._homeo_hook_handles.clear()
+            self._homeo_pre_acts.clear()
+
+    def clear_homeostatic_pre_activations(self):
+        self._homeo_pre_acts.clear()
+
+    def homeostatic_pre_activation_loss(self):
+        """
+        Compute L_homeo = (1 / (2B)) * ||Y_pre||_F^2 over collected pre-activations.
+        """
+        if not self._homeo_pre_acts:
+            return self.mask_token.new_zeros(())
+
+        batch_size = self._homeo_pre_acts[0].shape[0]
+        sq_sum = None
+        for y_pre in self._homeo_pre_acts:
+            # Compute in FP32 to avoid overflow when AMP stores activations in FP16/BF16.
+            y_pre_f32 = y_pre.float()
+            term = y_pre_f32.pow(2).sum()
+            sq_sum = term if sq_sum is None else (sq_sum + term)
+        return 0.5 * sq_sum / float(batch_size)
+
     def voronoi_mask(self, hw, p=0.75, c=0.1, device=None):
         """
         bernoulli is imprecise (probably fine)

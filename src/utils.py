@@ -340,7 +340,8 @@ def load_training_state(run_dir, eval_every=500):
     Returns:
         dict: Dictionary containing training state with keys:
             - 'starting_step': Next step to continue training from
-            - 'steps': List of step numbers
+            - 'steps': List of train step numbers
+            - 'val_steps': List of validation step numbers
             - 'train_losses': List of training losses
             - 'val_losses': List of validation losses
             - 'ema_train_losses': List of EMA training losses
@@ -355,6 +356,7 @@ def load_training_state(run_dir, eval_every=500):
     training_state = {
         'starting_step': 0,
         'steps': [],
+        'val_steps': [],
         'train_losses': [],
         'val_losses': [],
         'ema_train_losses': [],
@@ -368,49 +370,109 @@ def load_training_state(run_dir, eval_every=500):
         try:
             # Read CSV manually to avoid pandas dependency
             with open(loss_log_path, 'r') as f:
-                lines = f.readlines()[1:]  # Skip header
-            
-            if lines:
-                # Parse the last line to get the last step
-                last_line = lines[-1].strip().split(',')
-                last_step = int(last_line[0])
-                training_state['starting_step'] = last_step + eval_every
-                
-                # Load all loss history
+                raw_lines = [line.strip() for line in f.readlines() if line.strip()]
+
+            if raw_lines:
+                def _safe_float(value):
+                    value = value.strip()
+                    if value == "":
+                        return None
+                    try:
+                        return float(value)
+                    except ValueError:
+                        return None
+
+                def _safe_int(value):
+                    value = value.strip()
+                    if value == "":
+                        return None
+                    try:
+                        return int(value)
+                    except ValueError:
+                        return None
+
+                # Support both headered and headerless logs.
+                first_parts = [p.strip() for p in raw_lines[0].split(',')]
+                has_header = _safe_int(first_parts[0]) is None
+                if has_header:
+                    header = first_parts
+                    lines = raw_lines[1:]
+                    idx_step = header.index("step") if "step" in header else 0
+                    idx_train = header.index("train_loss") if "train_loss" in header else 1
+                    idx_val = header.index("val_loss") if "val_loss" in header else None
+                    idx_ema_train = header.index("ema_train_loss") if "ema_train_loss" in header else None
+                    idx_ema_val = header.index("ema_val_loss") if "ema_val_loss" in header else None
+                else:
+                    lines = raw_lines
+                    idx_step = 0
+                    idx_train = 1
+                    idx_val = 2
+                    idx_ema_train = None
+                    idx_ema_val = None
+
                 steps = []
+                val_steps = []
                 train_losses = []
                 val_losses = []
                 ema_train_losses = []
                 ema_val_losses = []
-                
+
                 for line in lines:
-                    parts = line.strip().split(',')
-                    if len(parts) >= 5:
-                        steps.append(int(parts[0]))
-                        train_losses.append(float(parts[1]))
-                        ema_train_losses.append(float(parts[2]))
-                        val_losses.append(float(parts[3]))
-                        ema_val_losses.append(float(parts[4]))
-                
-                # Store loss history
-                training_state['steps'] = steps
-                training_state['train_losses'] = train_losses
-                training_state['val_losses'] = val_losses
-                training_state['ema_train_losses'] = ema_train_losses
-                training_state['ema_val_losses'] = ema_val_losses
-                
-                # Set last EMA losses
-                if ema_train_losses and ema_val_losses:
-                    training_state['last_ema_train_loss'] = ema_train_losses[-1]
-                    training_state['last_ema_val_loss'] = ema_val_losses[-1]
-                
-                training_state['found_state'] = True
-                
-                print(f"Loaded training state. Continuing from step {training_state['starting_step']}")
-                if training_state['last_ema_train_loss'] is not None:
-                    print(f"Previous EMA train loss: {training_state['last_ema_train_loss']:.6f}")
-                if training_state['last_ema_val_loss'] is not None:
-                    print(f"Previous EMA val loss: {training_state['last_ema_val_loss']:.6f}")
+                    parts = [p.strip() for p in line.split(',')]
+                    if len(parts) <= max(idx_step, idx_train):
+                        continue
+
+                    step = _safe_int(parts[idx_step])
+                    train_loss = _safe_float(parts[idx_train])
+                    if step is None or train_loss is None:
+                        continue
+
+                    steps.append(step)
+                    train_losses.append(train_loss)
+
+                    if idx_val is not None and idx_val < len(parts):
+                        val_loss = _safe_float(parts[idx_val])
+                        if val_loss is not None:
+                            val_steps.append(step)
+                            val_losses.append(val_loss)
+
+                    if idx_ema_train is not None and idx_ema_train < len(parts):
+                        ema_train = _safe_float(parts[idx_ema_train])
+                        if ema_train is not None:
+                            ema_train_losses.append(ema_train)
+
+                    if idx_ema_val is not None and idx_ema_val < len(parts):
+                        ema_val = _safe_float(parts[idx_ema_val])
+                        if ema_val is not None:
+                            ema_val_losses.append(ema_val)
+
+                if steps:
+                    if len(steps) >= 2 and (steps[-1] - steps[-2]) == 1:
+                        next_step = steps[-1] + 1
+                    else:
+                        next_step = steps[-1] + max(1, int(eval_every))
+
+                    training_state['starting_step'] = next_step
+                    training_state['steps'] = steps
+                    training_state['val_steps'] = val_steps
+                    training_state['train_losses'] = train_losses
+                    training_state['val_losses'] = val_losses
+                    training_state['ema_train_losses'] = ema_train_losses
+                    training_state['ema_val_losses'] = ema_val_losses
+
+                    if ema_train_losses and ema_val_losses:
+                        training_state['last_ema_train_loss'] = ema_train_losses[-1]
+                        training_state['last_ema_val_loss'] = ema_val_losses[-1]
+
+                    training_state['found_state'] = True
+
+                    print(f"Loaded training state. Continuing from step {training_state['starting_step']}")
+                    if training_state['last_ema_train_loss'] is not None:
+                        print(f"Previous EMA train loss: {training_state['last_ema_train_loss']:.6f}")
+                    if training_state['last_ema_val_loss'] is not None:
+                        print(f"Previous EMA val loss: {training_state['last_ema_val_loss']:.6f}")
+                else:
+                    print("No parsable state in loss log, starting from step 0")
             else:
                 print("Loss log file is empty, starting from step 0")
         except Exception as e:

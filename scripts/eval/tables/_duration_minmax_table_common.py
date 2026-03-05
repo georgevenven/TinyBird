@@ -45,11 +45,26 @@ def to_float_or_none(raw):
         return None
 
 
-def fmt_score(f1_vals, fer_vals, precision):
+def _mean_std(vals):
+    if not vals:
+        return None, None
+    mean = sum(vals) / len(vals)
+    if len(vals) < 2:
+        return mean, 0.0
+    var = sum((x - mean) ** 2 for x in vals) / (len(vals) - 1)
+    return mean, var**0.5
+
+
+def fmt_score(f1_vals, fer_vals, precision, include_std=False):
     if not f1_vals or not fer_vals:
         return "-"
-    f1_mean = sum(f1_vals) / len(f1_vals)
-    fer_mean = sum(fer_vals) / len(fer_vals)
+    f1_mean, f1_std = _mean_std(f1_vals)
+    fer_mean, fer_std = _mean_std(fer_vals)
+    if include_std:
+        return (
+            f"{f1_mean:.{precision}f} +/- {f1_std:.{precision}f} / "
+            f"{fer_mean:.{precision}f} +/- {fer_std:.{precision}f}"
+        )
     return f"{f1_mean:.{precision}f} / {fer_mean:.{precision}f}"
 
 
@@ -97,6 +112,7 @@ def build_duration_min_max_table(
     species_order,
     model_name,
     precision,
+    include_std=False,
 ):
     eval_path = Path(eval_csv)
     if eval_path.is_dir():
@@ -177,8 +193,22 @@ def build_duration_min_max_table(
 
         min_stats = data[sp].get(min_sec, {"f1": [], "fer": []})
         max_stats = data[sp].get(max_sec, {"f1": [], "fer": []})
-        out_row.append(fmt_score(min_stats["f1"], min_stats["fer"], precision))
-        out_row.append(fmt_score(max_stats["f1"], max_stats["fer"], precision))
+        out_row.append(
+            fmt_score(
+                min_stats["f1"],
+                min_stats["fer"],
+                precision,
+                include_std=include_std,
+            )
+        )
+        out_row.append(
+            fmt_score(
+                max_stats["f1"],
+                max_stats["fer"],
+                precision,
+                include_std=include_std,
+            )
+        )
 
     out_path = Path(out_csv)
     out_path.parent.mkdir(parents=True, exist_ok=True)

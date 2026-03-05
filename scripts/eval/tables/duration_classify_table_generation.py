@@ -24,6 +24,11 @@ def main():
     ap.add_argument("--species", default="Canary,Zebra_Finch,Bengalese_Finch")
     ap.add_argument("--model_name", default="SongMAE")
     ap.add_argument("--precision", type=int, default=2)
+    ap.add_argument(
+        "--include_std",
+        action="store_true",
+        help="Include sample std-dev in each score cell as `mean +/- std`.",
+    )
     args = ap.parse_args()
 
     eval_path = Path(args.eval_csv)
@@ -42,9 +47,9 @@ def main():
         species_order=[x.strip() for x in args.species.split(",") if x.strip()],
         model_name=args.model_name,
         precision=args.precision,
+        include_std=args.include_std,
     )
 
 
 if __name__ == "__main__":
     main()
-
