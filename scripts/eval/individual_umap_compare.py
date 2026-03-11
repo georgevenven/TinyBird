@@ -48,6 +48,10 @@ def _parse_csv_ints(token: str) -> list[int]:
     return vals
 
 
+def _sanitize_embedding_key(key: str) -> str:
+    return _sanitize_token(key).replace("_embeddings", "")
+
+
 def _load_recording_stems_by_bird(annotation_json: Path) -> dict[str, list[str]]:
     data = json.loads(annotation_json.read_text(encoding="utf-8"))
     by_bird: dict[str, set[str]] = {}
@@ -448,28 +452,53 @@ def _build_songmae_representation(
 
 def _build_spectrogram_representation(
     per_bird_spec: dict[str, np.ndarray],
+    per_bird_lbl: dict[str, np.ndarray],
     window_bins: int,
     hop_bins: int,
     max_points_per_bird: int,
     seed: int,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     x_parts = []
     y_parts = []
+    s_parts = []
     for bird_id, spec in sorted(per_bird_spec.items()):
+        lbl = per_bird_lbl.get(bird_id)
+        if lbl is None or lbl.ndim != 1:
+            lbl = np.full((spec.shape[0],), fill_value=-1, dtype=np.int64)
+        n = min(int(spec.shape[0]), int(lbl.shape[0]))
+        if n <= 0:
+            continue
+        spec = spec[:n]
+        lbl = lbl[:n]
         windowed = _window_spectrogram(spec, window_bins=window_bins, hop_bins=hop_bins)
-        windowed = _subsample_rows(
-            windowed,
+        windowed_lbl = _pool_labels(lbl, window=window_bins, hop=hop_bins)
+        m = min(int(windowed.shape[0]), int(windowed_lbl.shape[0]))
+        if m <= 0:
+            continue
+        windowed = windowed[:m]
+        windowed_lbl = windowed_lbl[:m]
+        idx = _sample_indices(
+            windowed.shape[0],
             max_rows=max_points_per_bird,
             seed=seed,
             key=f"spec::{bird_id}::w{window_bins}::h{hop_bins}",
         )
+        if idx.size == 0:
+            continue
+        windowed = windowed[idx]
+        windowed_lbl = windowed_lbl[idx]
         if windowed.shape[0] == 0:
             continue
         x_parts.append(windowed)
         y_parts.extend([bird_id] * windowed.shape[0])
+        s_parts.append(windowed_lbl)
     if not x_parts:
-        return np.zeros((0, 1), dtype=np.float32), np.asarray([], dtype=object)
-    return np.vstack(x_parts), np.asarray(y_parts, dtype=object)
+        return (
+            np.zeros((0, 1), dtype=np.float32),
+            np.asarray([], dtype=object),
+            np.asarray([], dtype=np.int64),
+        )
+    return np.vstack(x_parts), np.asarray(y_parts, dtype=object), np.concatenate(s_parts, axis=0)
 
 
 def main():
@@ -511,6 +540,17 @@ def main():
     )
     parser.add_argument("--spec_window_bins", type=int, default=32, help="Raw spectrogram window size in timebins.")
     parser.add_argument("--spec_window_hop_bins", type=int, default=16, help="Raw spectrogram window hop in timebins.")
+    parser.add_argument(
+        "--songmae_embedding_key",
+        default="encoded_embeddings_after_pos_removal",
+        choices=[
+            "encoded_embeddings_before_pos_removal",
+            "encoded_embeddings_after_pos_removal",
+            "patch_embeddings_before_pos_removal",
+            "patch_embeddings_after_pos_removal",
+        ],
+        help="Which NPZ embedding tensor to pool for the SongMAE representation.",
+    )
     parser.add_argument(
         "--no_spec_baseline",
         action="store_true",
@@ -579,8 +619,9 @@ def main():
         raise SystemExit("No birds have enough recordings after filtering.")
 
     per_bird_emb: dict[str, np.ndarray] = {}
-    per_bird_lbl: dict[str, np.ndarray] = {}
+    per_bird_patch_lbl: dict[str, np.ndarray] = {}
     per_bird_spec: dict[str, np.ndarray] = {}
+    per_bird_spec_lbl: dict[str, np.ndarray] = {}
     extraction_meta = {}
 
     for bird_id in sorted(sampled_recordings.keys()):
@@ -621,41 +662,55 @@ def main():
             print(f"[reuse] bird={bird_id} npz={npz_path}")
 
         with np.load(npz_path, allow_pickle=True) as npz:
-            emb = np.asarray(npz["patch_embeddings_after_pos_removal"], dtype=np.float32)
+            if args.songmae_embedding_key not in npz:
+                raise SystemExit(
+                    f"Embedding key '{args.songmae_embedding_key}' not found in {npz_path}"
+                )
+            emb = np.asarray(npz[args.songmae_embedding_key], dtype=np.float32)
             spec = np.asarray(npz["spectrograms"], dtype=np.float32)
             if "labels_downsampled" in npz:
-                lbl = np.asarray(npz["labels_downsampled"], dtype=np.int64)
+                patch_lbl = np.asarray(npz["labels_downsampled"], dtype=np.int64)
             else:
-                lbl = np.full((emb.shape[0],), fill_value=-1, dtype=np.int64)
+                patch_lbl = np.full((emb.shape[0],), fill_value=-1, dtype=np.int64)
+            if "labels_original" in npz:
+                spec_lbl = np.asarray(npz["labels_original"], dtype=np.int64)
+            elif patch_lbl.shape[0] == spec.shape[0]:
+                spec_lbl = patch_lbl.copy()
+            else:
+                spec_lbl = np.full((spec.shape[0],), fill_value=-1, dtype=np.int64)
         if emb.ndim != 2 or emb.shape[0] == 0:
-            skipped_birds[bird_id] = "empty or invalid patch_embeddings_after_pos_removal"
+            skipped_birds[bird_id] = f"empty or invalid {args.songmae_embedding_key}"
             continue
         if spec.ndim != 2 or spec.shape[0] == 0:
             skipped_birds[bird_id] = "empty or invalid spectrograms"
             continue
         per_bird_emb[bird_id] = emb
-        per_bird_lbl[bird_id] = lbl
+        per_bird_patch_lbl[bird_id] = patch_lbl
         per_bird_spec[bird_id] = spec
+        per_bird_spec_lbl[bird_id] = spec_lbl
 
     for bird_id in list(skipped_birds.keys()):
         if bird_id in per_bird_emb:
             del per_bird_emb[bird_id]
-        if bird_id in per_bird_lbl:
-            del per_bird_lbl[bird_id]
+        if bird_id in per_bird_patch_lbl:
+            del per_bird_patch_lbl[bird_id]
         if bird_id in per_bird_spec:
             del per_bird_spec[bird_id]
+        if bird_id in per_bird_spec_lbl:
+            del per_bird_spec_lbl[bird_id]
 
     if not per_bird_emb or not per_bird_spec:
         raise SystemExit("No valid per-bird embeddings/spectrograms available after extraction.")
 
     generated = {}
+    songmae_embedding_tag = _sanitize_embedding_key(args.songmae_embedding_key)
 
     for window in pool_windows:
         pooling_hop = max(1, int(round(window * args.pool_hop_ratio)))
-        rep_name = f"songmae_pool_{args.pool_mode}_w{window}_h{pooling_hop}"
+        rep_name = f"songmae_{songmae_embedding_tag}_pool_{args.pool_mode}_w{window}_h{pooling_hop}"
         x, y, s = _build_songmae_representation(
             per_bird_emb=per_bird_emb,
-            per_bird_lbl=per_bird_lbl,
+            per_bird_lbl=per_bird_patch_lbl,
             pooling_window=window,
             pooling_mode=args.pool_mode,
             pooling_hop=pooling_hop,
@@ -697,8 +752,9 @@ def main():
 
     if not args.no_spec_baseline:
         spec_rep_name = f"spectrogram_windows_w{args.spec_window_bins}_h{args.spec_window_hop_bins}"
-        x_spec, y_spec = _build_spectrogram_representation(
+        x_spec, y_spec, s_spec = _build_spectrogram_representation(
             per_bird_spec=per_bird_spec,
+            per_bird_lbl=per_bird_spec_lbl,
             window_bins=args.spec_window_bins,
             hop_bins=args.spec_window_hop_bins,
             max_points_per_bird=args.max_points_per_bird,
@@ -716,12 +772,24 @@ def main():
             )
             out_base = umap_dir / spec_rep_name
             _scatter_umap(xy=xy_spec, labels=y_spec, title=f"{args.species} | {spec_rep_name}", out_base=out_base)
-            generated[spec_rep_name] = {
+            rep_meta = {
                 "points": int(x_spec.shape[0]),
                 "dims": int(x_spec.shape[1]),
                 "png": str(out_base.with_suffix(".png")),
                 "pdf": str(out_base.with_suffix(".pdf")),
             }
+            if args.syllable_plot and s_spec.shape[0] == x_spec.shape[0]:
+                syll_base = umap_dir / f"{spec_rep_name}_syllable"
+                _scatter_umap_syllables(
+                    xy=xy_spec,
+                    labels=s_spec,
+                    bird_labels=y_spec,
+                    title=f"{args.species} | {spec_rep_name} | syllable",
+                    out_base=syll_base,
+                )
+                rep_meta["syllable_png"] = str(syll_base.with_suffix(".png"))
+                rep_meta["syllable_pdf"] = str(syll_base.with_suffix(".pdf"))
+            generated[spec_rep_name] = rep_meta
         else:
             print(f"[skip] {spec_rep_name}: not enough points ({x_spec.shape[0]})")
 
@@ -748,6 +816,7 @@ def main():
         "extraction_meta": extraction_meta,
         "pool_windows": pool_windows,
         "pool_mode": args.pool_mode,
+        "songmae_embedding_key": args.songmae_embedding_key,
         "pool_hop_ratio": float(args.pool_hop_ratio),
         "syllable_plot": bool(args.syllable_plot),
         "spec_baseline": bool(not args.no_spec_baseline),

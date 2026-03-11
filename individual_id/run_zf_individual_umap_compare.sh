@@ -20,6 +20,7 @@ POOL_MODE="mean"
 POOL_HOP_RATIO="0.5"
 SPEC_WINDOW_BINS="32"
 SPEC_WINDOW_HOP_BINS="16"
+SONGMAE_EMBEDDING_KEY="encoded_embeddings_after_pos_removal"
 MAX_POINTS_PER_BIRD="1500"
 NUM_TIMEBINS="5000000"
 UMAP_NEIGHBORS="100"
@@ -54,6 +55,7 @@ Optional:
   --pool_hop_ratio FLOAT          Default: ${POOL_HOP_RATIO}
   --spec_window_bins N            Default: ${SPEC_WINDOW_BINS}
   --spec_window_hop_bins N        Default: ${SPEC_WINDOW_HOP_BINS}
+  --songmae_embedding_key NAME    Default: ${SONGMAE_EMBEDDING_KEY}
   --max_points_per_bird N         Default: ${MAX_POINTS_PER_BIRD}
   --num_timebins N                Default: ${NUM_TIMEBINS}
   --umap_neighbors N              Default: ${UMAP_NEIGHBORS}
@@ -119,6 +121,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --spec_window_hop_bins)
             SPEC_WINDOW_HOP_BINS="$2"
+            shift 2
+            ;;
+        --songmae_embedding_key)
+            SONGMAE_EMBEDDING_KEY="$2"
             shift 2
             ;;
         --max_points_per_bird)
@@ -193,6 +199,7 @@ CMD=(
     --pool_hop_ratio "$POOL_HOP_RATIO"
     --spec_window_bins "$SPEC_WINDOW_BINS"
     --spec_window_hop_bins "$SPEC_WINDOW_HOP_BINS"
+    --songmae_embedding_key "$SONGMAE_EMBEDDING_KEY"
     --max_points_per_bird "$MAX_POINTS_PER_BIRD"
     --umap_neighbors "$UMAP_NEIGHBORS"
     --umap_min_dist "$UMAP_MIN_DIST"
