@@ -283,10 +283,14 @@ def main(args):
                         spec_flat = spec_flat[:-pad_amnt]
                         labels_segment = labels_segment[:-pad_amnt]
 
-                    # Downsample labels to patch resolution
-                    # We do this after trimming to ensure alignment
-                    # labels is 1D [Timebins]
-                    labels_reshaped = labels_segment.float().view(1, 1, -1)
+                    # Downsample labels to patch resolution.
+                    # Right-pad to the next patch boundary so label count matches the
+                    # ceil-style patch count implied by the padded encoder input.
+                    label_pool_pad = (-labels_segment.numel()) % patch_width
+                    labels_for_pool = labels_segment
+                    if label_pool_pad > 0:
+                        labels_for_pool = F.pad(labels_for_pool, (0, label_pool_pad), mode='constant', value=-1)
+                    labels_reshaped = labels_for_pool.float().view(1, 1, -1)
                     labels_down = F.max_pool1d(labels_reshaped, kernel_size=patch_width, stride=patch_width).view(-1).long()
 
                     # Append to lists
