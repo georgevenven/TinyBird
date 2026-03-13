@@ -181,23 +181,39 @@ def _pool_embeddings(emb: np.ndarray, window: int, mode: str, hop: int | None = 
     return np.vstack(out)
 
 
-def _window_spectrogram(spec: np.ndarray, window_bins: int, hop_bins: int) -> np.ndarray:
+def _window_spectrogram(
+    spec: np.ndarray,
+    window_bins: int,
+    hop_bins: int,
+    feature_mode: str = "flatten",
+) -> np.ndarray:
     if spec.ndim != 2:
         raise ValueError(f"Expected 2D spectrogram, got shape={spec.shape}")
+    if feature_mode == "flatten":
+        out_dim = spec.shape[1] * window_bins
+    elif feature_mode == "mean_freq":
+        out_dim = window_bins
+    else:
+        raise ValueError(f"Unknown spectrogram feature_mode={feature_mode}")
     if spec.shape[0] == 0:
-        return np.zeros((0, spec.shape[1] * window_bins), dtype=np.float32)
+        return np.zeros((0, out_dim), dtype=np.float32)
+
+    def _reduce_chunk(chunk: np.ndarray) -> np.ndarray:
+        if feature_mode == "flatten":
+            return chunk.reshape(-1).astype(np.float32, copy=False)
+        return chunk.mean(axis=1).astype(np.float32, copy=False)
 
     if spec.shape[0] < window_bins:
         pad = np.zeros((window_bins - spec.shape[0], spec.shape[1]), dtype=spec.dtype)
         chunk = np.vstack([spec, pad])
-        return chunk.reshape(1, -1).astype(np.float32, copy=False)
+        return _reduce_chunk(chunk)[None, :]
 
     out = []
     for start in range(0, spec.shape[0] - window_bins + 1, hop_bins):
         chunk = spec[start : start + window_bins]
-        out.append(chunk.reshape(-1))
+        out.append(_reduce_chunk(chunk))
     if not out:
-        return np.zeros((0, spec.shape[1] * window_bins), dtype=np.float32)
+        return np.zeros((0, out_dim), dtype=np.float32)
     return np.vstack(out).astype(np.float32, copy=False)
 
 
@@ -455,6 +471,7 @@ def _build_spectrogram_representation(
     per_bird_lbl: dict[str, np.ndarray],
     window_bins: int,
     hop_bins: int,
+    feature_mode: str,
     max_points_per_bird: int,
     seed: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -470,7 +487,12 @@ def _build_spectrogram_representation(
             continue
         spec = spec[:n]
         lbl = lbl[:n]
-        windowed = _window_spectrogram(spec, window_bins=window_bins, hop_bins=hop_bins)
+        windowed = _window_spectrogram(
+            spec,
+            window_bins=window_bins,
+            hop_bins=hop_bins,
+            feature_mode=feature_mode,
+        )
         windowed_lbl = _pool_labels(lbl, window=window_bins, hop=hop_bins)
         m = min(int(windowed.shape[0]), int(windowed_lbl.shape[0]))
         if m <= 0:
@@ -540,6 +562,17 @@ def main():
     )
     parser.add_argument("--spec_window_bins", type=int, default=32, help="Raw spectrogram window size in timebins.")
     parser.add_argument("--spec_window_hop_bins", type=int, default=16, help="Raw spectrogram window hop in timebins.")
+    parser.add_argument(
+        "--spec_scale_by_patch_width",
+        action="store_true",
+        help="Scale spectrogram window/hop by the SongMAE patch width stored in the extracted NPZs.",
+    )
+    parser.add_argument(
+        "--spec_feature_mode",
+        default="flatten",
+        choices=["flatten", "mean_freq"],
+        help="How to convert each spectrogram window into a feature vector.",
+    )
     parser.add_argument(
         "--songmae_embedding_key",
         default="encoded_embeddings_after_pos_removal",
@@ -622,6 +655,7 @@ def main():
     per_bird_patch_lbl: dict[str, np.ndarray] = {}
     per_bird_spec: dict[str, np.ndarray] = {}
     per_bird_spec_lbl: dict[str, np.ndarray] = {}
+    per_bird_patch_width: dict[str, int] = {}
     extraction_meta = {}
 
     for bird_id in sorted(sampled_recordings.keys()):
@@ -668,6 +702,10 @@ def main():
                 )
             emb = np.asarray(npz[args.songmae_embedding_key], dtype=np.float32)
             spec = np.asarray(npz["spectrograms"], dtype=np.float32)
+            if "patch_width" in npz:
+                patch_width = int(np.asarray(npz["patch_width"]).reshape(-1)[0])
+            else:
+                patch_width = 1
             if "labels_downsampled" in npz:
                 patch_lbl = np.asarray(npz["labels_downsampled"], dtype=np.int64)
             else:
@@ -688,6 +726,7 @@ def main():
         per_bird_patch_lbl[bird_id] = patch_lbl
         per_bird_spec[bird_id] = spec
         per_bird_spec_lbl[bird_id] = spec_lbl
+        per_bird_patch_width[bird_id] = patch_width
 
     for bird_id in list(skipped_birds.keys()):
         if bird_id in per_bird_emb:
@@ -698,9 +737,25 @@ def main():
             del per_bird_spec[bird_id]
         if bird_id in per_bird_spec_lbl:
             del per_bird_spec_lbl[bird_id]
+        if bird_id in per_bird_patch_width:
+            del per_bird_patch_width[bird_id]
 
     if not per_bird_emb or not per_bird_spec:
         raise SystemExit("No valid per-bird embeddings/spectrograms available after extraction.")
+
+    spec_patch_width_scale = 1
+    if not args.no_spec_baseline and args.spec_scale_by_patch_width:
+        patch_widths = sorted({int(per_bird_patch_width[bird_id]) for bird_id in per_bird_spec.keys()})
+        if not patch_widths:
+            raise SystemExit("Unable to determine patch_width for spectrogram scaling.")
+        if len(patch_widths) != 1:
+            raise SystemExit(
+                f"Expected one patch_width for spectrogram scaling, found: {patch_widths}"
+            )
+        spec_patch_width_scale = patch_widths[0]
+
+    effective_spec_window_bins = int(args.spec_window_bins * spec_patch_width_scale)
+    effective_spec_hop_bins = int(args.spec_window_hop_bins * spec_patch_width_scale)
 
     generated = {}
     songmae_embedding_tag = _sanitize_embedding_key(args.songmae_embedding_key)
@@ -751,12 +806,19 @@ def main():
         generated[rep_name] = rep_meta
 
     if not args.no_spec_baseline:
-        spec_rep_name = f"spectrogram_windows_w{args.spec_window_bins}_h{args.spec_window_hop_bins}"
+        if args.spec_feature_mode == "flatten":
+            spec_rep_name = f"spectrogram_windows_w{effective_spec_window_bins}_h{effective_spec_hop_bins}"
+        else:
+            spec_rep_name = (
+                f"spectrogram_{args.spec_feature_mode}_windows_w"
+                f"{effective_spec_window_bins}_h{effective_spec_hop_bins}"
+            )
         x_spec, y_spec, s_spec = _build_spectrogram_representation(
             per_bird_spec=per_bird_spec,
             per_bird_lbl=per_bird_spec_lbl,
-            window_bins=args.spec_window_bins,
-            hop_bins=args.spec_window_hop_bins,
+            window_bins=effective_spec_window_bins,
+            hop_bins=effective_spec_hop_bins,
+            feature_mode=args.spec_feature_mode,
             max_points_per_bird=args.max_points_per_bird,
             seed=args.seed,
         )
@@ -820,8 +882,13 @@ def main():
         "pool_hop_ratio": float(args.pool_hop_ratio),
         "syllable_plot": bool(args.syllable_plot),
         "spec_baseline": bool(not args.no_spec_baseline),
-        "spec_window_bins": int(args.spec_window_bins),
-        "spec_window_hop_bins": int(args.spec_window_hop_bins),
+        "spec_window_bins_requested": int(args.spec_window_bins),
+        "spec_window_hop_bins_requested": int(args.spec_window_hop_bins),
+        "spec_scale_by_patch_width": bool(args.spec_scale_by_patch_width),
+        "spec_patch_width_scale": int(spec_patch_width_scale),
+        "spec_window_bins": int(effective_spec_window_bins),
+        "spec_window_hop_bins": int(effective_spec_hop_bins),
+        "spec_feature_mode": args.spec_feature_mode,
         "generated_umaps": generated,
     }
 
