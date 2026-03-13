@@ -14,19 +14,34 @@ SongMAE is the current project name. The codebase still contains many `TinyBird`
 
 Current repo-local checkpoints and configs:
 
-The XCM checkpoints below include weights trained through step `500000` for the long-run XCM pretraining runs.
+The exported XCM checkpoints below come from the long-run XCM pretraining runs, with final saved checkpoints at step `499999` or `500000` depending on the run.
+
+Expected run layout:
+
+```text
+train_name/
+  audio_params.json
+  config.json
+  weights/
+    model_step_000500.pth
+    model_step_001000.pth
+    ...
+```
+
+`scripts/eval/eval_embedding.py` and `src/extract_embedding.py` expect `--run_dir` to point at the run directory itself. The loader reads `config.json` from the run root and loads checkpoints from `weights/`. If `--checkpoint` is omitted, it automatically picks the latest `model_step_*.pth`. If `--checkpoint` is provided, it can be either a filename inside `weights/` or an absolute path to a checkpoint file.
 
 | Patch size | Spectrogram grid | Weights | Config |
 | --- | --- | --- | --- |
-| `32 mel bins x 1 timebin` | `mels=128`, `patch_height=32`, `patch_width=1`, `num_timebins=1024` | [weights](runs/xcm_voronoi_mask_no_normalize_32h_1w/weights/model_step_499999.pth) | [config](runs/xcm_voronoi_mask_no_normalize_32h_1w/config.json) |
-| `64 mel bins x 1 timebin` | `mels=128`, `patch_height=64`, `patch_width=1`, `num_timebins=1024` | [weights](runs/xcm_voronoi_mask_no_normalize_64h_1w/weights/model_step_499999.pth) | [config](runs/xcm_voronoi_mask_no_normalize_64h_1w/config.json) |
-| `32 mel bins x 10 timebins` | `mels=128`, `patch_height=32`, `patch_width=10`, `num_timebins=1000` | [weights](runs/xcm_voronoi_mask_no_normalize_32h_10w_zf_scratch10k_bs24_20260312_143950/weights/model_step_009999.pth) | [config](runs/xcm_voronoi_mask_no_normalize_32h_10w_zf_scratch10k_bs24_20260312_143950/config.json) |
-| `128 mel bins x 1 timebin` | `mels=128`, `patch_height=128`, `patch_width=1`, `num_timebins=1024` | [weights](runs/xcm_voronoi_mask_no_normalize_128h_1w_bf_scratch10k_bs24_20260312_153130/weights/model_step_009999.pth) | [config](runs/xcm_voronoi_mask_no_normalize_128h_1w_bf_scratch10k_bs24_20260312_153130/config.json) |
+| `32 mel bins x 1 timebin` | `mels=128`, `patch_height=32`, `patch_width=1`, `num_timebins=1024` | [weights](github_assets/xcm_voronoi_mask_no_normalize_32h_1w/weights/model_step_499999.pth) | [config](github_assets/xcm_voronoi_mask_no_normalize_32h_1w/config.json) |
+| `32 mel bins x 10 timebins` | `mels=128`, `patch_height=32`, `patch_width=10`, `num_timebins=1000` | [weights](github_assets/xcm_voronoi_mask_no_normalize_32h_10w/weights/model_step_499999.pth) | [config](github_assets/xcm_voronoi_mask_no_normalize_32h_10w/config.json) |
+| `128 mel bins x 1 timebin` | `mels=128`, `patch_height=128`, `patch_width=1`, `num_timebins=1024` | [weights](github_assets/xcm_voronoi_mask_no_normalize_128h_1w/weights/model_step_500000.pth) | [config](github_assets/xcm_voronoi_mask_no_normalize_128h_1w/config.json) |
 
 Recommended starting points:
 
 - The `32 mel bins x 10 timebins` model (`32h x 10w`) is the best coarse setting here for tasks such as individual identification.
 - The `128 mel bins x 1 timebin` model (`128h x 1w`) is the better fine-grained setting here for tasks such as birdsong syllable clustering.
+
+Each exported folder in `github_assets/` also includes an `audio_params.json` copied from the XCM spectrogram pipeline. Those files record the preprocessing and normalization expected by the checkpoints: `mels=128`, `sr=32000`, `hop_size=64`, `fft=1024`, plus the XCM spectrogram `mean` and `std`. The checkpoint loader itself uses `config.json`, but the paired `audio_params.json` is useful because it documents the XCM feature settings these runs were trained with and is reused by parts of the data pipeline that load normalization stats from the run directory.
 
 ## Mels vs. Patch Config
 

@@ -13,3 +13,7 @@
 /temp
 scripts/concat_eval_f1_score_files.py
 processed_results.zip
+
+# Allow exported checkpoint metadata to be committed.
+!github_assets/**/config.json
+!github_assets/**/audio_params.json
