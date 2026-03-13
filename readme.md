@@ -7,6 +7,7 @@ SongMAE is the current project name. The codebase still contains many `TinyBird`
 - SongMAE is a pretrained foundation model for birdsong representation learning at the syllable and within-song level.
 - It is trained as a masked autoencoder on spectrograms; after pretraining, the decoder is typically discarded and the encoder is used as the representation model.
 - Its embeddings can be used for downstream analysis tasks such as unsupervised syllable clustering and individual identification.
+- Additional masked-prediction pretraining on new in-domain spectrograms can be helpful when adapting the model to species or recording conditions that were not well covered during the original pretraining run.
 - The pretrained encoder can be supervised fine-tuned with `src/supervised_train.py` for song detection, unit detection, and syllable classification.
 
 ## Pretrained Checkpoints
@@ -15,12 +16,17 @@ Current repo-local checkpoints and configs:
 
 The XCM checkpoints below include weights trained through step `500000` for the long-run XCM pretraining runs.
 
-| Variant | Spectrogram grid | Weights | Config | Notes |
-| --- | --- | --- | --- | --- |
-| SongMAE `32h x 1w` | `mels=128`, `patch_height=32`, `patch_width=1`, `num_timebins=1024` | [weights](runs/xcm_voronoi_mask_no_normalize_32h_1w/weights/model_step_499999.pth) | [config](runs/xcm_voronoi_mask_no_normalize_32h_1w/config.json) | `max_seq=4096` |
-| SongMAE `64h x 1w` | `mels=128`, `patch_height=64`, `patch_width=1`, `num_timebins=1024` | [weights](runs/xcm_voronoi_mask_no_normalize_64h_1w/weights/model_step_499999.pth) | [config](runs/xcm_voronoi_mask_no_normalize_64h_1w/config.json) | `max_seq=2048` |
-| SongMAE `32h x 10w` | `mels=128`, `patch_height=32`, `patch_width=10`, `num_timebins=1000` | [weights](runs/xcm_voronoi_mask_no_normalize_32h_10w_zf_scratch10k_bs24_20260312_143950/weights/model_step_009999.pth) | [config](runs/xcm_voronoi_mask_no_normalize_32h_10w_zf_scratch10k_bs24_20260312_143950/config.json) | `max_seq=400` |
-| SongMAE `128h x 1w` | `mels=128`, `patch_height=128`, `patch_width=1`, `num_timebins=1024` | [weights](runs/xcm_voronoi_mask_no_normalize_128h_1w_bf_scratch10k_bs24_20260312_153130/weights/model_step_009999.pth) | [config](runs/xcm_voronoi_mask_no_normalize_128h_1w_bf_scratch10k_bs24_20260312_153130/config.json) | `max_seq=1024` |
+| Patch size | Spectrogram grid | Weights | Config |
+| --- | --- | --- | --- |
+| `32 mel bins x 1 timebin` | `mels=128`, `patch_height=32`, `patch_width=1`, `num_timebins=1024` | [weights](runs/xcm_voronoi_mask_no_normalize_32h_1w/weights/model_step_499999.pth) | [config](runs/xcm_voronoi_mask_no_normalize_32h_1w/config.json) |
+| `64 mel bins x 1 timebin` | `mels=128`, `patch_height=64`, `patch_width=1`, `num_timebins=1024` | [weights](runs/xcm_voronoi_mask_no_normalize_64h_1w/weights/model_step_499999.pth) | [config](runs/xcm_voronoi_mask_no_normalize_64h_1w/config.json) |
+| `32 mel bins x 10 timebins` | `mels=128`, `patch_height=32`, `patch_width=10`, `num_timebins=1000` | [weights](runs/xcm_voronoi_mask_no_normalize_32h_10w_zf_scratch10k_bs24_20260312_143950/weights/model_step_009999.pth) | [config](runs/xcm_voronoi_mask_no_normalize_32h_10w_zf_scratch10k_bs24_20260312_143950/config.json) |
+| `128 mel bins x 1 timebin` | `mels=128`, `patch_height=128`, `patch_width=1`, `num_timebins=1024` | [weights](runs/xcm_voronoi_mask_no_normalize_128h_1w_bf_scratch10k_bs24_20260312_153130/weights/model_step_009999.pth) | [config](runs/xcm_voronoi_mask_no_normalize_128h_1w_bf_scratch10k_bs24_20260312_153130/config.json) |
+
+Recommended starting points:
+
+- The `32 mel bins x 10 timebins` model (`32h x 10w`) is the best coarse setting here for tasks such as individual identification.
+- The `128 mel bins x 1 timebin` model (`128h x 1w`) is the better fine-grained setting here for tasks such as birdsong syllable clustering.
 
 ## Mels vs. Patch Config
 
