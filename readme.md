@@ -4,17 +4,16 @@ SongMAE is the current project name. The codebase still contains many `TinyBird`
 
 ## Model Summary
 
-The bullets below are placeholders for now.
-
-- Lorem ipsum dolor sit amet, consectetur adipiscing elit.
-- Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.
-- Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.
-- Duis aute irure dolor in reprehenderit in voluptate velit esse cillum.
-- Excepteur sint occaecat cupidatat non proident, sunt in culpa.
+- SongMAE is a pretrained foundation model for birdsong representation learning at the syllable and within-song level.
+- It is trained as a masked autoencoder on spectrograms; after pretraining, the decoder is typically discarded and the encoder is used as the representation model.
+- Its embeddings can be used for downstream analysis tasks such as unsupervised syllable clustering and individual identification.
+- The pretrained encoder can be supervised fine-tuned with `src/supervised_train.py` for song detection, unit detection, and syllable classification.
 
 ## Pretrained Checkpoints
 
 Current repo-local checkpoints and configs:
+
+The XCM checkpoints below include weights trained through step `500000` for the long-run XCM pretraining runs.
 
 | Variant | Spectrogram grid | Weights | Config | Notes |
 | --- | --- | --- | --- | --- |
@@ -174,3 +173,30 @@ Two details matter when reading these arrays:
 
 - Each embedding row is one temporal patch after flattening the vertical patch axis, so the feature width is `num_patches_height * D`, not just `D`.
 - `encoded_embeddings_after_pos_removal` is the array used by `scripts/eval/eval_embedding.py` for the default UMAP plots.
+
+## To Do Next SWE Goals
+
+- [ ] We need docs pretty bad to explain the codebase (when updating / cleaning up code make it)
+- [ ] INHERITANCE IN THE DATACLASS, AND TWO TRAINING SCRIPTS (also inheritance)
+- [ ] Classification mixes individuals if folders not separated, fix this
+- [ ] Breaking apart song for inference context length should be its own script
+- [ ] Collate by song length to not do extreme padding
+- [ ] Settings to set root? for path
+- [ ] Add ability to add song detector to audio2spec.py
+- [ ] A "dataloader" util for birdset iteration
+- [ ] audio2spec needs to be refactored and simplified
+- [ ] Standardize the data fields that are saved into the json files
+- [ ] Discrepancy in VRAM usage between
+- [ ] Rename to SongMAE everywhere
+- [ ] Reconstructions should all be noramlized patch wise (if used during training) to prevent jarring viz
+- [ ] We need a central util for managing the json format ... this will make life so much easier
+- [ ] snippification of datasets (for easy upload and faster training)
+- [ ] remove spec subfolder when sbatch audio2spec
+- [ ] early stopping for supervised train and maybe pretrain
+- [ ] revert to the old extract embedding and figure out a way to exlude padding
+- [ ] refactor all code that was touched by AI
+- [ ] make sure that plotting utils can be called independetly as well as part of the scripts they are a part of
+
+## Bugs
+
+- [ ] irregularity with number of specs made in log for XCM vs HSN_test
